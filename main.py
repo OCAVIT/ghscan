@@ -1,18 +1,25 @@
 """
-FastAPI app with background scanner loop.
-Web UI at /results and /stats.
+FastAPI entrypoint.
+
+Background tasks (all concurrent, independent):
+  _scan_loop()          — code-search scanner, N parallel workers per PAT
+  _hourly_alert_loop()  — Telegram digest every hour
+  trufflehog_loop()     — org/user sweep via trufflehog (if configured)
 """
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 
 import db
-from config import SCAN_INTERVAL
+from config import SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES
 from scanner import run_cycle
+from notifier import notify_hourly_digest, notify_infra_hourly
+from trufflehog_runner import trufflehog_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,8 +28,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-async def _loop():
-    """Background task: runs forever, one cycle per SCAN_INTERVAL seconds."""
+async def _scan_loop():
     while True:
         try:
             await run_cycle()
@@ -32,26 +38,65 @@ async def _loop():
         await asyncio.sleep(SCAN_INTERVAL)
 
 
+async def _hourly_alert_loop():
+    if not HOURLY_ALERT:
+        return
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            since      = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            by_prov    = db.get_keys_since(since)
+            new_valid  = db.get_valid_since(since)
+            total_new  = sum(r["cnt"] for r in by_prov)
+            total_valid = sum(r["valid_cnt"] for r in by_prov)
+            await notify_hourly_digest(by_prov, total_new, total_valid, new_valid)
+            log.info("hourly digest: %d new keys", total_new)
+
+            # Infra credentials hourly digest
+            infra_rows  = db.get_infra_since(since)
+            infra_total = sum(r["cnt"] for r in infra_rows)
+            infra_high  = sum(r.get("high_cnt", 0) for r in infra_rows)
+            await notify_infra_hourly(infra_rows, infra_total, infra_high)
+        except Exception as e:
+            log.error("hourly alert err: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    task = asyncio.create_task(_loop())
+    tasks = [
+        asyncio.create_task(_scan_loop(),          name="scan_loop"),
+        asyncio.create_task(_hourly_alert_loop(),  name="hourly_alert"),
+        asyncio.create_task(trufflehog_loop(),     name="trufflehog"),
+    ]
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="GitHub Key Scanner", lifespan=lifespan)
 
 
+# ── Web UI ─────────────────────────────────────────────────────────────────
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     stats = db.get_stats()
-    rows = db.get_results(valid_only=False, limit=50)
+    rows  = db.get_results(valid_only=False, limit=100)
+
+    by_prov_html = ""
+    for row in stats.get("by_provider", []):
+        by_prov_html += (
+            f"<tr><td>{row['provider'].upper()}</td>"
+            f"<td>{row['total']}</td>"
+            f"<td style='color:#4caf50'>{row['valid']}</td></tr>"
+        )
+
     rows_html = ""
     for r in rows:
-        valid_badge = "✅" if r["is_valid"] else "⚠️"
+        badge = "✅" if r["is_valid"] else "⚠️"
         rows_html += (
-            f"<tr><td>{valid_badge}</td>"
+            f"<tr><td>{badge}</td>"
             f"<td>{r['provider']}</td>"
             f"<td><code>{r['key_preview']}</code></td>"
             f"<td><a href='https://github.com/{r['repo']}' target='_blank'>{r['repo']}</a></td>"
@@ -59,20 +104,41 @@ async def root():
             f"<td>{r['file_type']}</td>"
             f"<td>{r['discovered_at'][:16]}</td></tr>\n"
         )
+
+    n_tokens = len(GITHUB_TOKENS)
     return f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
 <title>Key Scanner</title>
-<style>body{{font-family:monospace;background:#111;color:#eee;padding:20px}}
-table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #333;padding:6px 10px;text-align:left}}
-th{{background:#222}}tr:hover{{background:#1a1a1a}}a{{color:#58a6ff}}code{{background:#222;padding:2px 5px}}</style>
-</head><body>
-<h2>🔍 GitHub Key Scanner</h2>
-<p>Repos scanned: <b>{stats['repos_scanned']}</b> &nbsp;|&nbsp;
-   Files: <b>{stats['files_scanned']}</b> &nbsp;|&nbsp;
-   Keys found: <b>{stats['keys_found']}</b> &nbsp;|&nbsp;
-   Valid: <b style='color:#4caf50'>{stats['keys_valid']}</b></p>
-<table><thead><tr><th>Status</th><th>Provider</th><th>Key</th>
-<th>Repo</th><th>Stars</th><th>Type</th><th>Found at</th></tr></thead>
-<tbody>{rows_html}</tbody></table>
+<style>
+  body{{font-family:monospace;background:#111;color:#eee;padding:20px}}
+  table{{border-collapse:collapse;width:100%;margin-bottom:20px}}
+  th,td{{border:1px solid #333;padding:6px 10px;text-align:left}}
+  th{{background:#222}}tr:hover{{background:#1a1a1a}}
+  a{{color:#58a6ff}}code{{background:#222;padding:2px 5px;border-radius:3px}}
+  .stat{{display:inline-block;margin:0 16px 8px 0;font-size:1.1em}}
+  h3{{color:#aaa;margin-top:28px;border-bottom:1px solid #333;padding-bottom:6px}}
+  .badge{{font-size:.8em;background:#1e3a5f;color:#58a6ff;padding:2px 6px;border-radius:4px}}
+</style></head><body>
+<h2>🔍 GitHub Key Scanner
+  <span class='badge'>{n_tokens} token{"s" if n_tokens!=1 else ""} · {MAX_PAGES} pages/query</span>
+</h2>
+<p>
+  <span class='stat'>Repos: <b>{stats['repos_scanned']}</b></span>
+  <span class='stat'>Files: <b>{stats['files_scanned']}</b></span>
+  <span class='stat'>Keys: <b>{stats['keys_found']}</b></span>
+  <span class='stat'>Valid: <b style='color:#4caf50'>{stats['keys_valid']}</b></span>
+</p>
+<h3>By Provider</h3>
+<table style='width:auto'>
+  <thead><tr><th>Provider</th><th>Found</th><th>Valid</th></tr></thead>
+  <tbody>{by_prov_html}</tbody>
+</table>
+<p><a href='/infra'>🏗️ Infrastructure Credentials →</a></p>
+<h3>Recent 100 Keys</h3>
+<table>
+  <thead><tr><th>Status</th><th>Provider</th><th>Key</th>
+  <th>Repo</th><th>Stars</th><th>Type</th><th>Found at</th></tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
 </body></html>"""
 
 
@@ -84,6 +150,95 @@ async def stats():
 @app.get("/results")
 async def results(valid_only: bool = Query(False), limit: int = Query(200)):
     return db.get_results(valid_only=valid_only, limit=limit)
+
+
+@app.get("/infra", response_class=HTMLResponse)
+async def infra_page(risk: str = Query(None), limit: int = Query(200)):
+    istats = db.get_infra_stats()
+    rows   = db.get_infra_results(risk_filter=risk, limit=limit)
+
+    _RISK_COLOR = {"high": "#ff4444", "medium": "#ffaa00", "low": "#888"}
+    _RISK_BG    = {"high": "#2a0000", "medium": "#1a1200", "low": "#111"}
+
+    by_type_html = ""
+    for row in istats.get("by_type", []):
+        by_type_html += (
+            f"<tr><td>{row['cred_type'].upper()}</td>"
+            f"<td>{row['total']}</td>"
+            f"<td style='color:#ff4444'>{row['high_risk']}</td>"
+            f"<td style='color:#ffaa00'>{row['med_risk']}</td></tr>"
+        )
+
+    by_dest_html = ""
+    for row in istats.get("by_dest", [])[:10]:
+        by_dest_html += (
+            f"<tr><td><code>{row['destination']}</code></td>"
+            f"<td>{row['cred_type']}</td>"
+            f"<td>{row['cnt']}</td></tr>"
+        )
+
+    rows_html = ""
+    for r in rows:
+        rl  = r.get("risk_level", "low")
+        col = _RISK_COLOR.get(rl, "#888")
+        bg  = _RISK_BG.get(rl, "#111")
+        dest = f"<code>{r['destination']}</code>" if r.get("destination") else "—"
+        rows_html += (
+            f"<tr style='background:{bg}'>"
+            f"<td style='color:{col};font-weight:bold'>{rl.upper()}</td>"
+            f"<td>{r['cred_type'].upper()}</td>"
+            f"<td><code>{r['cred_preview']}</code></td>"
+            f"<td>{dest}</td>"
+            f"<td><a href='https://github.com/{r['repo']}' target='_blank'>{r['repo']}</a></td>"
+            f"<td>⭐{r['repo_stars']}</td>"
+            f"<td>{r['file_type']}</td>"
+            f"<td>{r['discovered_at'][:16]}</td></tr>\n"
+        )
+
+    filter_links = (
+        "<a href='/infra'>All</a> · "
+        "<a href='/infra?risk=high' style='color:#ff4444'>High</a> · "
+        "<a href='/infra?risk=medium' style='color:#ffaa00'>Medium</a> · "
+        "<a href='/infra?risk=low' style='color:#888'>Low</a>"
+    )
+
+    return f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
+<title>Infra Credentials</title>
+<style>
+  body{{font-family:monospace;background:#111;color:#eee;padding:20px}}
+  table{{border-collapse:collapse;width:100%;margin-bottom:20px}}
+  th,td{{border:1px solid #333;padding:6px 10px;text-align:left}}
+  th{{background:#222}}tr:hover{{filter:brightness(1.2)}}
+  a{{color:#58a6ff}}code{{background:#222;padding:2px 5px;border-radius:3px}}
+  .stat{{display:inline-block;margin:0 16px 8px 0;font-size:1.1em}}
+  h3{{color:#aaa;margin-top:28px;border-bottom:1px solid #333;padding-bottom:6px}}
+</style></head><body>
+<h2>🏗️ Infrastructure Credentials</h2>
+<p>
+  <span class='stat'>Total: <b>{istats['total']}</b></span>
+  <span class='stat' style='color:#ff4444'>High risk: <b>{istats['high']}</b></span>
+  <span class='stat' style='color:#ffaa00'>Medium: <b>{istats['medium']}</b></span>
+</p>
+<p>{filter_links}</p>
+<h3>By Type</h3>
+<table style='width:auto'>
+  <thead><tr><th>Type</th><th>Total</th><th>High</th><th>Medium</th></tr></thead>
+  <tbody>{by_type_html}</tbody>
+</table>
+{"<h3>Top Destinations</h3><table style='width:auto'><thead><tr><th>Host</th><th>Type</th><th>Count</th></tr></thead><tbody>" + by_dest_html + "</tbody></table>" if by_dest_html else ""}
+<h3>Findings ({risk or "all"}, limit {limit})</h3>
+<table>
+  <thead><tr><th>Risk</th><th>Type</th><th>Preview</th><th>Destination</th>
+  <th>Repo</th><th>Stars</th><th>File type</th><th>Found at</th></tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+<p><a href='/'>← AI Keys</a></p>
+</body></html>"""
+
+
+@app.get("/infra/stats")
+async def infra_stats():
+    return db.get_infra_stats()
 
 
 @app.get("/health")
