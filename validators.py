@@ -236,35 +236,120 @@ async def validate_elevenlabs(key: str) -> bool:
         return False
 
 
-_ARK_ENDPOINTS = [
-    # China mainland (highest traffic)
-    "https://ark.cn-beijing.volces.com/api/v3/models",
-    "https://ark.cn-shanghai.volces.com/api/v3/models",
-    "https://ark.cn-guangzhou.volces.com/api/v3/models",
-    # International
-    "https://ark.ap-southeast.volces.com/api/v3/models",   # Singapore
-    "https://ark.us-east-1.volces.com/api/v3/models",      # Virginia
-    "https://ark.eu-central-1.volces.com/api/v3/models",   # Frankfurt
-    "https://ark.ap-northeast-1.volces.com/api/v3/models", # Tokyo
+# ARK / Volcengine probe regions. Try CN mainland first (most accounts),
+# fall back to international endpoint for Volcengine Global keys.
+_ARK_REGIONS = [
+    "https://ark.cn-beijing.volces.com",
+    "https://ark.ap-southeast.volces.com",
 ]
 
-# Volcengine requires the Host header matching the region endpoint.
-# Without it some regions return 400/ERR with SNI-based routing.
-async def validate_ark(key: str) -> bool:
-    for url in _ARK_ENDPOINTS:
-        host = urllib.parse.urlparse(url).hostname or ""
+# Seedance video models — probe order: cheapest first to minimize cost
+# if validation accidentally creates a task (we cancel best-effort below).
+_ARK_SEEDANCE_MODELS = [
+    "doubao-seedance-1-0-lite-i2v-250428",   # image-to-video lite
+    "doubao-seedance-1-0-lite-t2v-250428",   # text-to-video lite
+    "doubao-seedance-1-0-pro-250528",        # pro (most expensive)
+]
+
+# Cheap Doubao chat model for the auth pre-check — distinguishes
+# "dead key" from "alive key but no Seedance access".
+_ARK_DOUBAO_CHAT = "doubao-1-5-lite-32k-250115"
+
+
+def _ark_err_code(body: dict) -> str:
+    """Volcengine returns either {error: {code, message}} or top-level Code/Message."""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if isinstance(err, dict):
+        return err.get("code", "") or ""
+    return body.get("Code", "") or body.get("code", "") or ""
+
+
+async def _ark_post(url: str, key: str, payload: dict) -> tuple[int, dict]:
+    host = urllib.parse.urlparse(url).hostname or ""
+    try:
+        async with _client() as c:
+            r = await c.post(
+                url,
+                headers={"Authorization": f"Bearer {key}", "Host": host},
+                json=payload,
+            )
         try:
-            async with _client() as c:
-                r = await c.get(
-                    url,
-                    headers={"Authorization": f"Bearer {key}", "Host": host},
-                )
-                if r.status_code in (200, 403, 429):
-                    return True
-                if r.status_code == 401:
-                    continue
-        except Exception as e:
-            log.debug("ark validate err (%s): %s", url, e)
+            return r.status_code, r.json()
+        except Exception:
+            return r.status_code, {}
+    except Exception as e:
+        log.debug("ark post err (%s): %s", url, e)
+        return 0, {}
+
+
+async def _ark_cancel_task(region: str, key: str, task_id: str):
+    """Best-effort cancel — bounds cost if validation accidentally created a task."""
+    try:
+        async with _client() as c:
+            await c.delete(
+                f"{region}/api/v3/contents/generations/tasks/{task_id}",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+    except Exception:
+        pass
+
+
+async def validate_ark(key: str) -> bool:
+    """
+    True only if ARK key auth-passes AND has at least one Seedance video
+    model activated. Chat-only or zero-models accounts → invalid: we harvest
+    specifically for the seedance video pipeline, a Doubao-text-only key
+    is useless to us.
+
+    Detects:
+      - 401 / AuthenticationFailed → dead key
+      - ModelNotOpen on every Seedance model → no video access
+      - InvalidEndpointOrModel.NotFound on every probe → no Seedance available
+      - 200 / 429 / param-level 4xx on any Seedance model → valid
+    """
+    for region in _ARK_REGIONS:
+        # Step 1: auth pre-check via cheap Doubao chat (~$0.0000005).
+        status, body = await _ark_post(f"{region}/api/v3/chat/completions", key, {
+            "model":      _ARK_DOUBAO_CHAT,
+            "messages":   [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        })
+        if status == 0:
+            continue  # network issue — try next region
+        code = _ark_err_code(body)
+        if status == 401 or code in ("AuthenticationFailed", "InvalidApiKey", "Unauthorized"):
+            return False  # dead key — no point trying other regions
+
+        # Step 2: probe Seedance models via task endpoint with empty content.
+        # Volcengine validates auth → model permission → params in that order,
+        # so an activated model gives a param-level 4xx (no billing) and a
+        # non-activated model gives ModelNotOpen / NotFound.
+        tasks_url = f"{region}/api/v3/contents/generations/tasks"
+        for model in _ARK_SEEDANCE_MODELS:
+            s, b = await _ark_post(tasks_url, key, {
+                "model":   model,
+                "content": [],
+            })
+            if s == 200:
+                # Task accidentally created (check order may differ from docs) — cancel
+                task_id = (b.get("id") or "").strip()
+                if task_id:
+                    await _ark_cancel_task(region, key, task_id)
+                return True
+            if s == 429:
+                return True  # rate-limited but auth + model OK
+            c = _ark_err_code(b)
+            if c in ("ModelNotOpen", "InvalidEndpointOrModel.NotFound"):
+                continue   # try next Seedance model
+            if 400 <= s < 500:
+                return True  # param-level 4xx → model activated, just bad request
+
+        # Auth passed in this region but every Seedance model is dead → useless key
+        return False
+
+    # All regions unreachable
     return False
 
 
