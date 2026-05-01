@@ -368,55 +368,157 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"deepseek" "sk-" filename:config.py',             "deepseek", "config"),
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ELEVENLABS
+    # ELEVENLABS  (voice/TTS/speech context — text-to-speech API)
     # ═══════════════════════════════════════════════════════════════════════
 
+    # .env — all common var names
     ('"ELEVENLABS_API_KEY" filename:.env',              "elevenlabs", "env"),
     ('"ELEVEN_API_KEY" filename:.env',                  "elevenlabs", "env"),
     ('"XI_API_KEY" filename:.env',                      "elevenlabs", "env"),
+    ('"TTS_API_KEY" "elevenlabs" filename:.env',        "elevenlabs", "env"),
+    ('"VOICE_API_KEY" "elevenlabs" filename:.env',      "elevenlabs", "env"),
     ('"elevenlabs" "xi-api-key" filename:.env',         "elevenlabs", "env"),
+    ('"ELEVENLABS_API_KEY" filename:.env.local',        "elevenlabs", "env"),
+    ('"ELEVENLABS_API_KEY" filename:.env.production',   "elevenlabs", "env"),
+
+    # TTS/voice config files — devs often keep TTS settings separate
+    ('"ELEVENLABS_API_KEY" filename:tts_config.py',    "elevenlabs", "config"),
+    ('"ELEVENLABS_API_KEY" filename:voice_config.py',  "elevenlabs", "config"),
+    ('"XI_API_KEY" filename:voice_settings.json',      "elevenlabs", "config"),
+    ('"elevenlabs" "api_key" filename:config.py',      "elevenlabs", "config"),
+    ('"elevenlabs" "api_key" filename:config.ts',      "elevenlabs", "config"),
+    ('"elevenlabs" "api_key" filename:config.yaml',    "elevenlabs", "config"),
+    ('"elevenlabs" "api_key" filename:settings.py',    "elevenlabs", "config"),
+
+    # Code — multi-language
     ('"ELEVENLABS_API_KEY" language:python',            "elevenlabs", "code"),
     ('"ELEVENLABS_API_KEY" language:javascript',        "elevenlabs", "code"),
     ('"ELEVENLABS_API_KEY" language:typescript',        "elevenlabs", "code"),
+    ('"ELEVENLABS_API_KEY" language:go',                "elevenlabs", "code"),
+    ('"ELEVENLABS_API_KEY" language:java',              "elevenlabs", "code"),
+    ('"ELEVENLABS_API_KEY" language:php',               "elevenlabs", "code"),
+    ('"ELEVENLABS_API_KEY" language:ruby',              "elevenlabs", "code"),
     ('"XI_API_KEY" language:python',                    "elevenlabs", "code"),
+    ('"XI_API_KEY" language:javascript',                "elevenlabs", "code"),
     ('"elevenlabs.io" "api_key" language:python',       "elevenlabs", "code"),
+    ('"elevenlabs.io" "api_key" language:javascript',   "elevenlabs", "code"),
+    ('"api.elevenlabs.io" language:python',             "elevenlabs", "code"),
+    ('"api.elevenlabs.io" language:go',                 "elevenlabs", "code"),
+    ('"api.elevenlabs.io" language:typescript',         "elevenlabs", "code"),
+    ('"text_to_speech" "elevenlabs" language:python',   "elevenlabs", "code"),
+    ('"voice_id" "xi-api-key" language:python',         "elevenlabs", "code"),
+    ('"voice_id" "xi-api-key" language:javascript',     "elevenlabs", "code"),
+
+    # Notebooks — data science TTS experiments
+    ('"ELEVENLABS_API_KEY" extension:ipynb',            "elevenlabs", "notebook"),
+    ('"XI_API_KEY" extension:ipynb',                    "elevenlabs", "notebook"),
+
+    # CI/CD + Docker
     ('"ELEVENLABS_API_KEY" filename:docker-compose.yml',"elevenlabs", "docker"),
+    ('"ELEVENLABS_API_KEY" path:.github/workflows',     "elevenlabs", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ARK / VOLCENGINE / DOUBAO / SEEDANCE 2.0
+    # ARK / VOLCENGINE / DOUBAO / SEEDANCE 2.0  (video/image generation)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"ARK_API_KEY" filename:.env',                     "ark", "env"),
-    ('"VOLCENGINE_API_KEY" filename:.env',              "ark", "env"),
-    ('"DOUBAO_API_KEY" filename:.env',                  "ark", "env"),
-    ('"SEEDANCE_API_KEY" filename:.env',                "ark", "env"),
-    ('"VOLC_ACCESSKEY" filename:.env',                  "ark", "env"),
-    ('"ARK_API_KEY" extension:ipynb',                   "ark", "notebook"),
-    ('"DOUBAO_API_KEY" extension:ipynb',                "ark", "notebook"),
-    ('"ark.cn-beijing.volces.com" language:python',     "ark", "code"),
-    ('"ark.cn-beijing.volces.com" language:javascript', "ark", "code"),
-    ('"ark.cn-beijing.volces.com" language:typescript', "ark", "code"),
-    ('"ark.cn-beijing.volces.com" language:go',         "ark", "code"),
-    ('"ark.cn-beijing.volces.com" language:java',       "ark", "code"),
-    ('"ark.ap-southeast.volces.com" language:python',   "ark", "code"),
-    ('"VOLCENGINE_API_KEY" language:python',            "ark", "code"),
-    ('"DOUBAO_API_KEY" language:python',                "ark", "code"),
-    ('"ARK_API_KEY" language:python',                   "ark", "code"),
-    ('"ARK_API_KEY" language:javascript',               "ark", "code"),
-    ('"ARK_API_KEY" language:go',                       "ark", "code"),
-    ('"ARK_API_KEY" language:java',                     "ark", "code"),
-    ('"seedance" "api_key" language:python',            "ark", "code"),
-    ('"ARK_API_KEY" filename:docker-compose.yml',       "ark", "docker"),
-    ('"VOLCENGINE_API_KEY" filename:docker-compose.yml',"ark", "docker"),
+    # .env — all var names
+    ('"ARK_API_KEY" filename:.env',                         "ark", "env"),
+    ('"VOLCENGINE_API_KEY" filename:.env',                  "ark", "env"),
+    ('"DOUBAO_API_KEY" filename:.env',                      "ark", "env"),
+    ('"SEEDANCE_API_KEY" filename:.env',                    "ark", "env"),
+    ('"VOLC_ACCESSKEY" filename:.env',                      "ark", "env"),
+    ('"BYTEDANCE_API_KEY" filename:.env',                   "ark", "env"),
+    ('"VOLC_API_KEY" filename:.env',                        "ark", "env"),
+    ('"ARK_API_KEY" filename:.env.local',                   "ark", "env"),
+    ('"ARK_API_KEY" filename:.env.production',              "ark", "env"),
+
+    # Video/image gen config files
+    ('"ARK_API_KEY" filename:video_config.py',              "ark", "config"),
+    ('"SEEDANCE_API_KEY" filename:video_config.py',         "ark", "config"),
+    ('"ARK_API_KEY" filename:config.py',                    "ark", "config"),
+    ('"ARK_API_KEY" filename:config.yaml',                  "ark", "config"),
+    ('"ARK_API_KEY" filename:config.ts',                    "ark", "config"),
+
+    # Notebooks
+    ('"ARK_API_KEY" extension:ipynb',                       "ark", "notebook"),
+    ('"DOUBAO_API_KEY" extension:ipynb',                    "ark", "notebook"),
+    ('"VOLCENGINE_API_KEY" extension:ipynb',                "ark", "notebook"),
+
+    # All Volcengine regional endpoints (Beijing, Shanghai, Guangzhou, intl)
+    ('"ark.cn-beijing.volces.com" language:python',         "ark", "code"),
+    ('"ark.cn-beijing.volces.com" language:javascript',     "ark", "code"),
+    ('"ark.cn-beijing.volces.com" language:typescript',     "ark", "code"),
+    ('"ark.cn-beijing.volces.com" language:go',             "ark", "code"),
+    ('"ark.cn-beijing.volces.com" language:java',           "ark", "code"),
+    ('"ark.cn-beijing.volces.com" language:php',            "ark", "code"),
+    ('"ark.cn-beijing.volces.com" language:rust',           "ark", "code"),
+    ('"ark.cn-shanghai.volces.com" language:python',        "ark", "code"),
+    ('"ark.cn-shanghai.volces.com" language:go',            "ark", "code"),
+    ('"ark.cn-guangzhou.volces.com" language:python',       "ark", "code"),
+    ('"ark.ap-southeast.volces.com" language:python',       "ark", "code"),
+    ('"ark.ap-southeast.volces.com" language:javascript',   "ark", "code"),
+    ('"ark.us-east-1.volces.com" language:python',          "ark", "code"),
+    ('"ark.eu-central-1.volces.com" language:python',       "ark", "code"),
+
+    # Named env vars in code
+    ('"VOLCENGINE_API_KEY" language:python',                "ark", "code"),
+    ('"DOUBAO_API_KEY" language:python',                    "ark", "code"),
+    ('"DOUBAO_API_KEY" language:javascript',                "ark", "code"),
+    ('"DOUBAO_API_KEY" language:typescript',                "ark", "code"),
+    ('"DOUBAO_API_KEY" language:java',                      "ark", "code"),
+    ('"DOUBAO_API_KEY" language:go',                        "ark", "code"),
+    ('"ARK_API_KEY" language:python',                       "ark", "code"),
+    ('"ARK_API_KEY" language:javascript',                   "ark", "code"),
+    ('"ARK_API_KEY" language:typescript',                   "ark", "code"),
+    ('"ARK_API_KEY" language:go',                           "ark", "code"),
+    ('"ARK_API_KEY" language:java',                         "ark", "code"),
+    ('"ARK_API_KEY" language:php',                          "ark", "code"),
+    ('"ARK_API_KEY" language:rust',                         "ark", "code"),
+    ('"ARK_API_KEY" language:kotlin',                       "ark", "code"),
+    ('"seedance" "api_key" language:python',                "ark", "code"),
+    ('"text_to_video" "ARK_API_KEY" language:python',       "ark", "code"),
+    ('"image_generation" "ARK_API_KEY" language:python',    "ark", "code"),
+    ('"doubao" "api_key" language:python',                  "ark", "code"),
+    ('"doubao" "api_key" language:javascript',              "ark", "code"),
+    ('"doubao" "api_key" language:java',                    "ark", "code"),
+
+    # Docker / CI
+    ('"ARK_API_KEY" filename:docker-compose.yml',           "ark", "docker"),
+    ('"VOLCENGINE_API_KEY" filename:docker-compose.yml',    "ark", "docker"),
+    ('"ARK_API_KEY" path:.github/workflows',                "ark", "ci"),
+    ('"DOUBAO_API_KEY" path:.github/workflows',             "ark", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
-    # HAPPY HORSE / RUNHAPPYHORSE  (owner's own service — defensive scan)
+    # HAPPY HORSE / RUNHAPPYHORSE  (image/video gen — owner's own service)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"HAPPY_HORSE_API_KEY" filename:.env',             "happyhorse", "env"),
-    ('"RUNHAPPYHORSE" filename:.env',                   "happyhorse", "env"),
-    ('"runhappyhorse.net" "api_key"',                   "happyhorse", "code"),
-    ('"runhappyhorse.net" "api_key" language:python',   "happyhorse", "code"),
-    ('"runhappyhorse.net" "api_key" language:javascript',"happyhorse", "code"),
-    ('"happyhorse" "api_key" filename:.env',            "happyhorse", "env"),
+    # .env
+    ('"HAPPY_HORSE_API_KEY" filename:.env',               "happyhorse", "env"),
+    ('"HH_API_KEY" filename:.env',                        "happyhorse", "env"),
+    ('"HAPPYHORSE_API_KEY" filename:.env',                "happyhorse", "env"),
+    ('"RUNHAPPYHORSE_API_KEY" filename:.env',             "happyhorse", "env"),
+    ('"RUNHAPPYHORSE" filename:.env',                     "happyhorse", "env"),
+    ('"happyhorse" "api_key" filename:.env',              "happyhorse", "env"),
+
+    # Image/video gen config patterns
+    ('"runhappyhorse.net" "api_key" filename:config.py',  "happyhorse", "config"),
+    ('"runhappyhorse.net" "api_key" filename:config.ts',  "happyhorse", "config"),
+    ('"happyhorse" "api_key" filename:video_config.py',   "happyhorse", "config"),
+    ('"happyhorse" "image_generation" language:python',   "happyhorse", "code"),
+    ('"happyhorse" "text_to_video" language:python',      "happyhorse", "code"),
+
+    # Code — multi-language
+    ('"runhappyhorse.net" "api_key"',                     "happyhorse", "code"),
+    ('"runhappyhorse.net" "api_key" language:python',     "happyhorse", "code"),
+    ('"runhappyhorse.net" "api_key" language:javascript', "happyhorse", "code"),
+    ('"runhappyhorse.net" "api_key" language:typescript', "happyhorse", "code"),
+    ('"runhappyhorse.net" "api_key" language:go',         "happyhorse", "code"),
+    ('"runhappyhorse.net" "api_key" language:java',       "happyhorse", "code"),
+    ('"HAPPY_HORSE_API_KEY" language:python',             "happyhorse", "code"),
+    ('"HAPPY_HORSE_API_KEY" language:javascript',         "happyhorse", "code"),
+    ('"HH_API_KEY" language:python',                      "happyhorse", "code"),
+
+    # Notebooks
+    ('"HAPPY_HORSE_API_KEY" extension:ipynb',             "happyhorse", "notebook"),
+    ('"runhappyhorse" extension:ipynb',                   "happyhorse", "notebook"),
 ]

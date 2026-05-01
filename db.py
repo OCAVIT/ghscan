@@ -77,6 +77,15 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_infra_dest     ON infra_findings(destination);
         CREATE INDEX IF NOT EXISTS idx_infra_at       ON infra_findings(discovered_at DESC);
         """)
+        # Migrations — add columns if they don't exist yet (idempotent)
+        for col, defn in [
+            ("is_validated",     "INTEGER DEFAULT -1"),   # -1=pending, 0=invalid, 1=valid
+            ("validation_result", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE infra_findings ADD COLUMN {col} {defn}")
+            except Exception:
+                pass  # already exists
 
 
 def _now():
@@ -285,6 +294,14 @@ def get_infra_stats() -> dict:
             "by_type": by_type,
             "by_dest": by_dest,
         }
+
+
+def update_infra_validation(cred_hash: str, is_validated: int, result: str = ""):
+    with _conn() as c:
+        c.execute(
+            "UPDATE infra_findings SET is_validated=?, validation_result=? WHERE cred_hash=?",
+            (is_validated, result, cred_hash),
+        )
 
 
 def get_infra_since(since_iso: str) -> list[dict]:

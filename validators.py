@@ -11,8 +11,11 @@ Set on Railway:
   (country-rotate automatically — no extra config needed)
 """
 
+import asyncio
 import os
 import logging
+import urllib.parse
+
 import httpx
 
 log = logging.getLogger(__name__)
@@ -107,15 +110,29 @@ async def validate_elevenlabs(key: str) -> bool:
         return False
 
 
+_ARK_ENDPOINTS = [
+    # China mainland (highest traffic)
+    "https://ark.cn-beijing.volces.com/api/v3/models",
+    "https://ark.cn-shanghai.volces.com/api/v3/models",
+    "https://ark.cn-guangzhou.volces.com/api/v3/models",
+    # International
+    "https://ark.ap-southeast.volces.com/api/v3/models",   # Singapore
+    "https://ark.us-east-1.volces.com/api/v3/models",      # Virginia
+    "https://ark.eu-central-1.volces.com/api/v3/models",   # Frankfurt
+    "https://ark.ap-northeast-1.volces.com/api/v3/models", # Tokyo
+]
+
+# Volcengine requires the Host header matching the region endpoint.
+# Without it some regions return 400/ERR with SNI-based routing.
 async def validate_ark(key: str) -> bool:
-    urls = [
-        "https://ark.cn-beijing.volces.com/api/v3/models",
-        "https://ark.ap-southeast.volces.com/api/v3/models",
-    ]
-    for url in urls:
+    for url in _ARK_ENDPOINTS:
+        host = urllib.parse.urlparse(url).hostname or ""
         try:
             async with _client() as c:
-                r = await c.get(url, headers={"Authorization": f"Bearer {key}"})
+                r = await c.get(
+                    url,
+                    headers={"Authorization": f"Bearer {key}", "Host": host},
+                )
                 if r.status_code in (200, 403, 429):
                     return True
                 if r.status_code == 401:
@@ -145,3 +162,107 @@ async def validate(provider: str, key: str) -> bool:
     if fn is None:
         return False
     return await fn(key)
+
+
+# ── Infrastructure credential validators ───────────────────────────────────────
+
+_DB_PORTS = {
+    "postgres": 5432, "postgresql": 5432,
+    "mysql": 3306, "mariadb": 3306,
+    "mongodb": 27017, "mongodb+srv": 27017,
+    "redis": 6379, "rediss": 6380,
+    "mssql": 1433, "sqlserver": 1433,
+    "clickhouse": 9000, "cassandra": 9042,
+    "elasticsearch": 9200, "neo4j": 7474,
+}
+
+
+async def validate_database(cred: str) -> bool:
+    """TCP connect to host:port extracted from DSN. Confirms host is reachable."""
+    try:
+        p = urllib.parse.urlparse(cred)
+        host = p.hostname
+        if not host or host in ("localhost", "127.0.0.1", "::1"):
+            return False
+        port = p.port or _DB_PORTS.get((p.scheme or "").lower(), 5432)
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=6.0
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+
+async def validate_aws(cred: str) -> bool:
+    """
+    Call STS GetCallerIdentity with extracted AKID+secret.
+    Valid = 200 (works) OR SignatureDoesNotMatch / AccessDenied (key exists, wrong secret or permissions).
+    Invalid = InvalidClientTokenId (key doesn't exist).
+    """
+    try:
+        kid, rest = cred.split(":", 1)
+        secret, _ = rest.rsplit("@", 1)
+        if "secret_unknown" in secret or len(secret) < 20:
+            return False
+
+        def _sts_check():
+            try:
+                import boto3
+                from botocore.exceptions import ClientError, NoCredentialsError
+                client = boto3.client(
+                    "sts",
+                    aws_access_key_id=kid,
+                    aws_secret_access_key=secret,
+                    region_name="us-east-1",
+                )
+                client.get_caller_identity()
+                return True
+            except Exception as exc:
+                code = getattr(getattr(exc, "response", {}), "get", lambda k, d="": d)("Error", {}).get("Code", "")
+                if not code and hasattr(exc, "response"):
+                    code = exc.response.get("Error", {}).get("Code", "")
+                # Key exists but auth/perm error = real key
+                return code in ("SignatureDoesNotMatch", "AccessDenied",
+                                "ExpiredTokenException", "TokenRefreshRequired")
+
+        return await asyncio.to_thread(_sts_check)
+    except Exception as e:
+        log.debug("aws validate err: %s", e)
+        return False
+
+
+async def validate_ssh(cred: str) -> bool:
+    """Parse PEM key structure. Valid = parses without error."""
+    if "BEGIN" not in cred or "PRIVATE KEY" not in cred:
+        return False
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        await asyncio.to_thread(load_pem_private_key, cred.encode(), None)
+        return True
+    except Exception:
+        return False
+
+
+async def validate_alibaba(cred: str) -> bool:
+    return False  # requires Alibaba SDK + STS; skip for now
+
+
+async def validate_azure(cred: str) -> bool:
+    return False  # requires Azure SDK; skip for now
+
+
+async def validate_infra_token(cred: str) -> bool:
+    return False  # deploy tokens require per-service API call; skip for now
+
+
+INFRA_VALIDATORS: dict[str, callable] = {
+    "database": validate_database,
+    "ssh":      validate_ssh,
+    "aws":      validate_aws,
+    "alibaba":  validate_alibaba,
+    "azure":    validate_azure,
+    "infra":    validate_infra_token,
+    "gcp":      validate_infra_token,
+}

