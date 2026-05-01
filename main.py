@@ -9,6 +9,7 @@ Background tasks (all concurrent, independent):
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
@@ -16,8 +17,9 @@ from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
 import db
-from config import SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES, INFRA_LOW_RISK_MAX_DAYS
-from scanner import run_cycle
+from config import (SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES,
+                    INFRA_LOW_RISK_MAX_DAYS, DB_PATH)
+from scanner import run_cycle, _TOKEN_STATUS
 from notifier import notify_hourly_digest, notify_infra_hourly, flush_unverified_buffer
 from trufflehog_runner import trufflehog_loop
 
@@ -273,4 +275,46 @@ async def infra_stats():
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    alive   = sum(1 for s in _TOKEN_STATUS.values() if s.get("alive", True))
+    total_t = len(GITHUB_TOKENS)
+    db_mb   = round(os.path.getsize(DB_PATH) / 1024 / 1024, 2) if os.path.exists(DB_PATH) else 0
+    return {
+        "ok":     alive > 0,
+        "tokens": {
+            "total": total_t,
+            "alive": alive if _TOKEN_STATUS else "unchecked",
+            "dead":  total_t - alive if _TOKEN_STATUS else 0,
+            "status": {
+                k: {
+                    "alive":     v.get("alive"),
+                    "remaining": v.get("remaining"),
+                    "limit":     v.get("limit"),
+                }
+                for k, v in _TOKEN_STATUS.items()
+            },
+        },
+        "db_mb":        db_mb,
+        "files_scanned": db.get_stats().get("files_scanned", 0),
+    }
+
+
+@app.post("/admin/vacuum")
+async def admin_vacuum():
+    """Full SQLite VACUUM — repacks DB file after bulk deletes. Takes a few seconds."""
+    before = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+
+    def _do():
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
+        conn.close()
+
+    await asyncio.to_thread(_do)
+    after = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+    return {
+        "ok":       True,
+        "before_mb": round(before / 1024 / 1024, 2),
+        "after_mb":  round(after  / 1024 / 1024, 2),
+        "freed_mb":  round((before - after) / 1024 / 1024, 2),
+    }

@@ -32,13 +32,18 @@ from config import (
 from patterns import QUERIES, EXTRACTORS, is_skippable_path
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate, INFRA_VALIDATORS
-from notifier import notify_found, notify_cycle_done, notify_infra_found
+from notifier import notify_found, notify_cycle_done, notify_infra_found, notify_dead_token
 
 # Intersecting track: AI queries are the search vector; infra extractors run
 # on the same files. This guarantees infra creds come only from AI-related repos.
 ALL_QUERIES = QUERIES
 
 log = logging.getLogger(__name__)
+
+# ── Token health tracking ──────────────────────────────────────────────────────
+# Updated by _check_search_quota; read by /health endpoint and dead-token alert.
+_TOKEN_STATUS: dict[str, dict] = {}  # token[:8] → {alive, remaining, reset_at, limit}
+_DEAD_ALERTED: set[str] = set()      # tokens already alerted this session (avoid spam)
 
 _BASE = "https://api.github.com"
 
@@ -112,23 +117,31 @@ async def _gh_get(client: httpx.AsyncClient, url: str,
     return None
 
 
-async def _check_search_quota(client: httpx.AsyncClient, token_headers: dict) -> int:
+async def _check_search_quota(client: httpx.AsyncClient, token_headers: dict,
+                              token: str = "") -> int:
     """
     Returns remaining search requests for this token via /rate_limit.
     This endpoint is NOT counted against the quota (GitHub documented behaviour).
     Returns -1 on failure (treat as quota available).
+    Returns -2 if the token is dead (401).
+    Updates _TOKEN_STATUS for /health endpoint.
     """
+    tkey = (token or token_headers.get("Authorization", "?"))[:8].lstrip("Bearer ").strip()[:8]
     try:
-        r = await client.get(
-            f"{_BASE}/rate_limit",
-            headers=token_headers,
-            timeout=10,
-        )
+        r = await client.get(f"{_BASE}/rate_limit", headers=token_headers, timeout=10)
+        if r.status_code == 401:
+            _TOKEN_STATUS[tkey] = {"alive": False, "remaining": 0, "reset_at": 0, "limit": 0}
+            return -2  # dead token sentinel
         if r.status_code == 200:
-            data = r.json()
-            remaining = data["resources"]["search"]["remaining"]
-            reset_at  = data["resources"]["search"]["reset"]
-            log.debug("search quota: %d remaining (reset %s)", remaining, reset_at)
+            data     = r.json()
+            s        = data["resources"]["search"]
+            remaining = s["remaining"]
+            reset_at  = s["reset"]
+            _TOKEN_STATUS[tkey] = {
+                "alive": True, "remaining": remaining,
+                "reset_at": reset_at, "limit": s.get("limit", 30),
+            }
+            log.debug("search quota [%s]: %d remaining (reset %s)", tkey, remaining, reset_at)
             return remaining
     except Exception:
         pass
@@ -309,15 +322,35 @@ async def _run_chunk(client: httpx.AsyncClient,
     Maintains 2s inter-query sleep → stays within 30 req/min per token.
     """
     hdrs = _gh_headers(token)
-    log.info("[w%d token=%s...] handling %d queries", worker_id, token[:8], len(queries))
+    tkey = token[:8]
+
+    # Initial health check — skip entire worker if token is dead
+    initial_quota = await _check_search_quota(client, hdrs, token)
+    if initial_quota == -2:
+        if tkey not in _DEAD_ALERTED:
+            _DEAD_ALERTED.add(tkey)
+            await notify_dead_token(tkey)
+        log.error("[w%d token=%s...] DEAD (401) — worker skipped", worker_id, tkey)
+        return
+
+    log.info("[w%d token=%s...] handling %d queries, quota=%s",
+             worker_id, tkey, len(queries),
+             initial_quota if initial_quota >= 0 else "unknown")
 
     queries_done = 0
 
     for query_str, provider, file_type in queries:
         # Check search quota every 10 queries via /rate_limit (free endpoint).
         # If < 5 requests left, sleep until reset to avoid wasting 403 round-trips.
-        if queries_done % 10 == 0:
-            remaining = await _check_search_quota(client, hdrs)
+        if queries_done % 10 == 0 and queries_done > 0:
+            remaining = await _check_search_quota(client, hdrs, token)
+            if remaining == -2:
+                # Token died mid-cycle — alert and stop this worker
+                if tkey not in _DEAD_ALERTED:
+                    _DEAD_ALERTED.add(tkey)
+                    await notify_dead_token(tkey)
+                log.error("[w%d] token died mid-cycle, stopping worker", worker_id)
+                return
             if remaining == 0:
                 log.warning("[w%d] search quota exhausted, sleeping 65s", worker_id)
                 await asyncio.sleep(65)

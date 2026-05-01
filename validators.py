@@ -13,6 +13,7 @@ Set on Railway:
 
 import asyncio
 import os
+import random
 import logging
 import urllib.parse
 
@@ -22,21 +23,26 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(15.0)
 
-# Evomi residential proxy — only for validation calls, not GitHub API calls.
-# Format: http://user:pass@rp.evomi.com:1000  (HTTP residential)
-#         http://user:pass@rp.evomi.com:1001  (HTTPS residential)
-#         http://user:pass@rp.evomi.com:1002  (SOCKS5 residential)
-_PROXY_URL = os.environ.get("EVOMI_PROXY", "")
+# Evomi residential proxy pool — validation calls only, not GitHub API.
+# Format: comma-separated list for redundancy/load distribution.
+#   EVOMI_PROXY=http://user:pass@rp.evomi.com:1000
+#   EVOMI_PROXY=http://user:pass@rp.evomi.com:1000,http://user:pass@rp.evomi.com:1001
+#
+# Evomi rotates the exit IP on every request by default (rotating residential).
+# For country targeting: http://user-country-US:pass@rp.evomi.com:1000
+# Estimated traffic: ~5KB/validation × 500 validations/day ≈ 2.5MB/day ≈ $0.001/day
+_PROXY_URLS: list[str] = [
+    u.strip()
+    for u in os.environ.get("EVOMI_PROXY", "").split(",")
+    if u.strip()
+]
 
 
 def _client(**kwargs) -> httpx.AsyncClient:
-    """Return an AsyncClient optionally routed through Evomi proxy."""
-    if _PROXY_URL:
-        return httpx.AsyncClient(
-            timeout=_TIMEOUT,
-            proxy=_PROXY_URL,
-            **kwargs,
-        )
+    """Return an AsyncClient optionally routed through a random Evomi proxy."""
+    if _PROXY_URLS:
+        proxy = random.choice(_PROXY_URLS)
+        return httpx.AsyncClient(timeout=_TIMEOUT, proxy=proxy, **kwargs)
     return httpx.AsyncClient(timeout=_TIMEOUT, **kwargs)
 
 

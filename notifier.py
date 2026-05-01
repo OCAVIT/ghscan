@@ -214,6 +214,15 @@ async def notify_infra_found(cred_type: str, cred: str, repo: str,
     await _send(msg)
 
 
+async def notify_dead_token(token_preview: str):
+    """Alert when a GitHub PAT returns 401 (revoked / expired)."""
+    await _send(
+        f"💀 <b>GITHUB TOKEN DEAD</b>\n"
+        f"Token <code>{token_preview}...</code> returned 401.\n"
+        f"Worker skipped — update <code>GITHUB_TOKENS</code> on Railway."
+    )
+
+
 async def notify_infra_hourly(by_type: list[dict], total: int, high: int):
     if total == 0:
         return
