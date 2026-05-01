@@ -131,11 +131,19 @@ async def validate_anthropic(key: str) -> bool:
                 body = r.json()
             except Exception:
                 body = {}
-            msg = _err_field(body, "error", "message").lower()
+            etype = _err_field(body, "error", "type")
+            msg   = _err_field(body, "error", "message").lower()
+            # Zero-balance / no-billing — official error type + fallback text match
+            if etype == "credit_balance_too_low":
+                return False
             if "credit balance" in msg or "insufficient" in msg or "billing" in msg:
                 return False
+            # Invalid key structure
             if r.status_code == 400 and "invalid" in msg and "api" in msg:
                 return False
+            # Overloaded is transient — key itself is fine
+            if etype == "overloaded_error":
+                return True
             return r.status_code in (429, 500, 502, 503, 504)
     except Exception as e:
         log.debug("anthropic validate err: %s", e)

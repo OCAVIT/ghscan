@@ -115,13 +115,18 @@ async def _send(text: str, parse_mode: str = "HTML"):
 async def notify_found(provider: str, key: str, repo: str, file_path: str,
                        file_url: str, stars: int, created_at: str,
                        file_type: str, is_valid: bool):
-    """Buffer an AI-key drop for the next 15-min roulette flush."""
+    """Buffer an AI-key drop for the next 15-min roulette flush.
+    Only validated keys make it into the report — unverified findings are
+    still saved to DB and visible at the / web UI, but Telegram noise is
+    reserved for keys we've confirmed actually work + have quota."""
+    if not is_valid:
+        return
     rarity = _ai_rarity(provider, key, is_valid)
     async with _lock():
         _BUFFER.append({
             "kind":      "ai",
             "rarity":    rarity,
-            "is_valid":  bool(is_valid),
+            "is_valid":  True,
             "provider":  provider,
             "key":       key,
             "repo":      repo,
