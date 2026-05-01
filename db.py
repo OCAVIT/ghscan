@@ -304,6 +304,22 @@ def update_infra_validation(cred_hash: str, is_validated: int, result: str = "")
         )
 
 
+def cleanup_old_low_risk(older_than_days: int = 30) -> int:
+    """Delete low-risk infra findings older than N days. Returns deleted count."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    with _conn() as c:
+        cur = c.execute(
+            "DELETE FROM infra_findings WHERE risk_level='low' AND discovered_at < ?",
+            (cutoff,),
+        )
+        deleted = cur.rowcount
+    if deleted:
+        # Reclaim disk space after bulk delete
+        with _conn() as c:
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return deleted
+
+
 def get_infra_since(since_iso: str) -> list[dict]:
     with _conn() as c:
         return [dict(r) for r in c.execute(

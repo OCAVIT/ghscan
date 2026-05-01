@@ -16,7 +16,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
 import db
-from config import SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES
+from config import SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES, INFRA_LOW_RISK_MAX_DAYS
 from scanner import run_cycle
 from notifier import notify_hourly_digest, notify_infra_hourly, flush_unverified_buffer
 from trufflehog_runner import trufflehog_loop
@@ -36,6 +36,19 @@ async def _scan_loop():
             log.error("cycle crashed: %s", e)
         log.info("sleeping %ds until next cycle", SCAN_INTERVAL)
         await asyncio.sleep(SCAN_INTERVAL)
+
+
+async def _cleanup_loop():
+    """Daily cleanup of old low-risk infra findings to keep DB size bounded."""
+    while True:
+        await asyncio.sleep(86400)  # once per day
+        try:
+            n = db.cleanup_old_low_risk(older_than_days=INFRA_LOW_RISK_MAX_DAYS)
+            if n:
+                log.info("cleanup: removed %d old low-risk infra findings (>%dd)",
+                         n, INFRA_LOW_RISK_MAX_DAYS)
+        except Exception as e:
+            log.error("cleanup loop err: %s", e)
 
 
 async def _flush_loop():
@@ -80,6 +93,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_scan_loop(),          name="scan_loop"),
         asyncio.create_task(_hourly_alert_loop(),  name="hourly_alert"),
         asyncio.create_task(_flush_loop(),         name="flush_buffer"),
+        asyncio.create_task(_cleanup_loop(),       name="db_cleanup"),
         asyncio.create_task(trufflehog_loop(),     name="trufflehog"),
     ]
     yield

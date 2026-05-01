@@ -33,6 +33,10 @@ CONCURRENT_ITEMS  = int(os.environ.get("CONCURRENT_ITEMS",  "50"))    # parallel
 MAX_PAGES         = int(os.environ.get("MAX_PAGES",          "5"))     # pages per query (100 results each)
 HOURLY_ALERT      = os.environ.get("HOURLY_ALERT", "1") == "1"
 
+# ── DB maintenance ─────────────────────────────────────────────────────────
+# Low-risk infra findings older than this many days are pruned automatically.
+INFRA_LOW_RISK_MAX_DAYS = int(os.environ.get("INFRA_LOW_RISK_MAX_DAYS", "30"))
+
 # ── Trufflehog secondary scanner ──────────────────────────────────────────
 # TRUFFLEHOG_ORGS=org1,org2,org3  — GitHub orgs to sweep with trufflehog
 # TRUFFLEHOG_PATH — override if binary not in /usr/local/bin

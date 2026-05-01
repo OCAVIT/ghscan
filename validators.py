@@ -195,12 +195,30 @@ async def validate_database(cred: str) -> bool:
         return False
 
 
+try:
+    import boto3 as _boto3
+    from botocore.exceptions import ClientError as _ClientError
+    _BOTO3_OK = True
+except ImportError:
+    _BOTO3_OK = False
+    log.warning("boto3 not installed — AWS key validation disabled. Add boto3 to requirements.txt")
+
+try:
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key as _load_pem
+    _CRYPTO_OK = True
+except ImportError:
+    _CRYPTO_OK = False
+    log.warning("cryptography not installed — SSH key structural validation disabled.")
+
+
 async def validate_aws(cred: str) -> bool:
     """
     Call STS GetCallerIdentity with extracted AKID+secret.
     Valid = 200 (works) OR SignatureDoesNotMatch / AccessDenied (key exists, wrong secret or permissions).
-    Invalid = InvalidClientTokenId (key doesn't exist).
+    Invalid = InvalidClientTokenId (key doesn't exist at all).
     """
+    if not _BOTO3_OK:
+        return False
     try:
         kid, rest = cred.split(":", 1)
         secret, _ = rest.rsplit("@", 1)
@@ -209,23 +227,21 @@ async def validate_aws(cred: str) -> bool:
 
         def _sts_check():
             try:
-                import boto3
-                from botocore.exceptions import ClientError, NoCredentialsError
-                client = boto3.client(
+                client = _boto3.client(
                     "sts",
                     aws_access_key_id=kid,
                     aws_secret_access_key=secret,
                     region_name="us-east-1",
                 )
                 client.get_caller_identity()
-                return True
-            except Exception as exc:
-                code = getattr(getattr(exc, "response", {}), "get", lambda k, d="": d)("Error", {}).get("Code", "")
-                if not code and hasattr(exc, "response"):
-                    code = exc.response.get("Error", {}).get("Code", "")
-                # Key exists but auth/perm error = real key
+                return True  # fully valid
+            except _ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                # Key ID exists but secret/perms wrong → key is real
                 return code in ("SignatureDoesNotMatch", "AccessDenied",
                                 "ExpiredTokenException", "TokenRefreshRequired")
+            except Exception:
+                return False
 
         return await asyncio.to_thread(_sts_check)
     except Exception as e:
@@ -235,11 +251,12 @@ async def validate_aws(cred: str) -> bool:
 
 async def validate_ssh(cred: str) -> bool:
     """Parse PEM key structure. Valid = parses without error."""
+    if not _CRYPTO_OK:
+        return False
     if "BEGIN" not in cred or "PRIVATE KEY" not in cred:
         return False
     try:
-        from cryptography.hazmat.primitives.serialization import load_pem_private_key
-        await asyncio.to_thread(load_pem_private_key, cred.encode(), None)
+        await asyncio.to_thread(_load_pem, cred.encode(), None)
         return True
     except Exception:
         return False
