@@ -21,6 +21,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import random
 from datetime import datetime, timezone
 
 import httpx
@@ -42,10 +43,15 @@ ALL_QUERIES = QUERIES
 log = logging.getLogger(__name__)
 
 # ── Token health tracking ──────────────────────────────────────────────────────
-# Updated by _check_search_quota; read by /health endpoint and dead-token alert.
+# Updated by _check_quota; read by /health endpoint and dead-token alert.
 # Key: sha256(token)[:12] — avoids collision when multiple PATs share the same 8-char prefix
 # (e.g. two tokens from the same GH account: ghp_AbCdEfGh... vs ghp_AbCdEfGi...).
-_TOKEN_STATUS: dict[str, dict] = {}  # tkey → {alive, remaining, reset_at, limit}
+# Fields: alive, remaining (search), reset_at (search), limit (search),
+#         core_remaining, core_reset, core_limit,
+#         core_blocked_until — unix timestamp; if now < this, every request on
+#                              this token is short-circuited to a sleep instead
+#                              of spamming GitHub with guaranteed-403 retries.
+_TOKEN_STATUS: dict[str, dict] = {}
 _DEAD_ALERTED: set[str] = set()      # tokens already alerted this session (avoid spam)
 
 # Strong-reference set for background infra-validation tasks.
@@ -87,30 +93,95 @@ def _gh_headers(token: str) -> dict:
 
 
 # ── GitHub API primitives ──────────────────────────────────────────────────
+# Caps: PRIMARY rate-limit reset can be up to ~60 min away (core REST 5000/hr).
+# SECONDARY (concurrent abuse) Retry-After is usually 60-300 s.
+_PRIMARY_WAIT_CAP   = 1800  # 30 min — honor X-RateLimit-Reset up to this
+_SECONDARY_WAIT_CAP = 300
+
+
+def _token_from_headers(headers: dict | None) -> str:
+    if not headers:
+        return ""
+    auth = headers.get("Authorization", "") or ""
+    return auth.removeprefix("Bearer ").strip()
+
+
+async def _await_token_unblock(token: str) -> None:
+    """If this token is in a primary-rate-limit window, sleep until reset
+    BEFORE sending the request. Avoids spamming GitHub with guaranteed-403s
+    from 50+ concurrent tasks, all of which would otherwise sleep
+    independently and burst again together at wakeup."""
+    if not token:
+        return
+    tk = _tkey(token)
+    blocked = _TOKEN_STATUS.get(tk, {}).get("core_blocked_until", 0)
+    if not blocked:
+        return
+    now = int(datetime.now(timezone.utc).timestamp())
+    if now >= blocked:
+        # Window expired — clear flag (race-safe: setdefault then overwrite)
+        _TOKEN_STATUS.setdefault(tk, {})["core_blocked_until"] = 0
+        return
+    # Sleep until reset + jitter(0-30s) so 50 simultaneous wakers don't burst
+    wait = (blocked - now) + 5 + random.uniform(0, 30)
+    wait = min(wait, _PRIMARY_WAIT_CAP)
+    log.debug("token %s pre-blocked, sleeping %.0fs until reset", tk, wait)
+    await asyncio.sleep(wait)
+    _TOKEN_STATUS.setdefault(tk, {})["core_blocked_until"] = 0
+
 
 async def _gh_get(client: httpx.AsyncClient, url: str,
                   params: dict | None = None, headers: dict | None = None) -> dict | list | None:
+    token = _token_from_headers(headers)
+    await _await_token_unblock(token)
+
     for attempt in range(4):
         try:
             r = await client.get(url, headers=headers, params=params, timeout=20)
 
             if r.status_code == 403:
-                # Primary rate-limit: X-RateLimit-Reset tells us exactly when to retry.
-                # Don't sleep a flat 10 minutes — read the header (usually 60-90s).
-                reset = int(r.headers.get("X-RateLimit-Reset", 0))
-                now   = int(datetime.now(timezone.utc).timestamp())
-                wait  = max(reset - now, 5)
-                wait  = min(wait, 90)  # cap at 90s — never need more
-                log.warning("rate-limited (403) on %s, sleeping %ds (reset=%s)",
-                            url.split("/")[-1], wait, reset)
+                # Distinguish primary (quota) vs secondary (concurrent abuse) rate-limit:
+                #   primary   → X-RateLimit-Remaining=0 + X-RateLimit-Reset=<unix>
+                #   secondary → Retry-After=<seconds> (concurrent / abuse detection)
+                retry_after = r.headers.get("Retry-After")
+                reset       = int(r.headers.get("X-RateLimit-Reset", "0") or 0)
+                remaining   = int(r.headers.get("X-RateLimit-Remaining", "-1") or -1)
+
+                if retry_after:
+                    wait = min(int(retry_after), _SECONDARY_WAIT_CAP)
+                    log.warning("secondary 403 on %s, Retry-After=%ds",
+                                url.rsplit("/", 1)[-1][:40], wait)
+                elif remaining == 0 and reset > 0:
+                    now  = int(datetime.now(timezone.utc).timestamp())
+                    wait = max(reset - now, 5) + 5  # safety margin
+                    wait = min(wait, _PRIMARY_WAIT_CAP)
+                    if token:
+                        # Mark token globally blocked so all 50+ concurrent tasks
+                        # see this and sleep ONCE in _await_token_unblock instead
+                        # of each one independently sleeping 90s and re-bursting.
+                        _TOKEN_STATUS.setdefault(_tkey(token), {})["core_blocked_until"] = reset
+                    log.warning(
+                        "primary 403 on %s, sleeping %ds until reset (token-wide block set)",
+                        url.rsplit("/", 1)[-1][:40], wait,
+                    )
+                    # Add jitter so the wakeup doesn't burst
+                    wait += random.uniform(0, 30)
+                else:
+                    # 403 with no rate-limit headers — likely auth / SSO issue
+                    wait = 30
+                    log.warning("403 (no rate-limit headers) on %s, sleeping %ds",
+                                url.rsplit("/", 1)[-1][:40], wait)
                 await asyncio.sleep(wait)
                 continue
 
             if r.status_code == 429:
-                # Secondary rate-limit (undocumented concurrency limit).
-                # Exponential backoff: 10s, 20s, 40s — then give up.
-                wait = 10 * (2 ** attempt)
-                log.warning("secondary rate-limit (429), backoff %ds", wait)
+                # Honor server-provided Retry-After if present; otherwise exp backoff
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    wait = min(int(retry_after), _SECONDARY_WAIT_CAP)
+                else:
+                    wait = 10 * (2 ** attempt)
+                log.warning("429 on %s, sleeping %ds", url.rsplit("/", 1)[-1][:40], wait)
                 await asyncio.sleep(wait)
                 continue
 
@@ -129,36 +200,50 @@ async def _gh_get(client: httpx.AsyncClient, url: str,
     return None
 
 
-async def _check_search_quota(client: httpx.AsyncClient, token_headers: dict,
-                              token: str = "") -> int:
+async def _check_quota(client: httpx.AsyncClient, token_headers: dict,
+                       token: str = "") -> tuple[int, int]:
     """
-    Returns remaining search requests for this token via /rate_limit.
-    This endpoint is NOT counted against the quota (GitHub documented behaviour).
-    Returns -1 on failure (treat as quota available).
-    Returns -2 if the token is dead (401).
-    Updates _TOKEN_STATUS for /health endpoint.
+    Returns (search_remaining, core_remaining) for this token via /rate_limit.
+    /rate_limit is NOT counted against the quota (GitHub documented behaviour).
+
+    Sentinels:
+      ( -2, -2)  → dead token (401)
+      ( -1, -1)  → check failed (treat as quota available)
+
+    Updates _TOKEN_STATUS for /health endpoint and for the pre-block check
+    in _await_token_unblock (preserves any existing core_blocked_until).
     """
     raw  = token or token_headers.get("Authorization", "").removeprefix("Bearer ").strip()
     tk   = _tkey(raw)
     try:
         r = await client.get(f"{_BASE}/rate_limit", headers=token_headers, timeout=10)
         if r.status_code == 401:
-            _TOKEN_STATUS[tk] = {"alive": False, "remaining": 0, "reset_at": 0, "limit": 0}
-            return -2  # dead token sentinel
-        if r.status_code == 200:
-            data      = r.json()
-            s         = data["resources"]["search"]
-            remaining = s["remaining"]
-            reset_at  = s["reset"]
             _TOKEN_STATUS[tk] = {
-                "alive": True, "remaining": remaining,
-                "reset_at": reset_at, "limit": s.get("limit", 30),
+                "alive": False, "remaining": 0, "reset_at": 0, "limit": 0,
+                "core_remaining": 0, "core_reset": 0, "core_limit": 0,
+                "core_blocked_until": 0,
             }
-            log.debug("search quota [%s]: %d remaining (reset %s)", tk, remaining, reset_at)
-            return remaining
+            return -2, -2
+        if r.status_code == 200:
+            data = r.json()
+            s    = data["resources"]["search"]
+            c    = data["resources"]["core"]
+            prev_block = _TOKEN_STATUS.get(tk, {}).get("core_blocked_until", 0)
+            _TOKEN_STATUS[tk] = {
+                "alive": True,
+                "remaining":      s["remaining"],
+                "reset_at":       s["reset"],
+                "limit":          s.get("limit", 30),
+                "core_remaining": c["remaining"],
+                "core_reset":     c["reset"],
+                "core_limit":     c.get("limit", 5000),
+                "core_blocked_until": prev_block,
+            }
+            log.debug("quota [%s]: search=%d core=%d", tk, s["remaining"], c["remaining"])
+            return s["remaining"], c["remaining"]
     except Exception:
         pass
-    return -1
+    return -1, -1
 
 
 async def search_code(client: httpx.AsyncClient, query: str,
@@ -350,35 +435,46 @@ async def _run_chunk(client: httpx.AsyncClient,
     tk   = _tkey(token)
 
     # Initial health check — skip entire worker if token is dead
-    initial_quota = await _check_search_quota(client, hdrs, token)
-    if initial_quota == -2:
+    search_q, core_q = await _check_quota(client, hdrs, token)
+    if search_q == -2:
         if tk not in _DEAD_ALERTED:
             _DEAD_ALERTED.add(tk)
             await notify_dead_token(token[:8])
         log.error("[w%d token=%s...] DEAD (401) — worker skipped", worker_id, token[:8])
         return
 
-    log.info("[w%d token=%s...] handling %d queries, quota=%s",
+    log.info("[w%d token=%s...] handling %d queries, search=%s core=%s",
              worker_id, token[:8], len(queries),
-             initial_quota if initial_quota >= 0 else "unknown")
+             search_q if search_q >= 0 else "unknown",
+             core_q   if core_q   >= 0 else "unknown")
 
     queries_done = 0
 
     for query_str, provider, file_type in queries:
         if queries_done % 10 == 0 and queries_done > 0:
-            remaining = await _check_search_quota(client, hdrs, token)
-            if remaining == -2:
+            search_q, core_q = await _check_quota(client, hdrs, token)
+            if search_q == -2:
                 if tk not in _DEAD_ALERTED:
                     _DEAD_ALERTED.add(tk)
                     await notify_dead_token(token[:8])
                 log.error("[w%d] token died mid-cycle, stopping worker", worker_id)
                 return
-            if remaining == 0:
+            if search_q == 0:
                 log.warning("[w%d] search quota exhausted, sleeping 65s", worker_id)
                 await asyncio.sleep(65)
-            elif 0 < remaining < 5:
-                log.warning("[w%d] search quota low (%d), sleeping 30s", worker_id, remaining)
+            elif 0 < search_q < 5:
+                log.warning("[w%d] search quota low (%d), sleeping 30s", worker_id, search_q)
                 await asyncio.sleep(30)
+            # Core quota throttle — each search result triggers ~1.5 core REST
+            # calls (repo meta + file content). With 5000/hr per token, hitting
+            # <200 means the next batch of items will blow through the quota.
+            if 0 <= core_q < 200:
+                core_reset = _TOKEN_STATUS.get(tk, {}).get("core_reset", 0)
+                now        = int(datetime.now(timezone.utc).timestamp())
+                wait       = max(min(core_reset - now, _PRIMARY_WAIT_CAP), 60) if core_reset else 120
+                log.warning("[w%d] core quota low (%d remaining), sleeping %ds until reset",
+                            worker_id, core_q, wait)
+                await asyncio.sleep(wait + random.uniform(0, 30))
 
         for page in range(1, MAX_PAGES + 1):
             try:

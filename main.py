@@ -308,9 +308,12 @@ async def health():
             "dead":  total_t - alive if _TOKEN_STATUS else 0,
             "status": {
                 k: {
-                    "alive":     v.get("alive"),
-                    "remaining": v.get("remaining"),
-                    "limit":     v.get("limit"),
+                    "alive":              v.get("alive"),
+                    "search_remaining":   v.get("remaining"),
+                    "search_limit":       v.get("limit"),
+                    "core_remaining":     v.get("core_remaining"),
+                    "core_limit":         v.get("core_limit"),
+                    "core_blocked_until": v.get("core_blocked_until", 0),
                 }
                 for k, v in _TOKEN_STATUS.items()
             },

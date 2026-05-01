@@ -35,7 +35,7 @@ SCAN_INTERVAL     = int(os.environ.get("SCAN_INTERVAL",     "1800"))   # seconds
 YOUNG_REPO_DAYS   = int(os.environ.get("YOUNG_REPO_DAYS",   "90"))    # repos newer than N days pass filter
 BIG_SERVICE_STARS = int(os.environ.get("BIG_SERVICE_STARS", "500"))    # OR stars ≥ this
 REPO_RESCAN_DAYS  = int(os.environ.get("REPO_RESCAN_DAYS",  "7"))     # re-check repo after N days
-CONCURRENT_ITEMS  = int(os.environ.get("CONCURRENT_ITEMS",  "50"))    # parallel file fetches per worker
+CONCURRENT_ITEMS  = int(os.environ.get("CONCURRENT_ITEMS",  "20"))    # parallel file fetches (was 50 — secondary 403 limit)
 MAX_PAGES         = int(os.environ.get("MAX_PAGES",          "5"))     # pages per query (100 results each)
 HOURLY_ALERT      = os.environ.get("HOURLY_ALERT", "1") == "1"
 
