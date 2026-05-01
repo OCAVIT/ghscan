@@ -222,12 +222,12 @@ def get_valid_since(since_iso: str) -> list[dict]:
 
 
 def get_results(valid_only: bool = False, limit: int = 200) -> list[dict]:
-    q = "SELECT * FROM found_keys"
     if valid_only:
-        q += " WHERE is_valid=1"
-    q += f" ORDER BY discovered_at DESC LIMIT {limit}"
+        q = "SELECT * FROM found_keys WHERE is_valid=1 ORDER BY discovered_at DESC LIMIT ?"
+    else:
+        q = "SELECT * FROM found_keys ORDER BY discovered_at DESC LIMIT ?"
     with _conn() as c:
-        return [dict(r) for r in c.execute(q).fetchall()]
+        return [dict(r) for r in c.execute(q, (limit,)).fetchall()]
 
 
 # ── Infra findings ──────────────────────────────────────────────────────────
@@ -266,12 +266,12 @@ def save_infra(cred_type: str, cred: str, repo: str, file_path: str,
 def get_infra_results(risk_filter: str | None = None, limit: int = 200) -> list[dict]:
     """risk_filter: 'high' | 'medium' | 'low' | None (all)"""
     if risk_filter:
-        q = f"SELECT * FROM infra_findings WHERE risk_level=? ORDER BY discovered_at DESC LIMIT {limit}"
+        q = "SELECT * FROM infra_findings WHERE risk_level=? ORDER BY discovered_at DESC LIMIT ?"
         with _conn() as c:
-            return [dict(r) for r in c.execute(q, (risk_filter,)).fetchall()]
-    q = f"SELECT * FROM infra_findings ORDER BY discovered_at DESC LIMIT {limit}"
+            return [dict(r) for r in c.execute(q, (risk_filter, limit)).fetchall()]
+    q = "SELECT * FROM infra_findings ORDER BY discovered_at DESC LIMIT ?"
     with _conn() as c:
-        return [dict(r) for r in c.execute(q).fetchall()]
+        return [dict(r) for r in c.execute(q, (limit,)).fetchall()]
 
 
 def get_infra_stats() -> dict:

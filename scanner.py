@@ -126,7 +126,10 @@ async def _check_search_quota(client: httpx.AsyncClient, token_headers: dict,
     Returns -2 if the token is dead (401).
     Updates _TOKEN_STATUS for /health endpoint.
     """
-    tkey = (token or token_headers.get("Authorization", "?"))[:8].lstrip("Bearer ").strip()[:8]
+    # Note: str.lstrip takes a CHARSET, not a prefix — so .lstrip("Bearer ") was
+    # eating individual letters from real PATs (ghp_AbcdEfg → cdEfg). Use removeprefix.
+    raw  = token or token_headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    tkey = raw[:8]
     try:
         r = await client.get(f"{_BASE}/rate_limit", headers=token_headers, timeout=10)
         if r.status_code == 401:
@@ -226,10 +229,11 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
     if not full_name or not sha:
         return
 
-    if is_skippable_path(file_path):
-        db.try_claim_file(sha)
-        return
+    # claim first: atomic INSERT OR IGNORE — skippable paths also get claimed
+    # so we never revisit them (avoids re-fetch on next cycle)
     if not db.try_claim_file(sha):
+        return
+    if is_skippable_path(file_path):
         return
 
     if db.should_scan_repo(full_name):
@@ -254,62 +258,71 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
     if not content:
         return
 
+    # Fast-path: skip heavy regex if no trigger strings present anywhere in content.
+    # Saves CPU on large files that are clearly irrelevant (e.g. pure binary-as-text).
+    _AI_TRIGGER    = ("sk-", "AIzaSy", "eyJ")
+    _INFRA_TRIGGER = ("://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
+                      "AKIA", "AIPA", "AIDA", "AROA", "ASIA")
+    has_ai_trigger    = any(t in content for t in _AI_TRIGGER)
+    has_infra_trigger = any(t in content for t in _INFRA_TRIGGER)
+    if not has_ai_trigger and not has_infra_trigger:
+        return
+
     # ── AI key extractors — run ALL providers on every file ────────────────
     # (not just the query's "provider": a .env might have OpenAI + DeepSeek + ARK)
-    for ai_prov, ai_fn in EXTRACTORS.items():
-        for key in ai_fn(content):
-            if db.key_exists(key):
-                continue
-            is_valid = await validate(ai_prov, key)
-            saved = db.save_key(
-                ai_prov, key, full_name, file_path, file_url,
-                stars, created_at, file_type, is_valid,
-            )
-            if saved:
-                await notify_found(
+    if has_ai_trigger:
+        for ai_prov, ai_fn in EXTRACTORS.items():
+            for key in ai_fn(content):
+                if db.key_exists(key):
+                    continue
+                is_valid = await validate(ai_prov, key)
+                saved = db.save_key(
                     ai_prov, key, full_name, file_path, file_url,
                     stars, created_at, file_type, is_valid,
                 )
-                log.info("[%s] %s from %s",
-                         "VALID" if is_valid else "found", ai_prov, full_name)
+                if saved:
+                    await notify_found(
+                        ai_prov, key, full_name, file_path, file_url,
+                        stars, created_at, file_type, is_valid,
+                    )
+                    log.info("[%s] %s from %s",
+                             "VALID" if is_valid else "found", ai_prov, full_name)
 
     # ── Infra extractors — intersecting track ──────────────────────────────
     # Only files found via AI queries are scanned → infra creds come from AI repos.
     # Risk assessment is computed once and reused across all infra providers.
-    risk_cache: tuple | None = None
-    for infra_prov, infra_fn in INFRA_EXTRACTORS.items():
-        creds = infra_fn(content)
-        if not creds:
-            continue
-        if risk_cache is None:
-            risk_cache = assess_risk(content, file_path, stars, created_at)
-        risk_level, risk_reasons = risk_cache
-        for cred in creds:
-            if db.infra_exists(cred):
+    if has_infra_trigger:
+        import hashlib as _hl
+        risk_cache: tuple | None = None
+        for infra_prov, infra_fn in INFRA_EXTRACTORS.items():
+            creds = infra_fn(content)
+            if not creds:
                 continue
-            destination = extract_destination(cred) if "://" in cred else ""
-            cred_hash   = base64.b64encode(
-                cred.encode()
-            ).decode()[:8]  # used only for task tag; real hash is in db.save_infra
-            saved = db.save_infra(
-                infra_prov, cred, full_name, file_path, file_url,
-                stars, created_at, file_type, destination,
-                risk_level, risk_reasons,
-            )
-            if saved:
-                import hashlib as _hl
-                real_hash = _hl.sha256(cred.encode()).hexdigest()
-                asyncio.create_task(
-                    _validate_infra_bg(infra_prov, cred, real_hash),
-                    name=f"infra_val_{infra_prov}",
-                )
-                await notify_infra_found(
+            if risk_cache is None:
+                risk_cache = assess_risk(content, file_path, stars, created_at)
+            risk_level, risk_reasons = risk_cache
+            for cred in creds:
+                if db.infra_exists(cred):
+                    continue
+                destination = extract_destination(cred) if "://" in cred else ""
+                saved = db.save_infra(
                     infra_prov, cred, full_name, file_path, file_url,
-                    stars, created_at, file_type,
-                    destination, risk_level, risk_reasons,
+                    stars, created_at, file_type, destination,
+                    risk_level, risk_reasons,
                 )
-                log.info("[infra/%s] risk=%s dest=%s repo=%s",
-                         infra_prov, risk_level, destination or "—", full_name)
+                if saved:
+                    real_hash = _hl.sha256(cred.encode()).hexdigest()
+                    asyncio.create_task(
+                        _validate_infra_bg(infra_prov, cred, real_hash),
+                        name=f"infra_val_{infra_prov}",
+                    )
+                    await notify_infra_found(
+                        infra_prov, cred, full_name, file_path, file_url,
+                        stars, created_at, file_type,
+                        destination, risk_level, risk_reasons,
+                    )
+                    log.info("[infra/%s] risk=%s dest=%s repo=%s",
+                             infra_prov, risk_level, destination or "—", full_name)
 
 
 # ── Per-token worker ────────────────────────────────────────────────────────

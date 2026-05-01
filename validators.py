@@ -149,7 +149,16 @@ async def validate_ark(key: str) -> bool:
 
 
 async def validate_happyhorse(key: str) -> bool:
-    return False
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.runhappyhorse.net/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            return r.status_code in (200, 403, 429)
+    except Exception as e:
+        log.debug("happyhorse validate err: %s", e)
+        return False
 
 
 VALIDATORS: dict[str, callable] = {

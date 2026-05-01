@@ -31,6 +31,7 @@ from config import (
     TRUFFLEHOG_CONCURRENCY,
 )
 from notifier import notify_found
+from scanner import _TOKEN_STATUS
 
 log = logging.getLogger(__name__)
 
@@ -62,9 +63,18 @@ def _th_available() -> bool:
     return TRUFFLEHOG_PATH.exists() if TRUFFLEHOG_PATH else False
 
 
+def _pick_token() -> str:
+    """Return first alive token from the pool; fall back to first token if none confirmed alive."""
+    for tok in GITHUB_TOKENS:
+        status = _TOKEN_STATUS.get(tok[:8], {})
+        if status.get("alive", True):  # default True if unchecked
+            return tok
+    return GITHUB_TOKENS[0]
+
+
 async def _run_trufflehog(args: list[str]) -> bytes:
     """Run trufflehog with given args, return stdout bytes."""
-    token = GITHUB_TOKENS[0]
+    token = _pick_token()
     cmd = [
         str(TRUFFLEHOG_PATH),
         *args,
@@ -157,8 +167,10 @@ async def scan_org(org: str):
 
 
 async def scan_user(user: str):
+    # --only-verified kept consistent with scan_org to suppress noise
     stdout = await _run_trufflehog(["github", "--repo",
-                                    f"https://github.com/{user}"])
+                                    f"https://github.com/{user}",
+                                    "--only-verified"])
     if stdout:
         await _process_output(stdout, f"user:{user}")
 

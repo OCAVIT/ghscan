@@ -162,7 +162,14 @@ _EL_CTX = re.compile(
     r'([A-Za-z0-9_\-]{20,80})',
     re.IGNORECASE,
 )
-_EL_SK = re.compile(r'\bsk_[a-f0-9]{32,64}\b')
+# sk_[hex] pattern MUST have elevenlabs context nearby — without it we'd match
+# Stripe test keys (sk_test_…), Supabase service keys, and other sk_ namespaces.
+_EL_SK_CTX = re.compile(
+    r'(?:elevenlabs|xi[_\-]api[_\-]key|xi\.api\.key|ELEVEN)'
+    r'[\s\S]{0,300}'
+    r'(sk_[a-f0-9]{32,64})',
+    re.IGNORECASE,
+)
 
 
 def extract_elevenlabs(content: str) -> list[str]:
@@ -171,10 +178,11 @@ def extract_elevenlabs(content: str) -> list[str]:
         key = m.group(1)
         if len(key) >= 20 and not _FAKE.search(key):
             found.append(key)
-    for m in _EL_SK.finditer(content):
-        key = m.group(0)
-        if not _FAKE.search(key):
-            found.append(key)
+    if re.search(r'(?i)elevenlabs|xi[_\-]api[_\-]key', content):
+        for m in _EL_SK_CTX.finditer(content):
+            key = m.group(1)
+            if not _FAKE.search(key) and key not in found:
+                found.append(key)
     return list(dict.fromkeys(found))
 
 

@@ -8,12 +8,13 @@ Background tasks (all concurrent, independent):
 """
 
 import asyncio
+import html
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 import db
@@ -105,6 +106,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GitHub Key Scanner", lifespan=lifespan)
 
+# Optional admin secret for mutating endpoints (/admin/vacuum).
+# Set ADMIN_TOKEN on Railway; if not set, endpoint is open (acceptable for private deploys).
+_ADMIN_TOKEN: str = os.environ.get("ADMIN_TOKEN", "")
+
+
+def _check_admin(authorization: str | None):
+    if not _ADMIN_TOKEN:
+        return  # not configured — open access
+    if authorization != f"Bearer {_ADMIN_TOKEN}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # ── Web UI ─────────────────────────────────────────────────────────────────
 
@@ -123,14 +135,19 @@ async def root():
 
     rows_html = ""
     for r in rows:
-        badge = "✅" if r["is_valid"] else "⚠️"
+        badge    = "✅" if r["is_valid"] else "⚠️"
+        repo_e   = html.escape(r["repo"])
+        path_e   = html.escape(r["file_path"])
+        prov_e   = html.escape(r["provider"])
+        key_e    = html.escape(r["key_preview"])
+        ftype_e  = html.escape(r["file_type"])
         rows_html += (
             f"<tr><td>{badge}</td>"
-            f"<td>{r['provider']}</td>"
-            f"<td><code>{r['key_preview']}</code></td>"
-            f"<td><a href='https://github.com/{r['repo']}' target='_blank'>{r['repo']}</a></td>"
+            f"<td>{prov_e}</td>"
+            f"<td><code>{key_e}</code></td>"
+            f"<td><a href='https://github.com/{repo_e}' target='_blank'>{repo_e}</a></td>"
             f"<td>⭐{r['repo_stars']}</td>"
-            f"<td>{r['file_type']}</td>"
+            f"<td>{ftype_e}</td>"
             f"<td>{r['discovered_at'][:16]}</td></tr>\n"
         )
 
@@ -208,22 +225,27 @@ async def infra_page(risk: str = Query(None), limit: int = Query(200)):
 
     rows_html = ""
     for r in rows:
-        rl  = r.get("risk_level", "low")
-        col = _RISK_COLOR.get(rl, "#888")
-        bg  = _RISK_BG.get(rl, "#111")
-        dest = f"<code>{r['destination']}</code>" if r.get("destination") else "—"
-        v = r.get("is_validated", -1)
+        rl       = r.get("risk_level", "low")
+        col      = _RISK_COLOR.get(rl, "#888")
+        bg       = _RISK_BG.get(rl, "#111")
+        dest_raw = r.get("destination", "")
+        dest     = f"<code>{html.escape(dest_raw)}</code>" if dest_raw else "—"
+        v        = r.get("is_validated", -1)
         val_badge = ("✅" if v == 1 else "❌" if v == 0 else "⏳")
+        repo_e    = html.escape(r["repo"])
+        ctype_e   = html.escape(r["cred_type"].upper())
+        prev_e    = html.escape(r["cred_preview"])
+        ftype_e   = html.escape(r["file_type"])
         rows_html += (
             f"<tr style='background:{bg}'>"
             f"<td style='color:{col};font-weight:bold'>{rl.upper()}</td>"
             f"<td>{val_badge}</td>"
-            f"<td>{r['cred_type'].upper()}</td>"
-            f"<td><code>{r['cred_preview']}</code></td>"
+            f"<td>{ctype_e}</td>"
+            f"<td><code>{prev_e}</code></td>"
             f"<td>{dest}</td>"
-            f"<td><a href='https://github.com/{r['repo']}' target='_blank'>{r['repo']}</a></td>"
+            f"<td><a href='https://github.com/{repo_e}' target='_blank'>{repo_e}</a></td>"
             f"<td>⭐{r['repo_stars']}</td>"
-            f"<td>{r['file_type']}</td>"
+            f"<td>{ftype_e}</td>"
             f"<td>{r['discovered_at'][:16]}</td></tr>\n"
         )
 
@@ -299,8 +321,9 @@ async def health():
 
 
 @app.post("/admin/vacuum")
-async def admin_vacuum():
+async def admin_vacuum(authorization: str | None = Header(default=None)):
     """Full SQLite VACUUM — repacks DB file after bulk deletes. Takes a few seconds."""
+    _check_admin(authorization)
     before = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
 
     def _do():
