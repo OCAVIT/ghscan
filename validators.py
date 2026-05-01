@@ -19,6 +19,8 @@ import urllib.parse
 
 import httpx
 
+from config import OPENAI_VALIDATION_MODEL
+
 log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(15.0)
@@ -76,7 +78,7 @@ async def validate_openai(key: str) -> bool:
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={
-                    "model":      "gpt-4o-mini",
+                    "model":      OPENAI_VALIDATION_MODEL,
                     "messages":   [{"role": "user", "content": "hi"}],
                     "max_tokens": 1,
                 },

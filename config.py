@@ -43,6 +43,12 @@ HOURLY_ALERT      = os.environ.get("HOURLY_ALERT", "1") == "1"
 # Low-risk infra findings older than this many days are pruned automatically.
 INFRA_LOW_RISK_MAX_DAYS = int(os.environ.get("INFRA_LOW_RISK_MAX_DAYS", "30"))
 
+# ── Validation tuning ──────────────────────────────────────────────────────
+# Model used by validate_openai for the 1-token quota probe. Default
+# gpt-4o-mini = universal availability + microcent cost. Override if you
+# want a cheaper newer model (gpt-4.1-nano) or a different one.
+OPENAI_VALIDATION_MODEL = os.environ.get("OPENAI_VALIDATION_MODEL", "gpt-4o-mini")
+
 # ── Trufflehog secondary scanner ──────────────────────────────────────────
 # TRUFFLEHOG_ORGS=org1,org2,org3  — GitHub orgs to sweep with trufflehog
 # TRUFFLEHOG_TOKEN — dedicated PAT for trufflehog (keeps it off the main quota pool).
