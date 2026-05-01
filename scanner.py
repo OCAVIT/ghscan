@@ -19,6 +19,7 @@ suffix — those were URL-encoded into the q param causing malformed requests.
 
 import asyncio
 import base64
+import hashlib
 import logging
 from datetime import datetime, timezone
 
@@ -42,8 +43,19 @@ log = logging.getLogger(__name__)
 
 # ── Token health tracking ──────────────────────────────────────────────────────
 # Updated by _check_search_quota; read by /health endpoint and dead-token alert.
-_TOKEN_STATUS: dict[str, dict] = {}  # token[:8] → {alive, remaining, reset_at, limit}
+# Key: sha256(token)[:12] — avoids collision when multiple PATs share the same 8-char prefix
+# (e.g. two tokens from the same GH account: ghp_AbCdEfGh... vs ghp_AbCdEfGi...).
+_TOKEN_STATUS: dict[str, dict] = {}  # tkey → {alive, remaining, reset_at, limit}
 _DEAD_ALERTED: set[str] = set()      # tokens already alerted this session (avoid spam)
+
+# Strong-reference set for background infra-validation tasks.
+# asyncio may GC a task if no reference is held; keeping tasks here prevents that.
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _tkey(token: str) -> str:
+    """Collision-safe token key: sha256[:12] instead of raw prefix slice."""
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
 
 _BASE = "https://api.github.com"
 
@@ -126,25 +138,23 @@ async def _check_search_quota(client: httpx.AsyncClient, token_headers: dict,
     Returns -2 if the token is dead (401).
     Updates _TOKEN_STATUS for /health endpoint.
     """
-    # Note: str.lstrip takes a CHARSET, not a prefix — so .lstrip("Bearer ") was
-    # eating individual letters from real PATs (ghp_AbcdEfg → cdEfg). Use removeprefix.
     raw  = token or token_headers.get("Authorization", "").removeprefix("Bearer ").strip()
-    tkey = raw[:8]
+    tk   = _tkey(raw)
     try:
         r = await client.get(f"{_BASE}/rate_limit", headers=token_headers, timeout=10)
         if r.status_code == 401:
-            _TOKEN_STATUS[tkey] = {"alive": False, "remaining": 0, "reset_at": 0, "limit": 0}
+            _TOKEN_STATUS[tk] = {"alive": False, "remaining": 0, "reset_at": 0, "limit": 0}
             return -2  # dead token sentinel
         if r.status_code == 200:
-            data     = r.json()
-            s        = data["resources"]["search"]
+            data      = r.json()
+            s         = data["resources"]["search"]
             remaining = s["remaining"]
             reset_at  = s["reset"]
-            _TOKEN_STATUS[tkey] = {
+            _TOKEN_STATUS[tk] = {
                 "alive": True, "remaining": remaining,
                 "reset_at": reset_at, "limit": s.get("limit", 30),
             }
-            log.debug("search quota [%s]: %d remaining (reset %s)", tkey, remaining, reset_at)
+            log.debug("search quota [%s]: %d remaining (reset %s)", tk, remaining, reset_at)
             return remaining
     except Exception:
         pass
@@ -312,10 +322,12 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
                 )
                 if saved:
                     real_hash = _hl.sha256(cred.encode()).hexdigest()
-                    asyncio.create_task(
+                    t = asyncio.create_task(
                         _validate_infra_bg(infra_prov, cred, real_hash),
                         name=f"infra_val_{infra_prov}",
                     )
+                    _BG_TASKS.add(t)
+                    t.add_done_callback(_BG_TASKS.discard)
                     await notify_infra_found(
                         infra_prov, cred, full_name, file_path, file_url,
                         stars, created_at, file_type,
@@ -335,33 +347,30 @@ async def _run_chunk(client: httpx.AsyncClient,
     Maintains 2s inter-query sleep → stays within 30 req/min per token.
     """
     hdrs = _gh_headers(token)
-    tkey = token[:8]
+    tk   = _tkey(token)
 
     # Initial health check — skip entire worker if token is dead
     initial_quota = await _check_search_quota(client, hdrs, token)
     if initial_quota == -2:
-        if tkey not in _DEAD_ALERTED:
-            _DEAD_ALERTED.add(tkey)
-            await notify_dead_token(tkey)
-        log.error("[w%d token=%s...] DEAD (401) — worker skipped", worker_id, tkey)
+        if tk not in _DEAD_ALERTED:
+            _DEAD_ALERTED.add(tk)
+            await notify_dead_token(token[:8])
+        log.error("[w%d token=%s...] DEAD (401) — worker skipped", worker_id, token[:8])
         return
 
     log.info("[w%d token=%s...] handling %d queries, quota=%s",
-             worker_id, tkey, len(queries),
+             worker_id, token[:8], len(queries),
              initial_quota if initial_quota >= 0 else "unknown")
 
     queries_done = 0
 
     for query_str, provider, file_type in queries:
-        # Check search quota every 10 queries via /rate_limit (free endpoint).
-        # If < 5 requests left, sleep until reset to avoid wasting 403 round-trips.
         if queries_done % 10 == 0 and queries_done > 0:
             remaining = await _check_search_quota(client, hdrs, token)
             if remaining == -2:
-                # Token died mid-cycle — alert and stop this worker
-                if tkey not in _DEAD_ALERTED:
-                    _DEAD_ALERTED.add(tkey)
-                    await notify_dead_token(tkey)
+                if tk not in _DEAD_ALERTED:
+                    _DEAD_ALERTED.add(tk)
+                    await notify_dead_token(token[:8])
                 log.error("[w%d] token died mid-cycle, stopping worker", worker_id)
                 return
             if remaining == 0:

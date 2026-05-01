@@ -161,17 +161,21 @@ _AWS_REGION = re.compile(
 
 
 def extract_aws(content: str) -> list[str]:
-    found = []
-    key_ids = [m.group(1) for m in _AWS_KEY_ID.finditer(content)]
-    secret_m = _AWS_SECRET.search(content)
-    region_m = _AWS_REGION.search(content)
+    found   = []
+    # Pre-collect all secrets and regions with their positions
+    secrets = [(m.start(), m.group(1)) for m in _AWS_SECRET.finditer(content)]
+    regions = [(m.start(), m.group(1)) for m in _AWS_REGION.finditer(content)]
 
-    secret  = secret_m.group(1) if secret_m else None
-    region  = region_m.group(1) if region_m else "unknown-region"
+    def _nearest(pos: int, items: list[tuple]) -> str | None:
+        """Return the value of the item whose position is closest to pos."""
+        return min(items, key=lambda t: abs(t[0] - pos))[1] if items else None
 
-    for kid in key_ids:
+    for kid_m in _AWS_KEY_ID.finditer(content):
+        kid = kid_m.group(1)
         if _is_fake(kid):
             continue
+        secret = _nearest(kid_m.start(), secrets) if secrets else None
+        region = _nearest(kid_m.start(), regions) if regions else "unknown-region"
         if secret:
             found.append(f"{kid}:{secret}@{region}")
         else:
@@ -197,17 +201,19 @@ _ALIYUN_REGION = re.compile(
 
 
 def extract_alibaba(content: str) -> list[str]:
-    found = []
-    key_ids = [m.group(1) for m in _ALIYUN_KEY_ID.finditer(content)]
-    secret_m = _ALIYUN_SECRET.search(content)
-    region_m = _ALIYUN_REGION.search(content)
+    found   = []
+    secrets = [(m.start(), m.group(1)) for m in _ALIYUN_SECRET.finditer(content)]
+    regions = [(m.start(), m.group(0)) for m in _ALIYUN_REGION.finditer(content)]
 
-    secret = secret_m.group(1) if secret_m else None
-    region = region_m.group(0) if region_m else "cn-unknown"
+    def _nearest(pos: int, items: list[tuple]) -> str | None:
+        return min(items, key=lambda t: abs(t[0] - pos))[1] if items else None
 
-    for kid in key_ids:
+    for kid_m in _ALIYUN_KEY_ID.finditer(content):
+        kid = kid_m.group(1)
         if _is_fake(kid):
             continue
+        secret = _nearest(kid_m.start(), secrets) if secrets else None
+        region = _nearest(kid_m.start(), regions) if regions else "cn-unknown"
         if secret:
             found.append(f"{kid}:{secret}@{region}")
         else:
@@ -225,8 +231,10 @@ _AZURE_CONN = re.compile(
     r'[^\s"\']{30,}',
     re.IGNORECASE,
 )
+# SAS token: must have sv= (version), se= (expiry) and sig= (signature).
+# Previous regex had sv=date&s[a-z]= with NO value — matched nothing real.
 _AZURE_SAS = re.compile(
-    r'(?:sv=\d{4}-\d{2}-\d{2}&s[a-z]=)(?:[^&"\'\s]{10,}&){3,}[^"\'\s]{5,}',
+    r'sv=\d{4}-\d{2}-\d{2}[^\s"\'<>]{20,}&sig=[A-Za-z0-9+/=%]{20,}',
 )
 _AZURE_CLIENT_SECRET = re.compile(
     r'(?:AZURE_CLIENT_SECRET|ARM_CLIENT_SECRET)\s*[=:]\s*["\']?([A-Za-z0-9_\-~.]{30,})["\']?',
@@ -290,9 +298,10 @@ _INFRA_TOKENS = re.compile(
     r'|ANSIBLE_VAULT_PASSWORD|ANSIBLE_BECOME_PASSWORD'
     # Kubernetes / k8s
     r'|KUBECONFIG|K8S_TOKEN|KUBERNETES_TOKEN'
-    # Generic deploy
+    # Generic deploy (GitHub/GH tokens excluded — trufflehog covers them natively
+    # and including GITHUB_TOKEN here risks the scanner finding its own PAT)
     r'|DEPLOY_TOKEN|DEPLOYMENT_TOKEN|CI_DEPLOY_TOKEN|CD_TOKEN'
-    r'|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|GL_TOKEN'
+    r'|GITLAB_TOKEN|GL_TOKEN'
     r')\s*[=:]\s*["\']?([A-Za-z0-9_\-\.]{10,200})["\']?',
     re.IGNORECASE,
 )

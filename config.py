@@ -39,10 +39,13 @@ INFRA_LOW_RISK_MAX_DAYS = int(os.environ.get("INFRA_LOW_RISK_MAX_DAYS", "30"))
 
 # ── Trufflehog secondary scanner ──────────────────────────────────────────
 # TRUFFLEHOG_ORGS=org1,org2,org3  — GitHub orgs to sweep with trufflehog
+# TRUFFLEHOG_TOKEN — dedicated PAT for trufflehog (keeps it off the main quota pool).
+#   Falls back to GITHUB_TOKENS[0] if not set, but quota will be shared.
 # TRUFFLEHOG_PATH — override if binary not in /usr/local/bin
 _th_default = "/usr/local/bin/trufflehog"
-TRUFFLEHOG_PATH     = Path(os.environ.get("TRUFFLEHOG_PATH", _th_default))
-TRUFFLEHOG_ORGS     = [o.strip() for o in os.environ.get("TRUFFLEHOG_ORGS", "").split(",") if o.strip()]
-TRUFFLEHOG_USERS    = [u.strip() for u in os.environ.get("TRUFFLEHOG_USERS", "").split(",") if u.strip()]
-TRUFFLEHOG_INTERVAL = int(os.environ.get("TRUFFLEHOG_INTERVAL", "7200"))  # 2 hours between sweeps
+TRUFFLEHOG_PATH        = Path(os.environ.get("TRUFFLEHOG_PATH", _th_default))
+TRUFFLEHOG_ORGS        = [o.strip() for o in os.environ.get("TRUFFLEHOG_ORGS", "").split(",") if o.strip()]
+TRUFFLEHOG_USERS       = [u.strip() for u in os.environ.get("TRUFFLEHOG_USERS", "").split(",") if u.strip()]
+TRUFFLEHOG_INTERVAL    = int(os.environ.get("TRUFFLEHOG_INTERVAL", "7200"))
 TRUFFLEHOG_CONCURRENCY = int(os.environ.get("TRUFFLEHOG_CONCURRENCY", "50"))
+TRUFFLEHOG_TOKEN       = os.environ.get("TRUFFLEHOG_TOKEN", "")  # dedicated PAT, optional
