@@ -31,6 +31,13 @@ else
     echo "[start.sh] trufflehog already present: $($TH_BIN --version 2>&1 | head -1)"
 fi
 
+# Ensure DB directory is writable (Railway volume may not be attached)
+if [ -d "/data" ] && [ -w "/data" ]; then
+    echo "[start.sh] /data volume mounted and writable — DB at /data/scanner.db"
+else
+    echo "[start.sh] /data not writable — DB at ./scanner.db (no persistence between deploys)"
+fi
+
 exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}" \
     --workers 1 \
     --loop uvloop \

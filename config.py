@@ -21,7 +21,13 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 # ── Storage ────────────────────────────────────────────────────────────────
-_db_default = "/data/scanner.db" if Path("/data").exists() else "./scanner.db"
+# Check both existence AND writability — Railway creates /data mountpoint even
+# when no volume is attached, so .exists() alone gives a false positive.
+_data_dir = Path("/data")
+if _data_dir.exists() and os.access(_data_dir, os.W_OK):
+    _db_default = "/data/scanner.db"
+else:
+    _db_default = "./scanner.db"
 DB_PATH = os.environ.get("DB_PATH", _db_default)
 
 # ── Scan tuning ────────────────────────────────────────────────────────────
