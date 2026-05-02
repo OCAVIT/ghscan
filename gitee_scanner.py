@@ -295,17 +295,20 @@ async def _search_repos(client: httpx.AsyncClient,
 
     for page in range(1, _SEARCH_PAGES + 1):
         hdrs = _headers(token) if use_auth else _ANON_UA
+        params: dict = {
+            "q":        query,
+            "per_page": 20,
+            "page":     page,
+            "order":    "desc",
+            "sort":     "stars",
+        }
+        if use_auth:
+            params["access_token"] = token
         try:
             r = await client.get(
                 f"{_BASE}/search/repositories",
                 headers=hdrs,
-                params={
-                    "q":        query,
-                    "per_page": 100,
-                    "page":     page,
-                    "order":    "desc",
-                    "sort":     "updated",
-                },
+                params=params,
                 timeout=20,
             )
             if r.status_code in (401, 403):
@@ -315,6 +318,9 @@ async def _search_repos(client: httpx.AsyncClient,
                     log.debug("gitee search: token dead, retrying anon for '%s'", query)
                     continue  # retry same page without auth
                 break  # anon also failed — give up
+            if r.status_code == 400:
+                log.debug("gitee search 400 query=%r resp=%s", query[:40], r.text[:120])
+                break
             if r.status_code != 200:
                 break
             data = r.json()
