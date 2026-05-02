@@ -13,6 +13,7 @@ Set on Railway:
 
 import asyncio
 import os
+import re
 import random
 import logging
 import urllib.parse
@@ -454,16 +455,95 @@ async def validate_ark(key: str) -> bool:
     return False
 
 
+_HH_VIDEO_KEYWORDS = re.compile(
+    r'(?:video|i2v|t2v|image.to.video|text.to.video|img2vid|txt2vid|wan|animate)',
+    re.IGNORECASE,
+)
+
+
 async def validate_happyhorse(key: str) -> bool:
+    """
+    True only if key authenticates AND the account has at least one video
+    generation model available. 403 = bad key (not just permission — HH uses
+    403 for auth failures too). 429 = rate-limited but valid.
+    """
     try:
         async with _client() as c:
             r = await c.get(
                 "https://api.runhappyhorse.net/v1/models",
                 headers={"Authorization": f"Bearer {key}"},
             )
-            return r.status_code in (200, 403, 429)
+        if r.status_code == 429:
+            return True  # rate-limited but authenticated
+        if r.status_code != 200:
+            return False  # 401/403/other → dead or no access
+        # Parse model list: require at least one video-capable model
+        try:
+            models = r.json()
+            if isinstance(models, dict):
+                models = models.get("data", models.get("models", []))
+            if not isinstance(models, list) or not models:
+                return True  # 200 but unparseable list → key is live
+            ids = " ".join(
+                (m.get("id", "") if isinstance(m, dict) else str(m))
+                for m in models
+            )
+            return bool(_HH_VIDEO_KEYWORDS.search(ids))
+        except Exception:
+            return True  # 200 but non-JSON → treat as valid
     except Exception as e:
         log.debug("happyhorse validate err: %s", e)
+        return False
+
+
+async def validate_replicate(key: str) -> bool:
+    """
+    Replicate — GET /v1/account: 200 = live key, 401 = dead.
+    Keys use 'Authorization: Token r8_...' header (not Bearer).
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.replicate.com/v1/account",
+                headers={"Authorization": f"Token {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("replicate validate err: %s", e)
+        return False
+
+
+async def validate_fal(key: str) -> bool:
+    """
+    Fal.ai — GET /v1/account/info: 200 = live, 401/403 = dead.
+    Keys use 'Authorization: Key <fal_key>' header.
+    Key format: 'key_id:key_secret' (hex) stored as FAL_KEY env var.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.fal.ai/v1/account/info",
+                headers={"Authorization": f"Key {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        # Also try as Bearer token (some wrappers use it)
+        if r.status_code == 404:
+            async with _client() as c2:
+                r2 = await c2.get(
+                    "https://fal.ai/api/billing/balance",
+                    headers={"Authorization": f"Key {key}"},
+                )
+            return r2.status_code == 200
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("fal validate err: %s", e)
         return False
 
 
@@ -562,6 +642,8 @@ VALIDATORS: dict[str, callable] = {
     "grok":         validate_grok,
     "suno":         validate_suno,
     "inworld":      validate_inworld,
+    "replicate":    validate_replicate,
+    "fal":          validate_fal,
 }
 
 

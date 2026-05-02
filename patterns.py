@@ -248,10 +248,13 @@ def extract_openai_image(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-# ── Happy Horse / RunHappyHorse ───────────────────────────────────────────────
+# ── Happy Horse / RunHappyHorse / LimeAI ─────────────────────────────────────
+# AI video generation service (image-to-video / text-to-video).
+# Also exposed under limeai.top domain. Alibaba wan-video / i2v context.
 _HH_CTX = re.compile(
     r'(?:HAPPY_HORSE_API_KEY|RUNHAPPYHORSE_API_KEY|HAPPYHORSE_API_KEY'
-    r'|HH_API_KEY|happy_horse_key|runhappyhorse\.net|happyhorse\.ai)'
+    r'|HH_API_KEY|LIMEAI_API_KEY|LIME_AI_KEY|happy_horse_key'
+    r'|runhappyhorse\.net|happyhorse\.ai|limeai\.top|lime-ai\.com)'
     r'[\s\S]{0,300}'
     r'([A-Za-z0-9_\-]{20,120})',
     re.IGNORECASE,
@@ -263,6 +266,61 @@ def extract_happyhorse(content: str) -> list[str]:
     for m in _HH_CTX.finditer(content):
         key = m.group(1)
         if len(key) >= 20 and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Replicate ────────────────────────────────────────────────────────────────
+# Keys have a unique "r8_" prefix + ~40 alphanumeric chars.
+_REPLICATE_RE = re.compile(r'(?<![A-Za-z0-9_\-])(r8_[A-Za-z0-9]{38,55})(?![A-Za-z0-9])')
+_REPLICATE_CTX = re.compile(
+    r'(?:REPLICATE_API_TOKEN|REPLICATE_API_KEY|REPLICATE_TOKEN|replicate\.com)'
+    r'[\s\S]{0,200}'
+    r'(r8_[A-Za-z0-9]{38,55})',
+    re.IGNORECASE,
+)
+
+
+def extract_replicate(content: str) -> list[str]:
+    found = []
+    for m in _REPLICATE_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _REPLICATE_RE.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Fal.ai ────────────────────────────────────────────────────────────────────
+# Keys are "key_id:key_secret" hex pairs stored in FAL_KEY / FAL_SECRET_KEY.
+# Pattern: two hex segments separated by colon (total ~80-120 chars).
+_FAL_KEY_RE = re.compile(
+    r'(?<![A-Za-z0-9_\-])([0-9a-f]{8,16}:[0-9a-f]{40,80})(?![A-Za-z0-9])',
+    re.IGNORECASE,
+)
+_FAL_CTX = re.compile(
+    r'(?:FAL_API_KEY|FAL_KEY|FAL_SECRET_KEY|fal\.ai|fal\.run|api\.fal\.ai)'
+    r'[\s\S]{0,200}'
+    r'([0-9a-f]{8,16}:[0-9a-f]{40,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_fal(content: str) -> list[str]:
+    if not re.search(r'(?i)fal[._-]', content):
+        return []
+    found = []
+    for m in _FAL_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _FAL_KEY_RE.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start()-100): m.end()+40]
+        if re.search(r'(?i)fal', ctx) and key not in found and not _FAKE.search(key):
             found.append(key)
     return list(dict.fromkeys(found))
 
@@ -349,6 +407,8 @@ EXTRACTORS: dict[str, callable] = {
     "grok":          extract_grok,
     "suno":          extract_suno,
     "inworld":       extract_inworld,
+    "replicate":     extract_replicate,
+    "fal":           extract_fal,
 }
 
 
@@ -664,47 +724,71 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"DOUBAO_API_KEY" path:.github/workflows',             "ark", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
-    # HAPPY HORSE / RUNHAPPYHORSE  (image/video gen — owner's own service)
+    # HAPPY HORSE / RUNHAPPYHORSE / LIMEAI  (AI video gen — i2v / t2v)
     # ═══════════════════════════════════════════════════════════════════════
 
-    # .env
+    # .env — primary key names
     ('"HAPPY_HORSE_API_KEY" filename:.env',               "happyhorse", "env"),
     ('"HH_API_KEY" filename:.env',                        "happyhorse", "env"),
     ('"HAPPYHORSE_API_KEY" filename:.env',                "happyhorse", "env"),
     ('"RUNHAPPYHORSE_API_KEY" filename:.env',             "happyhorse", "env"),
+    ('"LIMEAI_API_KEY" filename:.env',                    "happyhorse", "env"),
+    ('"LIME_AI_KEY" filename:.env',                       "happyhorse", "env"),
     ('"RUNHAPPYHORSE" filename:.env',                     "happyhorse", "env"),
     ('"happyhorse" "api_key" filename:.env',              "happyhorse", "env"),
+    ('"limeai" "api_key" filename:.env',                  "happyhorse", "env"),
 
-    # Image/video gen config patterns
+    # .env — Alibaba video gen (wan-video / i2v) context alongside HH key
+    ('"happyhorse" "alibaba" filename:.env',              "happyhorse", "env"),
+    ('"HH_API_KEY" "ALIBABA" filename:.env',              "happyhorse", "env"),
+    ('"wan-video" "api_key" filename:.env',               "happyhorse", "env"),
+    ('"image_to_video" "HH_API_KEY" filename:.env',       "happyhorse", "env"),
+
+    # Config files
     ('"runhappyhorse.net" "api_key" filename:config.py',  "happyhorse", "config"),
     ('"runhappyhorse.net" "api_key" filename:config.ts',  "happyhorse", "config"),
+    ('"limeai.top" "api_key" filename:config.py',         "happyhorse", "config"),
     ('"happyhorse" "api_key" filename:video_config.py',   "happyhorse", "config"),
-    ('"happyhorse" "image_generation" language:python',   "happyhorse", "code"),
-    ('"happyhorse" "text_to_video" language:python',      "happyhorse", "code"),
+    ('"happyhorse" "api_key" filename:config.yaml',       "happyhorse", "config"),
 
-    # Code — multi-language
-    ('"runhappyhorse.net" "api_key"',                     "happyhorse", "code"),
-    ('"runhappyhorse.net" "api_key" language:python',     "happyhorse", "code"),
-    ('"runhappyhorse.net" "api_key" language:javascript', "happyhorse", "code"),
-    ('"runhappyhorse.net" "api_key" language:typescript', "happyhorse", "code"),
-    ('"runhappyhorse.net" "api_key" language:go',         "happyhorse", "code"),
-    ('"runhappyhorse.net" "api_key" language:java',       "happyhorse", "code"),
+    # Code — HH domain, multi-language
+    ('"runhappyhorse.net" language:python',               "happyhorse", "code"),
+    ('"runhappyhorse.net" language:javascript',           "happyhorse", "code"),
+    ('"runhappyhorse.net" language:typescript',           "happyhorse", "code"),
+    ('"runhappyhorse.net" language:go',                   "happyhorse", "code"),
+    ('"runhappyhorse.net" language:java',                 "happyhorse", "code"),
+    ('"runhappyhorse.net" language:rust',                 "happyhorse", "code"),
+    ('"limeai.top" language:python',                      "happyhorse", "code"),
+    ('"limeai.top" language:javascript',                  "happyhorse", "code"),
+    ('"limeai.top" language:typescript',                  "happyhorse", "code"),
+
+    # Code — env var names
     ('"HAPPY_HORSE_API_KEY" language:python',             "happyhorse", "code"),
     ('"HAPPY_HORSE_API_KEY" language:javascript',         "happyhorse", "code"),
+    ('"HAPPY_HORSE_API_KEY" language:typescript',         "happyhorse", "code"),
+    ('"HAPPY_HORSE_API_KEY" language:go',                 "happyhorse", "code"),
     ('"HH_API_KEY" language:python',                      "happyhorse", "code"),
+    ('"HH_API_KEY" language:javascript',                  "happyhorse", "code"),
+    ('"LIMEAI_API_KEY" language:python',                  "happyhorse", "code"),
+    ('"LIMEAI_API_KEY" language:javascript',              "happyhorse", "code"),
+
+    # Code — video generation actions
+    ('"happyhorse" "image_to_video" language:python',     "happyhorse", "code"),
+    ('"happyhorse" "text_to_video" language:python',      "happyhorse", "code"),
+    ('"happyhorse" "video_generation" language:python',   "happyhorse", "code"),
+    ('"happyhorse" "image_to_video" language:javascript', "happyhorse", "code"),
+    ('"limeai" "image_to_video" language:python',         "happyhorse", "code"),
+    ('"limeai" "text_to_video" language:python',          "happyhorse", "code"),
 
     # Notebooks
     ('"HAPPY_HORSE_API_KEY" extension:ipynb',             "happyhorse", "notebook"),
     ('"runhappyhorse" extension:ipynb',                   "happyhorse", "notebook"),
+    ('"limeai" extension:ipynb',                          "happyhorse", "notebook"),
 
-    # Happy Horse — Alibaba image-to-video context (HH is often used alongside Alibaba video APIs)
-    ('"happyhorse" "alibaba" filename:.env',              "happyhorse", "env"),
-    ('"HH_API_KEY" "ALIBABA" filename:.env',             "happyhorse", "env"),
-    ('"runhappyhorse" "image_to_video" language:python',  "happyhorse", "code"),
-    ('"runhappyhorse" "text_to_video" language:python',   "happyhorse", "code"),
-    ('"runhappyhorse" "video_generation" language:python',"happyhorse", "code"),
-    ('"runhappyhorse.net" language:javascript',           "happyhorse", "code"),
-    ('"runhappyhorse.net" language:typescript',           "happyhorse", "code"),
+    # CI/CD
+    ('"HAPPY_HORSE_API_KEY" path:.github/workflows',      "happyhorse", "ci"),
+    ('"HH_API_KEY" path:.github/workflows',               "happyhorse", "ci"),
+    ('"HAPPY_HORSE_API_KEY" filename:docker-compose.yml', "happyhorse", "docker"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # GROK / xAI  (unique "xai-" prefix — high precision)
@@ -791,4 +875,63 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"nano_banana" "api_key" language:python',           "google", "code"),
     ('"nano-banana-pro" extension:ipynb',                 "google", "notebook"),
     ('"NANOBANANA_GEMINI_API_KEY" extension:ipynb',       "google", "notebook"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # REPLICATE  (r8_ prefix — high precision)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"REPLICATE_API_TOKEN" filename:.env',               "replicate", "env"),
+    ('"REPLICATE_API_TOKEN" filename:.env.local',         "replicate", "env"),
+    ('"REPLICATE_API_TOKEN" filename:.env.production',    "replicate", "env"),
+    ('"REPLICATE_API_KEY" filename:.env',                 "replicate", "env"),
+    ('"REPLICATE_API_TOKEN" filename:.env.example "r8_"', "replicate", "env"),
+    ('"r8_" "REPLICATE_API_TOKEN" filename:.env',         "replicate", "env"),
+
+    ('"REPLICATE_API_TOKEN" language:python',             "replicate", "code"),
+    ('"REPLICATE_API_TOKEN" language:javascript',         "replicate", "code"),
+    ('"REPLICATE_API_TOKEN" language:typescript',         "replicate", "code"),
+    ('"REPLICATE_API_TOKEN" language:go',                 "replicate", "code"),
+    ('"REPLICATE_API_TOKEN" language:java',               "replicate", "code"),
+    ('"REPLICATE_API_TOKEN" language:rust',               "replicate", "code"),
+    ('"replicate.com/run" language:python',               "replicate", "code"),
+    ('"replicate.com/run" language:javascript',           "replicate", "code"),
+    ('"replicate.com/run" language:typescript',           "replicate", "code"),
+
+    ('"REPLICATE_API_TOKEN" extension:ipynb',             "replicate", "notebook"),
+    ('"r8_" extension:ipynb',                             "replicate", "notebook"),
+    ('"REPLICATE_API_TOKEN" filename:config.py',          "replicate", "config"),
+    ('"REPLICATE_API_TOKEN" filename:config.ts',          "replicate", "config"),
+    ('"REPLICATE_API_TOKEN" path:.github/workflows',      "replicate", "ci"),
+    ('"REPLICATE_API_TOKEN" filename:docker-compose.yml', "replicate", "docker"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FAL.AI  (hex key_id:key_secret format)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"FAL_KEY" filename:.env',                           "fal", "env"),
+    ('"FAL_API_KEY" filename:.env',                       "fal", "env"),
+    ('"FAL_SECRET_KEY" filename:.env',                    "fal", "env"),
+    ('"FAL_KEY" filename:.env.local',                     "fal", "env"),
+    ('"FAL_KEY" filename:.env.production',                "fal", "env"),
+    ('"fal.ai" "FAL_KEY"',                                "fal", "env"),
+
+    ('"FAL_KEY" language:python',                         "fal", "code"),
+    ('"FAL_KEY" language:javascript',                     "fal", "code"),
+    ('"FAL_KEY" language:typescript',                     "fal", "code"),
+    ('"FAL_KEY" language:go',                             "fal", "code"),
+    ('"FAL_API_KEY" language:python',                     "fal", "code"),
+    ('"FAL_API_KEY" language:javascript',                 "fal", "code"),
+    ('"fal.run" language:python',                         "fal", "code"),
+    ('"fal.run" language:javascript',                     "fal", "code"),
+    ('"fal.run" language:typescript',                     "fal", "code"),
+    ('"api.fal.ai" language:python',                      "fal", "code"),
+    ('"api.fal.ai" language:javascript',                  "fal", "code"),
+    ('"api.fal.ai" language:typescript',                  "fal", "code"),
+
+    ('"FAL_KEY" extension:ipynb',                         "fal", "notebook"),
+    ('"fal" "image_to_video" extension:ipynb',            "fal", "notebook"),
+    ('"FAL_KEY" filename:config.py',                      "fal", "config"),
+    ('"FAL_KEY" filename:config.ts',                      "fal", "config"),
+    ('"FAL_KEY" path:.github/workflows',                  "fal", "ci"),
+    ('"FAL_KEY" filename:docker-compose.yml',             "fal", "docker"),
 ]

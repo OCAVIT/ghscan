@@ -46,7 +46,7 @@ def _ai_rarity(provider: str, key: str, is_valid: bool) -> str:
         return "rare"
     if provider in ("ark", "ark_fast", "grok"):
         return "rare"
-    if provider in ("happyhorse", "suno", "inworld"):
+    if provider in ("happyhorse", "suno", "inworld", "replicate", "fal"):
         return "uncommon"
     return "common"
 
@@ -80,6 +80,8 @@ _PROVIDER_EMOJI = {
     "grok":          "✖️",
     "suno":          "🎵",
     "inworld":       "🗣️",
+    "replicate":     "🔁",
+    "fal":           "⚗️",
 }
 
 _CRED_EMOJI = {
