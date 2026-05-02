@@ -33,12 +33,12 @@ _RARITY_ORDER = ["mythic", "legendary", "epic", "rare", "uncommon", "common"]
 def _ai_rarity(provider: str, key: str, is_valid: bool) -> str:
     """Drop tier for an AI-provider key find."""
     if is_valid:
-        if provider in ("openai", "anthropic"):
-            return "mythic"      # paid tier, $200+/mo typical quota
+        if provider in ("openai", "openai_image", "anthropic"):
+            return "mythic"      # paid tier + org-verified for image
         return "legendary"        # any other live key
     if "sk-proj-" in key or "sk-svcacct-" in key or "sk-ant-api03-" in key:
         return "epic"             # paid-tier format signal even unverified
-    if provider in ("openai", "anthropic", "google", "deepseek", "elevenlabs"):
+    if provider in ("openai", "openai_image", "anthropic", "google", "deepseek", "elevenlabs"):
         return "rare"
     if provider in ("ark", "happyhorse"):
         return "uncommon"
@@ -62,13 +62,14 @@ def _infra_rarity(cred_type: str, risk_level: str, destination: str) -> str:
 
 # ── Provider / cred-type visual identity ───────────────────────────────────
 _PROVIDER_EMOJI = {
-    "openai":     "🟢",
-    "anthropic":  "🟣",
-    "google":     "🔵",
-    "deepseek":   "🟡",
-    "elevenlabs": "🟠",
-    "ark":        "🔴",
-    "happyhorse": "🐴",
+    "openai":        "🟢",
+    "openai_image":  "🖼️",
+    "anthropic":     "🟣",
+    "google":        "🔵",
+    "deepseek":      "🟡",
+    "elevenlabs":    "🟠",
+    "ark":           "🔴",
+    "happyhorse":    "🐴",
 }
 
 _CRED_EMOJI = {

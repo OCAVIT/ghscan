@@ -104,6 +104,51 @@ async def validate_openai(key: str) -> bool:
         return False
 
 
+async def validate_openai_image(key: str) -> bool:
+    """
+    True only if key has gpt-image-2 access (org verification + image quota).
+    Uses /v1/images/generations with n=1 size=1024x1024 — cheapest real probe.
+    gpt-image-2 requires org verification; keys without it get 403 billing_not_active
+    or 400 model_not_found even with valid chat quota — so chat validator is not enough.
+
+    Cost: ~$0.04/validation (1 standard 1024x1024 image). Only runs for keys found
+    specifically in gpt-image-2 context (provider="openai_image").
+    """
+    try:
+        async with _client() as c:
+            r = await c.post(
+                "https://api.openai.com/v1/images/generations",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model":   "gpt-image-2",
+                    "prompt":  "a red circle",
+                    "n":       1,
+                    "size":    "1024x1024",
+                    "quality": "low",
+                },
+            )
+            if r.status_code == 200:
+                return True
+            if r.status_code in (401, 403):
+                return False
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            code = _err_field(body, "error", "code")
+            msg  = _err_field(body, "error", "message").lower()
+            if code in ("insufficient_quota", "invalid_api_key", "account_deactivated"):
+                return False
+            if "billing" in msg or "organization" in msg or "verif" in msg:
+                return False
+            if "model_not_found" in msg or "model not found" in msg:
+                return False
+            return r.status_code in (429, 500, 502, 503, 504)
+    except Exception as e:
+        log.debug("openai_image validate err: %s", e)
+        return False
+
+
 async def validate_anthropic(key: str) -> bool:
     """
     True only if key works AND has credit balance.
@@ -256,9 +301,13 @@ _ARK_REGIONS = [
 # Seedance video models — probe order: cheapest first to minimize cost
 # if validation accidentally creates a task (we cancel best-effort below).
 _ARK_SEEDANCE_MODELS = [
-    "doubao-seedance-1-0-lite-i2v-250428",   # image-to-video lite
-    "doubao-seedance-1-0-lite-t2v-250428",   # text-to-video lite
-    "doubao-seedance-1-0-pro-250528",        # pro (most expensive)
+    # Seedance 2.0 — probe first (newer, more widely accessible Apr 2026+)
+    "doubao-seedance-2-0-fast-260128",       # 2.0 fast (cheapest probe)
+    "doubao-seedance-2-0-260128",            # 2.0 standard
+    # Seedance 1.0 — fallback for keys that predate 2.0 rollout
+    "doubao-seedance-1-0-lite-i2v-250428",   # 1.0 i2v lite
+    "doubao-seedance-1-0-lite-t2v-250428",   # 1.0 t2v lite
+    "doubao-seedance-1-0-pro-250528",        # 1.0 pro
 ]
 
 # Cheap Doubao chat model for the auth pre-check — distinguishes
@@ -377,13 +426,14 @@ async def validate_happyhorse(key: str) -> bool:
 
 
 VALIDATORS: dict[str, callable] = {
-    "openai":     validate_openai,
-    "anthropic":  validate_anthropic,
-    "google":     validate_google,
-    "deepseek":   validate_deepseek,
-    "elevenlabs": validate_elevenlabs,
-    "ark":        validate_ark,
-    "happyhorse": validate_happyhorse,
+    "openai":       validate_openai,
+    "openai_image": validate_openai_image,
+    "anthropic":    validate_anthropic,
+    "google":       validate_google,
+    "deepseek":     validate_deepseek,
+    "elevenlabs":   validate_elevenlabs,
+    "ark":          validate_ark,
+    "happyhorse":   validate_happyhorse,
 }
 
 

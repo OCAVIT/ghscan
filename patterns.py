@@ -213,6 +213,32 @@ def extract_ark(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ── OpenAI Image (gpt-image-2) ───────────────────────────────────────────────
+# Keys in gpt-image-2 repos look identical to regular OpenAI keys (sk-proj-/sk-*)
+# but require org verification. Tracking separately (provider="openai_image") so
+# the image-specific validator runs instead of the cheaper chat-completions probe.
+_OAI_IMG_CTX = re.compile(
+    r'(?:gpt-image-2|OPENAI_IMAGE_API_KEY|GPT_IMAGE_API_KEY|IMAGE_API_KEY'
+    r'|images\.generations|images/generations|image_generation)'
+    r'[\s\S]{0,400}'
+    r'(sk-(?:proj-|svcacct-)[A-Za-z0-9_\-]{40,220}|sk-[A-Za-z0-9]{48})',
+    re.IGNORECASE,
+)
+
+
+def extract_openai_image(content: str) -> list[str]:
+    if not re.search(r'(?i)gpt-image-2|gpt_image_2|OPENAI_IMAGE', content):
+        return []
+    found = []
+    for m in _OAI_IMG_CTX.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 80): m.end() + 40]
+        if _FAKE.search(ctx):
+            continue
+        found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Happy Horse / RunHappyHorse ───────────────────────────────────────────────
 _HH_CTX = re.compile(
     r'(?:HAPPY_HORSE_API_KEY|RUNHAPPYHORSE_API_KEY|HAPPYHORSE_API_KEY'
@@ -234,13 +260,14 @@ def extract_happyhorse(content: str) -> list[str]:
 
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
-    "openai":      extract_openai,
-    "anthropic":   extract_anthropic,
-    "google":      extract_google,
-    "deepseek":    extract_deepseek,
-    "elevenlabs":  extract_elevenlabs,
-    "ark":         extract_ark,
-    "happyhorse":  extract_happyhorse,
+    "openai":        extract_openai,
+    "openai_image":  extract_openai_image,
+    "anthropic":     extract_anthropic,
+    "google":        extract_google,
+    "deepseek":      extract_deepseek,
+    "elevenlabs":    extract_elevenlabs,
+    "ark":           extract_ark,
+    "happyhorse":    extract_happyhorse,
 }
 
 
@@ -313,6 +340,22 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"OPENAI_API_KEY=sk-" language:go',                "openai", "code"),
     ('"OPENAI_API_KEY=sk-" language:java',              "openai", "code"),
     ('"OPENAI_API_KEY=sk-" language:php',               "openai", "code"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # OPENAI IMAGE (gpt-image-2) — requires org verification, separate validator
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"gpt-image-2" "sk-" filename:.env',                  "openai_image", "env"),
+    ('"GPT_IMAGE_API_KEY" filename:.env',                  "openai_image", "env"),
+    ('"OPENAI_IMAGE_API_KEY" filename:.env',               "openai_image", "env"),
+    ('"gpt-image-2" language:python',                      "openai_image", "code"),
+    ('"gpt-image-2" language:javascript',                  "openai_image", "code"),
+    ('"gpt-image-2" language:typescript',                  "openai_image", "code"),
+    ('"gpt-image-2" language:go',                          "openai_image", "code"),
+    ('"gpt-image-2" language:java',                        "openai_image", "code"),
+    ('"gpt-image-2" extension:ipynb',                      "openai_image", "notebook"),
+    ('"images/generations" "gpt-image-2" language:python', "openai_image", "code"),
+    ('"images/generations" "gpt-image-2" language:javascript', "openai_image", "code"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # ANTHROPIC / CLAUDE
@@ -506,7 +549,7 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"doubao" "api_key" language:java',                    "ark", "code"),
 
     # Seedance model names literally in code — very high precision
-    # (devs hardcode model IDs like doubao-seedance-1-0-lite-i2v-250428)
+    # 1.0 + 2.0: devs hardcode model IDs like doubao-seedance-*-260128
     ('"doubao-seedance" language:python',                   "ark", "code"),
     ('"doubao-seedance" language:javascript',               "ark", "code"),
     ('"doubao-seedance" language:typescript',               "ark", "code"),
@@ -515,6 +558,14 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"doubao-seedance" language:rust',                     "ark", "code"),
     ('"doubao-seedance" filename:.env',                     "ark", "env"),
     ('"doubao-seedance-1-0" extension:ipynb',               "ark", "notebook"),
+    # Seedance 2.0 — exact model IDs (released Apr 2026)
+    ('"doubao-seedance-2-0-260128" language:python',        "ark", "code"),
+    ('"doubao-seedance-2-0-260128" language:javascript',    "ark", "code"),
+    ('"doubao-seedance-2-0-260128" language:typescript',    "ark", "code"),
+    ('"doubao-seedance-2-0-fast-260128" language:python',   "ark", "code"),
+    ('"doubao-seedance-2-0-fast-260128" language:javascript', "ark", "code"),
+    ('"doubao-seedance-2-0" extension:ipynb',               "ark", "notebook"),
+    ('"doubao-seedance-2-0" filename:.env',                 "ark", "env"),
 
     # BytePlus — ByteDance international brand (same ARK/Volcengine backend)
     ('"BYTEPLUS_API_KEY" filename:.env',                    "ark", "env"),
