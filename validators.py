@@ -737,7 +737,14 @@ async def validate_kling(key: str) -> bool:
     """
     KLING / Kuaishou — keys stored as 'access_key:secret_key' pair.
     Auth model: generate short-lived JWT (HS256, iss=access_key) then call API.
-    GET /v1/images/generations returns 200/400 for valid JWT, 401 for bad key.
+    Only kling-v3 Pro/Standard with active balance qualifies as valid.
+
+    Kling check order: auth → balance → task creation.
+    Known codes:
+      1002 — Auth failed (wrong JWT signature or invalid key pair) → False
+      1102 — Account balance not enough (auth passed, no credits) → False
+      200  — task created (kling-v3 Standard 5s probe) → True
+      429  — rate limited (key alive) → True
     """
     if ":" not in key:
         return False
@@ -748,26 +755,50 @@ async def validate_kling(key: str) -> bool:
         import time
         import jwt as _jwt
         now = int(time.time())
-        payload = {
-            "iss": access_key,
-            "exp": now + 1800,
-            "nbf": now - 5,
-        }
-        token = _jwt.encode(payload, secret_key, algorithm="HS256")
+        token = _jwt.encode(
+            {"iss": access_key, "exp": now + 1800, "nbf": now - 5},
+            secret_key,
+            algorithm="HS256",
+            headers={"alg": "HS256", "typ": "JWT"},
+        )
+        # Probe: POST kling-v3 Standard (cheapest tier, 5s).
+        # Kling checks auth then balance before creating task so:
+        #   bad key  → 1002, no balance → 1102, both ok → 200 (task created)
         async with _client() as c:
-            r = await c.get(
-                "https://api.klingai.com/v1/models",
+            r = await c.post(
+                "https://api.klingai.com/v1/videos/text2video",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type":  "application/json",
                 },
+                json={
+                    "model_name":   "kling-v3",
+                    "mode":         "standard",
+                    "prompt":       "test",
+                    "duration":     "5",
+                    "aspect_ratio": "16:9",
+                },
             )
+        if r.status_code == 429:
+            return True
+        try:
+            body = r.json()
+        except Exception:
+            body = {}
+        code = int(body.get("code", -1))
+        if code == 1002:
+            return False   # auth failed
+        if code == 1102:
+            return False   # no balance
+        # task created successfully (code=0 or code missing, HTTP 200)
         if r.status_code == 200:
+            return True
+        # any non-auth, non-balance error = key alive with balance
+        if code not in (1002, 1102) and code != -1:
             return True
         if r.status_code in (401, 403):
             return False
-        # 400/404 with valid JWT = key works but endpoint differs
-        return r.status_code in (400, 404, 429)
+        return False
     except Exception as e:
         log.debug("kling validate err: %s", e)
         return False
