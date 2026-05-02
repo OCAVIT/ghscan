@@ -629,6 +629,90 @@ async def validate_inworld(key: str) -> bool:
         return False
 
 
+async def validate_kimi(key: str) -> bool:
+    """
+    Kimi / Moonshot AI — GET /v1/models: 200 = live key, 401 = dead.
+    Both CN (api.moonshot.cn) and international (api.moonshot.ai) endpoints tried.
+    """
+    for base in ("https://api.moonshot.cn", "https://api.moonshot.ai"):
+        try:
+            async with _client() as c:
+                r = await c.get(
+                    f"{base}/v1/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+            if r.status_code == 200:
+                return True
+            if r.status_code in (401, 403):
+                return False
+            if r.status_code == 429:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def validate_glm(key: str) -> bool:
+    """
+    Zhipu AI / ChatGLM — GET /api/paas/v4/models: 200 = live key, 401 = dead.
+    Key format: {hex32}.{base62_16} — unique, low false-positive.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://open.bigmodel.cn/api/paas/v4/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("glm validate err: %s", e)
+        return False
+
+
+async def validate_kling(key: str) -> bool:
+    """
+    KLING / Kuaishou — keys stored as 'access_key:secret_key' pair.
+    Auth model: generate short-lived JWT (HS256, iss=access_key) then call API.
+    GET /v1/images/generations returns 200/400 for valid JWT, 401 for bad key.
+    """
+    if ":" not in key:
+        return False
+    access_key, secret_key = key.split(":", 1)
+    if not access_key or not secret_key:
+        return False
+    try:
+        import time
+        import jwt as _jwt
+        now = int(time.time())
+        payload = {
+            "iss": access_key,
+            "exp": now + 1800,
+            "nbf": now - 5,
+        }
+        token = _jwt.encode(payload, secret_key, algorithm="HS256")
+        async with _client() as c:
+            r = await c.get(
+                "https://api.klingai.com/v1/models",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type":  "application/json",
+                },
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        # 400/404 with valid JWT = key works but endpoint differs
+        return r.status_code in (400, 404, 429)
+    except Exception as e:
+        log.debug("kling validate err: %s", e)
+        return False
+
+
 async def validate_huggingface(key: str) -> bool:
     """
     HuggingFace — GET /api/whoami-v2: 200 = live token.
@@ -752,6 +836,9 @@ VALIDATORS: dict[str, callable] = {
     "together":     validate_together,
     "perplexity":   validate_perplexity,
     "runway":       validate_runway,
+    "kimi":         validate_kimi,
+    "glm":          validate_glm,
+    "kling":        validate_kling,
 }
 
 

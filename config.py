@@ -49,6 +49,18 @@ INFRA_LOW_RISK_MAX_DAYS = int(os.environ.get("INFRA_LOW_RISK_MAX_DAYS", "30"))
 # want a cheaper newer model (gpt-4.1-nano) or a different one.
 OPENAI_VALIDATION_MODEL = os.environ.get("OPENAI_VALIDATION_MODEL", "gpt-4o-mini")
 
+# ── Gitee token pool ──────────────────────────────────────────────────────
+_gitee_multi  = os.environ.get("GITEE_TOKENS", "")
+_gitee_single = os.environ.get("GITEE_TOKEN", "")
+if _gitee_multi:
+    GITEE_TOKENS = [t.strip() for t in _gitee_multi.split(",") if t.strip()]
+elif _gitee_single:
+    GITEE_TOKENS = [_gitee_single]
+else:
+    GITEE_TOKENS = []
+
+GITEE_SCAN_INTERVAL = int(os.environ.get("GITEE_SCAN_INTERVAL", "3600"))  # 1h default
+
 # ── Trufflehog secondary scanner ──────────────────────────────────────────
 # TRUFFLEHOG_ORGS=org1,org2,org3  — GitHub orgs to sweep with trufflehog
 # TRUFFLEHOG_TOKEN — dedicated PAT for trufflehog (keeps it off the main quota pool).

@@ -191,6 +191,7 @@ _UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 _ARK_CTX = re.compile(
     r'(?:ARK_API_KEY|VOLCENGINE_API_KEY|DOUBAO_API_KEY|VOLC_API_KEY'
     r'|SEEDANCE_API_KEY|VOLC_ACCESSKEY|ARK_KEY'
+    r'|VOLCSTACK_ACCESS_KEY_ID|VOLCSTACK_SECRET_ACCESS_KEY'
     r'|BYTEPLUS_API_KEY|BYTEPLUS_ACCESS_KEY|BYTEPLUS_SECRET_KEY'
     r'|ark\.cn-beijing\.volces\.com|ark\.ap-southeast\.volces\.com'
     r'|ark\.cn-shanghai\.volces\.com|ark\.us-east-1\.volces\.com'
@@ -506,6 +507,107 @@ def extract_inworld(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ── Kimi / Moonshot AI ───────────────────────────────────────────────────────
+# Keys: sk-[alphanumeric 20+] — overlaps with OpenAI prefix, context-only.
+# Two platforms: api.moonshot.cn (China) and api.moonshot.ai (international).
+_KIMI_DIRECT = re.compile(
+    r'(?:MOONSHOT_API_KEY|KIMI_API_KEY|KIMI_KEY)\s*[=:]\s*["\']?(sk-[A-Za-z0-9]{20,80})',
+    re.IGNORECASE,
+)
+_KIMI_CTX = re.compile(
+    r'(?:MOONSHOT_API_KEY|KIMI_API_KEY|KIMI_KEY|api\.moonshot\.cn|api\.moonshot\.ai'
+    r'|moonshot-v1|kimi-latest)'
+    r'[\s\S]{0,400}'
+    r'(sk-[A-Za-z0-9]{20,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_kimi(content: str) -> list[str]:
+    if not re.search(r'(?i)moonshot|kimi[_\-]?api|api\.moonshot', content):
+        return []
+    found = []
+    for m in _KIMI_DIRECT.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _KIMI_CTX.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── GLM / Zhipu AI / ChatGLM ──────────────────────────────────────────────────
+# Key format: {32 hex chars}.{16 base62 chars} — unique dot-separated structure.
+# Example: a1b2c3d4e5f6...1234.ABCDabcd12345678
+_GLM_STANDALONE = re.compile(
+    r'(?<![A-Za-z0-9\.\-])([a-f0-9]{32}\.[A-Za-z0-9]{16})(?![A-Za-z0-9\.])',
+)
+_GLM_DIRECT = re.compile(
+    r'(?:ZHIPUAI_API_KEY|ZHIPU_API_KEY|GLM_API_KEY|BIGMODEL_API_KEY)'
+    r'\s*[=:]\s*["\']?([A-Za-z0-9_\-.]{32,80})',
+    re.IGNORECASE,
+)
+_GLM_CTX = re.compile(
+    r'(?:ZHIPUAI_API_KEY|ZHIPU_API_KEY|GLM_API_KEY|open\.bigmodel\.cn|zhipuai|chatglm)'
+    r'[\s\S]{0,300}'
+    r'([A-Za-z0-9_\-.]{32,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_glm(content: str) -> list[str]:
+    found = []
+    # Standalone: unique hex.base62 format — very low false-positive
+    for m in _GLM_STANDALONE.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 80): m.end() + 40]
+        if not _FAKE.search(ctx):
+            found.append(key)
+    if re.search(r'(?i)zhipuai|zhipu|bigmodel|chatglm|glm[_\-]?api', content):
+        for m in _GLM_DIRECT.finditer(content):
+            key = m.group(1)
+            if key not in found and not _FAKE.search(key):
+                found.append(key)
+        for m in _GLM_CTX.finditer(content):
+            key = m.group(1)
+            if len(key) >= 32 and key not in found and not _FAKE.search(key):
+                found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── KLING / Kuaishou AI ───────────────────────────────────────────────────────
+# Auth model: AccessKey + SecretKey pair → developer generates short-lived JWT
+# server-side (HS256, iss=access_key, exp=now+1800). No bare key in headers.
+# We extract BOTH keys from the same file and store as "access:secret" pair.
+_KLING_ACCESS = re.compile(
+    r'(?:KLING_ACCESS_KEY|KLING_AK|KUAISHOU_ACCESS_KEY)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{20,60})',
+    re.IGNORECASE,
+)
+_KLING_SECRET = re.compile(
+    r'(?:KLING_SECRET_KEY|KLING_SK|KUAISHOU_SECRET_KEY)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{30,80})',
+    re.IGNORECASE,
+)
+_KLING_TRIGGER = re.compile(
+    r'(?:kling|klingai|api\.klingai\.com|KLING_ACCESS|KLING_SECRET|kuaishou)',
+    re.IGNORECASE,
+)
+
+
+def extract_kling(content: str) -> list[str]:
+    if not _KLING_TRIGGER.search(content):
+        return []
+    access_keys = [m.group(1) for m in _KLING_ACCESS.finditer(content)
+                   if not _FAKE.search(m.group(1))]
+    secret_keys = [m.group(1) for m in _KLING_SECRET.finditer(content)
+                   if not _FAKE.search(m.group(1))]
+    if not access_keys or not secret_keys:
+        return []
+    # Pair first access with first secret found in same file
+    return [f"{access_keys[0]}:{secret_keys[0]}"]
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
     "openai":        extract_openai,
@@ -526,6 +628,9 @@ EXTRACTORS: dict[str, callable] = {
     "together":      extract_together,
     "perplexity":    extract_perplexity,
     "runway":        extract_runway,
+    "kimi":          extract_kimi,
+    "glm":           extract_glm,
+    "kling":         extract_kling,
 }
 
 
@@ -833,6 +938,16 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"maas-api.byteplus.com" language:python',             "ark", "code"),
     ('"maas-api.byteplus.com" language:javascript',         "ark", "code"),
     ('"byteplus" "secret_key" filename:.env',               "ark", "env"),
+
+    # VolcStack — alternate ARK/Volcengine credential names used by Chinese devs
+    ('"VOLCSTACK_ACCESS_KEY_ID" filename:.env',             "ark", "env"),
+    ('"VOLCSTACK_SECRET_ACCESS_KEY" filename:.env',         "ark", "env"),
+    ('"VOLCSTACK_ACCESS_KEY_ID" filename:.env.local',       "ark", "env"),
+    ('"VOLCSTACK_ACCESS_KEY_ID" filename:config.py',        "ark", "config"),
+    ('"VOLCSTACK_ACCESS_KEY_ID" language:python',           "ark", "code"),
+    ('"VOLCSTACK_ACCESS_KEY_ID" language:go',               "ark", "code"),
+    ('"VOLCSTACK_ACCESS_KEY_ID" language:java',             "ark", "code"),
+    ('"VOLCSTACK_ACCESS_KEY_ID" path:.github/workflows',    "ark", "ci"),
 
     # Docker / CI
     ('"ARK_API_KEY" filename:docker-compose.yml',           "ark", "docker"),
@@ -1153,4 +1268,192 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"RUNWAYML_API_SECRET" filename:config.py',          "runway", "config"),
     ('"RUNWAYML_API_SECRET" filename:docker-compose.yml', "runway", "docker"),
     ('"RUNWAYML_API_SECRET" path:.github/workflows',      "runway", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # KIMI / MOONSHOT AI  (sk- prefix, context-only)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"MOONSHOT_API_KEY" filename:.env',                  "kimi", "env"),
+    ('"KIMI_API_KEY" filename:.env',                      "kimi", "env"),
+    ('"MOONSHOT_API_KEY" filename:.env.local',            "kimi", "env"),
+    ('"moonshot" "sk-" filename:.env',                    "kimi", "env"),
+
+    ('"MOONSHOT_API_KEY" language:python',                "kimi", "code"),
+    ('"MOONSHOT_API_KEY" language:javascript',            "kimi", "code"),
+    ('"MOONSHOT_API_KEY" language:typescript',            "kimi", "code"),
+    ('"MOONSHOT_API_KEY" language:go',                    "kimi", "code"),
+    ('"MOONSHOT_API_KEY" language:java',                  "kimi", "code"),
+    ('"api.moonshot.cn" language:python',                 "kimi", "code"),
+    ('"api.moonshot.cn" language:javascript',             "kimi", "code"),
+    ('"api.moonshot.cn" language:typescript',             "kimi", "code"),
+    ('"api.moonshot.cn" language:go',                     "kimi", "code"),
+    ('"api.moonshot.ai" language:python',                 "kimi", "code"),
+    ('"api.moonshot.ai" language:javascript',             "kimi", "code"),
+    ('"moonshot-v1" language:python',                     "kimi", "code"),
+    ('"moonshot-v1" language:javascript',                 "kimi", "code"),
+    ('"MOONSHOT_API_KEY" extension:ipynb',                "kimi", "notebook"),
+    ('"moonshot" "sk-" extension:ipynb',                  "kimi", "notebook"),
+    ('"MOONSHOT_API_KEY" filename:config.py',             "kimi", "config"),
+    ('"MOONSHOT_API_KEY" filename:config.ts',             "kimi", "config"),
+    ('"MOONSHOT_API_KEY" filename:docker-compose.yml',    "kimi", "docker"),
+    ('"MOONSHOT_API_KEY" path:.github/workflows',         "kimi", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # GLM / ZHIPU AI / ChatGLM  (unique hex32.base62_16 key format)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"ZHIPUAI_API_KEY" filename:.env',                   "glm", "env"),
+    ('"ZHIPU_API_KEY" filename:.env',                     "glm", "env"),
+    ('"GLM_API_KEY" filename:.env',                       "glm", "env"),
+    ('"ZHIPUAI_API_KEY" filename:.env.local',             "glm", "env"),
+    ('"zhipuai" "api_key" filename:.env',                 "glm", "env"),
+
+    ('"ZHIPUAI_API_KEY" language:python',                 "glm", "code"),
+    ('"ZHIPUAI_API_KEY" language:javascript',             "glm", "code"),
+    ('"ZHIPUAI_API_KEY" language:typescript',             "glm", "code"),
+    ('"ZHIPUAI_API_KEY" language:go',                     "glm", "code"),
+    ('"ZHIPUAI_API_KEY" language:java',                   "glm", "code"),
+    ('"open.bigmodel.cn" language:python',                "glm", "code"),
+    ('"open.bigmodel.cn" language:javascript',            "glm", "code"),
+    ('"open.bigmodel.cn" language:typescript',            "glm", "code"),
+    ('"open.bigmodel.cn" language:go',                    "glm", "code"),
+    ('"zhipuai" "api_key" language:python',               "glm", "code"),
+    ('"zhipuai" "api_key" language:javascript',           "glm", "code"),
+    ('"glm-4" "api_key" language:python',                 "glm", "code"),
+    ('"chatglm" "api_key" language:python',               "glm", "code"),
+    ('"ZHIPUAI_API_KEY" extension:ipynb',                 "glm", "notebook"),
+    ('"zhipuai" extension:ipynb',                         "glm", "notebook"),
+    ('"ZHIPUAI_API_KEY" filename:config.py',              "glm", "config"),
+    ('"ZHIPUAI_API_KEY" filename:docker-compose.yml',     "glm", "docker"),
+    ('"ZHIPUAI_API_KEY" path:.github/workflows',          "glm", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # KLING / KUAISHOU AI  (AccessKey+SecretKey pair → JWT)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"KLING_ACCESS_KEY" filename:.env',                  "kling", "env"),
+    ('"KLING_SECRET_KEY" filename:.env',                  "kling", "env"),
+    ('"KLING_AK" filename:.env',                          "kling", "env"),
+    ('"KLING_SK" filename:.env',                          "kling", "env"),
+    ('"KLING_ACCESS_KEY" "KLING_SECRET_KEY"',             "kling", "env"),
+
+    ('"KLING_ACCESS_KEY" language:python',                "kling", "code"),
+    ('"KLING_ACCESS_KEY" language:javascript',            "kling", "code"),
+    ('"KLING_ACCESS_KEY" language:typescript',            "kling", "code"),
+    ('"KLING_ACCESS_KEY" language:go',                    "kling", "code"),
+    ('"api.klingai.com" language:python',                 "kling", "code"),
+    ('"api.klingai.com" language:javascript',             "kling", "code"),
+    ('"api.klingai.com" language:typescript',             "kling", "code"),
+    ('"klingai" "access_key" language:python',            "kling", "code"),
+    ('"klingai" "secret_key" language:python',            "kling", "code"),
+    ('"KLING_ACCESS_KEY" extension:ipynb',                "kling", "notebook"),
+    ('"api.klingai.com" extension:ipynb',                 "kling", "notebook"),
+    ('"KLING_ACCESS_KEY" filename:config.py',             "kling", "config"),
+    ('"KLING_ACCESS_KEY" filename:config.ts',             "kling", "config"),
+    ('"KLING_ACCESS_KEY" filename:docker-compose.yml',    "kling", "docker"),
+    ('"KLING_ACCESS_KEY" path:.github/workflows',         "kling", "ci"),
+]
+
+
+# ── Gitee-optimised queries ───────────────────────────────────────────────────
+# Gitee search API uses simple keyword/phrase search — no filename:/language:
+# operators. Language filter is passed separately as &language= API param.
+# Format: (query_str, provider, file_type)
+# Focused on Chinese AI ecosystem (GLM, Kimi, KLING, DeepSeek, ARK) +
+# universal providers common in Chinese dev repos.
+GITEE_QUERIES: list[tuple[str, str, str]] = [
+
+    # ── OpenAI ────────────────────────────────────────────────────────────
+    ('"OPENAI_API_KEY" "sk-"',                            "openai",      "env"),
+    ('"sk-proj-"',                                        "openai",      "code"),
+    ('"OPENAI_API_KEY=sk-"',                              "openai",      "code"),
+    ('"openai" "sk-proj-"',                               "openai",      "code"),
+
+    # ── Anthropic ─────────────────────────────────────────────────────────
+    ('"sk-ant-api03-"',                                   "anthropic",   "code"),
+    ('"ANTHROPIC_API_KEY" "sk-ant-"',                     "anthropic",   "env"),
+
+    # ── Google / Gemini ───────────────────────────────────────────────────
+    ('"GEMINI_API_KEY" "AIzaSy"',                         "google",      "env"),
+    ('"GOOGLE_API_KEY" "AIzaSy"',                         "google",      "env"),
+    ('"generativelanguage.googleapis.com" "AIzaSy"',      "google",      "code"),
+
+    # ── DeepSeek ──────────────────────────────────────────────────────────
+    ('"DEEPSEEK_API_KEY" "sk-"',                          "deepseek",    "env"),
+    ('"api.deepseek.com" "sk-"',                          "deepseek",    "code"),
+    ('"deepseek" "sk-"',                                  "deepseek",    "code"),
+
+    # ── Kimi / Moonshot ── HIGH PRIORITY on Gitee ─────────────────────────
+    ('"MOONSHOT_API_KEY"',                                "kimi",        "env"),
+    ('"KIMI_API_KEY"',                                    "kimi",        "env"),
+    ('"api.moonshot.cn"',                                 "kimi",        "code"),
+    ('"api.moonshot.ai"',                                 "kimi",        "code"),
+    ('"moonshot-v1"',                                     "kimi",        "code"),
+    ('"moonshot" "sk-"',                                  "kimi",        "code"),
+    ('"kimi" "api_key"',                                  "kimi",        "code"),
+
+    # ── GLM / Zhipu AI ── HIGH PRIORITY on Gitee ──────────────────────────
+    ('"ZHIPUAI_API_KEY"',                                 "glm",         "env"),
+    ('"ZHIPU_API_KEY"',                                   "glm",         "env"),
+    ('"GLM_API_KEY"',                                     "glm",         "env"),
+    ('"open.bigmodel.cn"',                                "glm",         "code"),
+    ('"zhipuai"',                                         "glm",         "code"),
+    ('"glm-4"',                                           "glm",         "code"),
+    ('"chatglm" "api_key"',                               "glm",         "code"),
+
+    # ── KLING / Kuaishou ── HIGH PRIORITY on Gitee ────────────────────────
+    ('"KLING_ACCESS_KEY"',                                "kling",       "env"),
+    ('"KLING_SECRET_KEY"',                                "kling",       "env"),
+    ('"api.klingai.com"',                                 "kling",       "code"),
+    ('"klingai" "access_key"',                            "kling",       "code"),
+    ('"kling" "secret_key"',                              "kling",       "code"),
+    ('"KLING_AK" "KLING_SK"',                             "kling",       "env"),
+
+    # ── ARK / Doubao / Volcengine ─────────────────────────────────────────
+    ('"ARK_API_KEY"',                                     "ark",         "env"),
+    ('"DOUBAO_API_KEY"',                                  "ark",         "env"),
+    ('"VOLCENGINE_API_KEY"',                              "ark",         "env"),
+    ('"VOLCSTACK_ACCESS_KEY_ID"',                         "ark",         "env"),
+    ('"VOLCSTACK_SECRET_ACCESS_KEY"',                     "ark",         "env"),
+    ('"ark.cn-beijing.volces.com"',                       "ark",         "code"),
+    ('"doubao-seedance"',                                 "ark",         "code"),
+    ('"doubao" "api_key"',                                "ark",         "code"),
+
+    # ── HuggingFace ───────────────────────────────────────────────────────
+    ('"HF_TOKEN" "hf_"',                                  "huggingface", "env"),
+    ('"HUGGING_FACE_HUB_TOKEN"',                          "huggingface", "env"),
+    ('"hf_" "transformers"',                              "huggingface", "code"),
+    ('"hf_" "pipeline"',                                  "huggingface", "code"),
+
+    # ── ElevenLabs ────────────────────────────────────────────────────────
+    ('"ELEVENLABS_API_KEY"',                              "elevenlabs",  "env"),
+    ('"XI_API_KEY"',                                      "elevenlabs",  "env"),
+    ('"api.elevenlabs.io"',                               "elevenlabs",  "code"),
+
+    # ── Grok / xAI ────────────────────────────────────────────────────────
+    ('"XAI_API_KEY" "xai-"',                              "grok",        "env"),
+    ('"api.x.ai"',                                        "grok",        "code"),
+
+    # ── Together AI ───────────────────────────────────────────────────────
+    ('"TOGETHER_API_KEY"',                                "together",    "env"),
+    ('"api.together.xyz"',                                "together",    "code"),
+
+    # ── Replicate ─────────────────────────────────────────────────────────
+    ('"REPLICATE_API_TOKEN" "r8_"',                       "replicate",   "env"),
+    ('"r8_"',                                             "replicate",   "code"),
+
+    # ── Runway ────────────────────────────────────────────────────────────
+    ('"RUNWAYML_API_SECRET"',                             "runway",      "env"),
+    ('"api.dev.runwayml.com"',                            "runway",      "code"),
+
+    # ── Fal.ai ────────────────────────────────────────────────────────────
+    ('"FAL_KEY"',                                         "fal",         "env"),
+    ('"fal.run"',                                         "fal",         "code"),
+
+    # ── Suno ──────────────────────────────────────────────────────────────
+    ('"SUNO_API_KEY"',                                    "suno",        "env"),
+
+    # ── Perplexity ────────────────────────────────────────────────────────
+    ('"PERPLEXITY_API_KEY"',                              "perplexity",  "env"),
+    ('"pplx-"',                                           "perplexity",  "code"),
 ]
