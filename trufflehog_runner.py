@@ -47,6 +47,13 @@ _DETECTOR_MAP: dict[str, str] = {
     "DeepSeek":        "deepseek",
     "ElevenLabs":      "elevenlabs",
     "HuggingFace":     "huggingface",
+    "HuggingFaceToken": "huggingface",
+    "TogetherAI":      "together",
+    "Together":        "together",
+    "Perplexity":      "perplexity",
+    "PerplexityAI":    "perplexity",
+    "RunwayML":        "runway",
+    "Runway":          "runway",
     "Cohere":          "cohere",
     "Replicate":       "replicate",
     "AWS":             "aws",
@@ -57,7 +64,8 @@ _DETECTOR_MAP: dict[str, str] = {
 }
 
 # Providers we care most about (always notify regardless of verification status)
-_PRIORITY = {"openai", "anthropic", "google", "deepseek", "elevenlabs", "ark"}
+_PRIORITY = {"openai", "anthropic", "google", "deepseek", "elevenlabs", "ark",
+             "huggingface", "together", "perplexity", "runway"}
 
 
 def _th_available() -> bool:

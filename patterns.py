@@ -248,6 +248,119 @@ def extract_openai_image(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ── HuggingFace ──────────────────────────────────────────────────────────────
+# hf_ prefix is unique and 37 chars total — very low false-positive rate.
+# Scan standalone; also context-anchor for broader env-var names without prefix.
+_HF_STANDALONE = re.compile(r'(?<![A-Za-z0-9])(hf_[A-Za-z0-9]{34,50})(?![A-Za-z0-9])')
+_HF_CTX = re.compile(
+    r'(?:HF_TOKEN|HUGGINGFACE_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_API_KEY|HF_API_TOKEN)'
+    r'\s*[=:]\s*["\']?'
+    r'([A-Za-z0-9_\-]{34,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_huggingface(content: str) -> list[str]:
+    found = []
+    for m in _HF_STANDALONE.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 80): m.end() + 40]
+        if not _FAKE.search(ctx):
+            found.append(key)
+    if re.search(r'(?i)huggingface|HF_TOKEN|HF_API', content):
+        for m in _HF_CTX.finditer(content):
+            key = m.group(1)
+            if not key.startswith("hf_"):
+                key = "hf_ctx:" + key  # distinguish non-prefixed ctx matches
+            if key not in found and not _FAKE.search(key):
+                found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Together AI ───────────────────────────────────────────────────────────────
+# Keys are 64-char hex strings — no unique prefix, context-only.
+_TOGETHER_DIRECT = re.compile(
+    r'TOGETHER(?:_AI)?_API_KEY\s*[=:]\s*["\']?([a-f0-9]{64})',
+    re.IGNORECASE,
+)
+_TOGETHER_CTX = re.compile(
+    r'(?:TOGETHER(?:_AI)?_API_KEY|api\.together\.xyz|api\.together\.ai|together\.ai)'
+    r'[\s\S]{0,300}'
+    r'([a-f0-9]{64})',
+    re.IGNORECASE,
+)
+
+
+def extract_together(content: str) -> list[str]:
+    if not re.search(r'(?i)together|TOGETHER_API', content):
+        return []
+    found = []
+    for m in _TOGETHER_DIRECT.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _TOGETHER_CTX.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Perplexity AI ─────────────────────────────────────────────────────────────
+# pplx- prefix is unique — low false-positive, standalone scan safe.
+_PPLX_STANDALONE = re.compile(r'(?<![A-Za-z0-9])(pplx-[a-f0-9]{48,64})(?![A-Za-z0-9])')
+_PPLX_CTX = re.compile(
+    r'(?:PERPLEXITY_API_KEY|PPLX_API_KEY|PPLX_KEY|api\.perplexity\.ai)'
+    r'[\s\S]{0,200}'
+    r'(pplx-[a-f0-9]{48,64})',
+    re.IGNORECASE,
+)
+
+
+def extract_perplexity(content: str) -> list[str]:
+    found = []
+    for m in _PPLX_STANDALONE.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 80): m.end() + 40]
+        if not _FAKE.search(ctx):
+            found.append(key)
+    for m in _PPLX_CTX.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Runway ML ─────────────────────────────────────────────────────────────────
+# Keys stored as RUNWAYML_API_SECRET — no unique prefix, context-only.
+_RUNWAY_DIRECT = re.compile(
+    r'RUNWAYML_API_SECRET\s*[=:]\s*["\']?([A-Za-z0-9_\-]{32,120})',
+    re.IGNORECASE,
+)
+_RUNWAY_CTX = re.compile(
+    r'(?:RUNWAYML_API_SECRET|RUNWAY_API_KEY|RUNWAY_API_SECRET|RUNWAY_TOKEN'
+    r'|api\.dev\.runwayml\.com|api\.runwayml\.com)'
+    r'[\s\S]{0,200}'
+    r'([A-Za-z0-9_\-]{32,120})',
+    re.IGNORECASE,
+)
+
+
+def extract_runway(content: str) -> list[str]:
+    if not re.search(r'(?i)runwayml|RUNWAY_API|runway\.ml|runwayml\.com', content):
+        return []
+    found = []
+    for m in _RUNWAY_DIRECT.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _RUNWAY_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 32 and key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Happy Horse / RunHappyHorse / LimeAI ─────────────────────────────────────
 # AI video generation service (image-to-video / text-to-video).
 # Also exposed under limeai.top domain. Alibaba wan-video / i2v context.
@@ -409,6 +522,10 @@ EXTRACTORS: dict[str, callable] = {
     "inworld":       extract_inworld,
     "replicate":     extract_replicate,
     "fal":           extract_fal,
+    "huggingface":   extract_huggingface,
+    "together":      extract_together,
+    "perplexity":    extract_perplexity,
+    "runway":        extract_runway,
 }
 
 
@@ -934,4 +1051,106 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"FAL_KEY" filename:config.ts',                      "fal", "config"),
     ('"FAL_KEY" path:.github/workflows',                  "fal", "ci"),
     ('"FAL_KEY" filename:docker-compose.yml',             "fal", "docker"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # HUGGINGFACE  (hf_ prefix — high density, unique, low false-positive)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"HF_TOKEN" "hf_" filename:.env',                   "huggingface", "env"),
+    ('"HUGGINGFACE_TOKEN" filename:.env',                 "huggingface", "env"),
+    ('"HUGGING_FACE_HUB_TOKEN" filename:.env',            "huggingface", "env"),
+    ('"HF_API_TOKEN" filename:.env',                      "huggingface", "env"),
+    ('"HF_TOKEN" filename:.env.local',                    "huggingface", "env"),
+    ('"HF_TOKEN" filename:.env.production',               "huggingface", "env"),
+    ('"HF_TOKEN" filename:.env.example "hf_"',            "huggingface", "env"),
+
+    ('"HF_TOKEN" language:python',                        "huggingface", "code"),
+    ('"HF_TOKEN" language:javascript',                    "huggingface", "code"),
+    ('"HF_TOKEN" language:typescript',                    "huggingface", "code"),
+    ('"HF_TOKEN" language:go',                            "huggingface", "code"),
+    ('"HF_TOKEN" language:java',                          "huggingface", "code"),
+    ('"HUGGING_FACE_HUB_TOKEN" language:python',          "huggingface", "code"),
+    ('"HUGGING_FACE_HUB_TOKEN" language:javascript',      "huggingface", "code"),
+    ('"HUGGINGFACE_TOKEN" language:python',               "huggingface", "code"),
+    ('"HUGGINGFACE_TOKEN" language:typescript',           "huggingface", "code"),
+    ('"hf_" "huggingface_hub" language:python',           "huggingface", "code"),
+    ('"hf_" "transformers" language:python',              "huggingface", "code"),
+    ('"hf_" "pipeline" language:python',                  "huggingface", "code"),
+    ('"HF_TOKEN" extension:ipynb',                        "huggingface", "notebook"),
+    ('"HUGGING_FACE_HUB_TOKEN" extension:ipynb',          "huggingface", "notebook"),
+    ('"hf_" "InferenceClient" extension:ipynb',           "huggingface", "notebook"),
+    ('"HF_TOKEN" filename:config.py',                     "huggingface", "config"),
+    ('"HF_TOKEN" filename:config.ts',                     "huggingface", "config"),
+    ('"HF_TOKEN" filename:docker-compose.yml',            "huggingface", "docker"),
+    ('"HF_TOKEN" path:.github/workflows',                 "huggingface", "ci"),
+    ('"HUGGING_FACE_HUB_TOKEN" path:.github/workflows',   "huggingface", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOGETHER AI  (64-char hex — context-only, moderate density)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"TOGETHER_API_KEY" filename:.env',                  "together", "env"),
+    ('"TOGETHER_AI_API_KEY" filename:.env',               "together", "env"),
+    ('"TOGETHER_API_KEY" filename:.env.local',            "together", "env"),
+    ('"TOGETHER_API_KEY" filename:.env.production',       "together", "env"),
+
+    ('"TOGETHER_API_KEY" language:python',                "together", "code"),
+    ('"TOGETHER_API_KEY" language:javascript',            "together", "code"),
+    ('"TOGETHER_API_KEY" language:typescript',            "together", "code"),
+    ('"TOGETHER_API_KEY" language:go',                    "together", "code"),
+    ('"api.together.xyz" language:python',                "together", "code"),
+    ('"api.together.xyz" language:javascript',            "together", "code"),
+    ('"api.together.xyz" language:typescript',            "together", "code"),
+    ('"api.together.ai" language:python',                 "together", "code"),
+    ('"TOGETHER_API_KEY" extension:ipynb',                "together", "notebook"),
+    ('"together.xyz" "api_key" extension:ipynb',          "together", "notebook"),
+    ('"TOGETHER_API_KEY" filename:config.py',             "together", "config"),
+    ('"TOGETHER_API_KEY" filename:config.ts',             "together", "config"),
+    ('"TOGETHER_API_KEY" filename:docker-compose.yml',    "together", "docker"),
+    ('"TOGETHER_API_KEY" path:.github/workflows',         "together", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PERPLEXITY AI  (pplx- prefix — unique, moderate density)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"PERPLEXITY_API_KEY" filename:.env',                "perplexity", "env"),
+    ('"PPLX_API_KEY" filename:.env',                      "perplexity", "env"),
+    ('"PPLX_KEY" filename:.env',                          "perplexity", "env"),
+    ('"PERPLEXITY_API_KEY" filename:.env.local',          "perplexity", "env"),
+    ('"pplx-" filename:.env',                             "perplexity", "env"),
+
+    ('"PERPLEXITY_API_KEY" language:python',              "perplexity", "code"),
+    ('"PERPLEXITY_API_KEY" language:javascript',          "perplexity", "code"),
+    ('"PERPLEXITY_API_KEY" language:typescript',          "perplexity", "code"),
+    ('"api.perplexity.ai" language:python',               "perplexity", "code"),
+    ('"api.perplexity.ai" language:javascript',           "perplexity", "code"),
+    ('"api.perplexity.ai" language:typescript',           "perplexity", "code"),
+    ('"pplx-" "perplexity" language:python',              "perplexity", "code"),
+    ('"PERPLEXITY_API_KEY" extension:ipynb',              "perplexity", "notebook"),
+    ('"pplx-" extension:ipynb',                           "perplexity", "notebook"),
+    ('"PERPLEXITY_API_KEY" filename:config.py',           "perplexity", "config"),
+    ('"PERPLEXITY_API_KEY" path:.github/workflows',       "perplexity", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RUNWAY ML  (context-only — RUNWAYML_API_SECRET, no unique key prefix)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"RUNWAYML_API_SECRET" filename:.env',               "runway", "env"),
+    ('"RUNWAY_API_KEY" filename:.env',                    "runway", "env"),
+    ('"RUNWAY_API_SECRET" filename:.env',                 "runway", "env"),
+    ('"RUNWAY_TOKEN" filename:.env',                      "runway", "env"),
+    ('"RUNWAYML_API_SECRET" filename:.env.local',         "runway", "env"),
+
+    ('"RUNWAYML_API_SECRET" language:python',             "runway", "code"),
+    ('"RUNWAYML_API_SECRET" language:javascript',         "runway", "code"),
+    ('"RUNWAYML_API_SECRET" language:typescript',         "runway", "code"),
+    ('"api.dev.runwayml.com" language:python',            "runway", "code"),
+    ('"api.dev.runwayml.com" language:javascript',        "runway", "code"),
+    ('"api.dev.runwayml.com" language:typescript',        "runway", "code"),
+    ('"runwayml" "gen-3" language:python',                "runway", "code"),
+    ('"runwayml" "gen-3" language:javascript',            "runway", "code"),
+    ('"RUNWAYML_API_SECRET" extension:ipynb',             "runway", "notebook"),
+    ('"RUNWAYML_API_SECRET" filename:config.py',          "runway", "config"),
+    ('"RUNWAYML_API_SECRET" filename:docker-compose.yml', "runway", "docker"),
+    ('"RUNWAYML_API_SECRET" path:.github/workflows',      "runway", "ci"),
 ]

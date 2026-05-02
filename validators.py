@@ -629,6 +629,110 @@ async def validate_inworld(key: str) -> bool:
         return False
 
 
+async def validate_huggingface(key: str) -> bool:
+    """
+    HuggingFace — GET /api/whoami-v2: 200 = live token.
+    hf_ tokens can have write/read/inference scopes — all usable for inference API.
+    """
+    # Strip context prefix added by non-prefixed ctx extractor
+    if key.startswith("hf_ctx:"):
+        key = key[7:]
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://huggingface.co/api/whoami-v2",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("huggingface validate err: %s", e)
+        return False
+
+
+async def validate_together(key: str) -> bool:
+    """
+    Together AI — GET /v1/models: 200 = live key, 401 = dead.
+    Free tier has credits, so most non-revoked keys are active.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.together.xyz/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("together validate err: %s", e)
+        return False
+
+
+async def validate_perplexity(key: str) -> bool:
+    """
+    Perplexity AI — cheap 1-token sonar completion probe.
+    pplx- keys: 401 = invalid, 402 = no credits, 200/429 = active.
+    """
+    try:
+        async with _client() as c:
+            r = await c.post(
+                "https://api.perplexity.ai/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model":      "sonar",
+                    "messages":   [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        if r.status_code == 402:
+            return False  # no credits
+        try:
+            body = r.json()
+            msg = _err_field(body, "error", "message").lower()
+            if "invalid" in msg and "key" in msg:
+                return False
+        except Exception:
+            pass
+        return r.status_code in (429, 500, 502, 503)
+    except Exception as e:
+        log.debug("perplexity validate err: %s", e)
+        return False
+
+
+async def validate_runway(key: str) -> bool:
+    """
+    Runway ML Gen-3 — GET /v1/organizations: 200 = live key.
+    API requires X-Runway-Version header (date string).
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.dev.runwayml.com/v1/organizations",
+                headers={
+                    "Authorization":   f"Bearer {key}",
+                    "X-Runway-Version": "2024-11-06",
+                },
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("runway validate err: %s", e)
+        return False
+
+
 VALIDATORS: dict[str, callable] = {
     "openai":       validate_openai,
     "openai_image": validate_openai_image,
@@ -644,6 +748,10 @@ VALIDATORS: dict[str, callable] = {
     "inworld":      validate_inworld,
     "replicate":    validate_replicate,
     "fal":          validate_fal,
+    "huggingface":  validate_huggingface,
+    "together":     validate_together,
+    "perplexity":   validate_perplexity,
+    "runway":       validate_runway,
 }
 
 
