@@ -74,7 +74,7 @@ _PROVIDER_EMOJI = {
     "google":        "🔵",
     "deepseek":      "🟡",
     "elevenlabs":    "🟠",
-    "ark_fast":      "⚡",   # Seedance 2.0-fast
+    "ark_fast":      "🚀",   # Seedance 2.0-fast
     "ark":           "🔴",   # Seedance 2.0-standard
     "happyhorse":    "🐴",
     "grok":          "✖️",
@@ -82,6 +82,18 @@ _PROVIDER_EMOJI = {
     "inworld":       "🗣️",
     "replicate":     "🔁",
     "fal":           "⚗️",
+    "kimi":          "🌙",
+    "glm":           "💜",
+    "kling":         "🎞️",
+    "runway":        "✈️",
+    "together":      "🤝",
+    "perplexity":    "🔮",
+    "huggingface":   "🤗",
+    "groq":          "⚡",
+    "fireworks":     "🎆",
+    "openrouter":    "🔀",
+    "mistral":       "🌬️",
+    "cohere":        "🌊",
 }
 
 _CRED_EMOJI = {

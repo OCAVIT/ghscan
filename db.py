@@ -214,9 +214,19 @@ def get_valid_keys_by_provider(provider: str) -> list[dict]:
     """Return all is_valid=1 keys for a given provider."""
     with _conn() as c:
         return [dict(r) for r in c.execute(
-            "SELECT id, key_hash, provider, key_full FROM found_keys WHERE is_valid=1 AND provider=?",
+            "SELECT id, key_hash, provider, key_full, key_preview, repo, file_url "
+            "FROM found_keys WHERE is_valid=1 AND provider=?",
             (provider,),
         ).fetchall()]
+
+
+def get_valid_count_by_provider() -> dict[str, int]:
+    """Return {provider: count} for all is_valid=1 keys."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT provider, COUNT(*) as cnt FROM found_keys WHERE is_valid=1 GROUP BY provider"
+        ).fetchall()
+    return {row["provider"]: row["cnt"] for row in rows}
 
 
 def get_valid_keys_to_revalidate(max_age_hours: int = 12, limit: int = 200) -> list[dict]:

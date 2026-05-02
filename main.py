@@ -26,6 +26,7 @@ from trufflehog_runner import trufflehog_loop
 from gitee_scanner import gitee_loop
 from events_scanner import events_loop
 from gist_scanner import gists_loop
+from tg_bot import bot_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,6 +135,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(gitee_loop(),           name="gitee_scanner"),
         asyncio.create_task(events_loop(),          name="events_scanner"),
         asyncio.create_task(gists_loop(),           name="gists_scanner"),
+        asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield
     for t in tasks:
