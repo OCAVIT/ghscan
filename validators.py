@@ -817,6 +817,120 @@ async def validate_runway(key: str) -> bool:
         return False
 
 
+async def validate_groq(key: str) -> bool:
+    """
+    Groq — GET /openai/v1/models: 200 = live key, 401 = dead.
+    gsk_ prefix, NOT in GitHub secret scanning → high validity rate.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("groq validate err: %s", e)
+        return False
+
+
+async def validate_fireworks(key: str) -> bool:
+    """
+    Fireworks AI — GET /inference/v1/models: 200 = live, 401 = dead.
+    fw_ prefix, NOT in GitHub secret scanning.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.fireworks.ai/inference/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("fireworks validate err: %s", e)
+        return False
+
+
+async def validate_openrouter(key: str) -> bool:
+    """
+    OpenRouter — GET /api/v1/auth/key: 200 = live, 401 = dead.
+    sk-or-v1- prefix, NOT in GitHub secret scanning.
+    Checks remaining credits: limit=null means no limit (prepaid unlimited).
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code in (401, 403):
+            return False
+        if r.status_code == 200:
+            try:
+                data = (r.json().get("data") or {})
+                limit = data.get("limit")
+                usage = float(data.get("usage", 0) or 0)
+                if limit is not None and float(limit) <= usage:
+                    return False
+            except Exception:
+                pass
+            return True
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("openrouter validate err: %s", e)
+        return False
+
+
+async def validate_mistral(key: str) -> bool:
+    """
+    Mistral AI — GET /v1/models: 200 = live, 401 = dead.
+    NOT in GitHub secret scanning.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.mistral.ai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("mistral validate err: %s", e)
+        return False
+
+
+async def validate_cohere(key: str) -> bool:
+    """
+    Cohere — GET /v2/models: 200 = live, 401 = dead.
+    NOT in GitHub secret scanning.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.cohere.com/v2/models",
+                headers={"Authorization": f"bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("cohere validate err: %s", e)
+        return False
+
+
 VALIDATORS: dict[str, callable] = {
     "openai":       validate_openai,
     "openai_image": validate_openai_image,
@@ -839,6 +953,11 @@ VALIDATORS: dict[str, callable] = {
     "kimi":         validate_kimi,
     "glm":          validate_glm,
     "kling":        validate_kling,
+    "groq":         validate_groq,
+    "fireworks":    validate_fireworks,
+    "openrouter":   validate_openrouter,
+    "mistral":      validate_mistral,
+    "cohere":       validate_cohere,
 }
 
 

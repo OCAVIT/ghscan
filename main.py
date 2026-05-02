@@ -25,6 +25,7 @@ from notifier import notify_hourly_digest, notify_infra_hourly, flush_unverified
 from trufflehog_runner import trufflehog_loop
 from gitee_scanner import gitee_loop
 from events_scanner import events_loop
+from gist_scanner import gists_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -132,6 +133,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(trufflehog_loop(),      name="trufflehog"),
         asyncio.create_task(gitee_loop(),           name="gitee_scanner"),
         asyncio.create_task(events_loop(),          name="events_scanner"),
+        asyncio.create_task(gists_loop(),           name="gists_scanner"),
     ]
     yield
     for t in tasks:

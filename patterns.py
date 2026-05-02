@@ -608,6 +608,141 @@ def extract_kling(content: str) -> list[str]:
     return [f"{access_keys[0]}:{secret_keys[0]}"]
 
 
+# ── Groq AI ───────────────────────────────────────────────────────────────────
+# gsk_ prefix + ~52 alphanumeric chars. Unique — standalone scan safe.
+# NOT in GitHub secret scanning (mid-2026) → high validity rate.
+_GROQ_STANDALONE = re.compile(r'(?<![A-Za-z0-9_])(gsk_[A-Za-z0-9]{48,60})(?![A-Za-z0-9])')
+_GROQ_CTX = re.compile(
+    r'(?:GROQ_API_KEY|GROQ_KEY|api\.groq\.com)'
+    r'[\s\S]{0,200}'
+    r'(gsk_[A-Za-z0-9]{48,60})',
+    re.IGNORECASE,
+)
+
+
+def extract_groq(content: str) -> list[str]:
+    found = []
+    for m in _GROQ_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _GROQ_STANDALONE.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Fireworks AI ──────────────────────────────────────────────────────────────
+# Keys: fw_ + alphanumeric 30-50 chars. NOT in GitHub secret scanning.
+_FW_STANDALONE = re.compile(r'(?<![A-Za-z0-9_])(fw_[A-Za-z0-9]{30,60})(?![A-Za-z0-9])')
+_FW_CTX = re.compile(
+    r'(?:FIREWORKS_API_KEY|FIREWORKS_AI_API_KEY|api\.fireworks\.ai)'
+    r'[\s\S]{0,200}'
+    r'(fw_[A-Za-z0-9]{30,60})',
+    re.IGNORECASE,
+)
+
+
+def extract_fireworks(content: str) -> list[str]:
+    found = []
+    for m in _FW_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _FW_STANDALONE.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 100): m.end() + 40]
+        if re.search(r'(?i)fireworks', ctx) and key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── OpenRouter ────────────────────────────────────────────────────────────────
+# Keys: sk-or-v1- + 64 hex chars = 73 total. Extremely distinctive.
+# NOT in GitHub secret scanning — routes to 20+ upstream providers.
+_OR_STANDALONE = re.compile(r'(?<![A-Za-z0-9_])(sk-or-v1-[a-f0-9]{64})(?![A-Za-z0-9])')
+_OR_CTX = re.compile(
+    r'(?:OPENROUTER_API_KEY|OR_API_KEY|OPENROUTER_KEY|openrouter\.ai)'
+    r'[\s\S]{0,200}'
+    r'(sk-or-v1-[a-f0-9]{64})',
+    re.IGNORECASE,
+)
+
+
+def extract_openrouter(content: str) -> list[str]:
+    found = []
+    for m in _OR_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _OR_STANDALONE.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Mistral AI ────────────────────────────────────────────────────────────────
+# Keys: ~32 alphanumeric (no unique prefix). Context-only to avoid false positives.
+# NOT in GitHub secret scanning.
+_MISTRAL_DIRECT = re.compile(
+    r'MISTRAL_API_KEY\s*[=:]\s*["\']?([A-Za-z0-9]{32,64})',
+    re.IGNORECASE,
+)
+_MISTRAL_CTX = re.compile(
+    r'(?:MISTRAL_API_KEY|MISTRAL_KEY|MISTRAL_TOKEN|api\.mistral\.ai)'
+    r'[\s\S]{0,200}'
+    r'([A-Za-z0-9]{32,64})',
+    re.IGNORECASE,
+)
+
+
+def extract_mistral(content: str) -> list[str]:
+    if not re.search(r'(?i)mistral', content):
+        return []
+    found = []
+    for m in _MISTRAL_DIRECT.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _MISTRAL_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 32 and key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Cohere ────────────────────────────────────────────────────────────────────
+# Keys: ~40 alphanumeric (no unique prefix). Context-only extraction.
+# NOT in GitHub secret scanning.
+_COHERE_DIRECT = re.compile(
+    r'(?:COHERE_API_KEY|CO_API_KEY|COHERE_TOKEN)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{32,80})',
+    re.IGNORECASE,
+)
+_COHERE_CTX = re.compile(
+    r'(?:COHERE_API_KEY|CO_API_KEY|COHERE_TOKEN|api\.cohere\.ai|api\.cohere\.com)'
+    r'[\s\S]{0,200}'
+    r'([A-Za-z0-9_\-]{32,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_cohere(content: str) -> list[str]:
+    if not re.search(r'(?i)cohere', content):
+        return []
+    found = []
+    for m in _COHERE_DIRECT.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _COHERE_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 32 and key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
     "openai":        extract_openai,
@@ -631,6 +766,11 @@ EXTRACTORS: dict[str, callable] = {
     "kimi":          extract_kimi,
     "glm":           extract_glm,
     "kling":         extract_kling,
+    "groq":          extract_groq,
+    "fireworks":     extract_fireworks,
+    "openrouter":    extract_openrouter,
+    "mistral":       extract_mistral,
+    "cohere":        extract_cohere,
 }
 
 
@@ -1352,6 +1492,135 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"KLING_ACCESS_KEY" filename:config.ts',             "kling", "config"),
     ('"KLING_ACCESS_KEY" filename:docker-compose.yml',    "kling", "docker"),
     ('"KLING_ACCESS_KEY" path:.github/workflows',         "kling", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # GROQ AI  (gsk_ prefix — unique, high validity, NOT in secret scanning)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"GROQ_API_KEY" filename:.env',                        "groq", "env"),
+    ('"GROQ_API_KEY" filename:.env.local',                  "groq", "env"),
+    ('"GROQ_API_KEY" filename:.env.production',             "groq", "env"),
+    ('"GROQ_KEY" filename:.env',                            "groq", "env"),
+    ('"gsk_" filename:.env',                                "groq", "env"),
+
+    ('"GROQ_API_KEY" language:python',                      "groq", "code"),
+    ('"GROQ_API_KEY" language:javascript',                  "groq", "code"),
+    ('"GROQ_API_KEY" language:typescript',                  "groq", "code"),
+    ('"GROQ_API_KEY" language:go',                          "groq", "code"),
+    ('"GROQ_API_KEY" language:java',                        "groq", "code"),
+    ('"GROQ_API_KEY" language:rust',                        "groq", "code"),
+    ('"api.groq.com" language:python',                      "groq", "code"),
+    ('"api.groq.com" language:javascript',                  "groq", "code"),
+    ('"api.groq.com" language:typescript',                  "groq", "code"),
+    ('"api.groq.com" language:go',                          "groq", "code"),
+
+    ('"GROQ_API_KEY" extension:ipynb',                      "groq", "notebook"),
+    ('"gsk_" "groq" extension:ipynb',                       "groq", "notebook"),
+    ('"GROQ_API_KEY" filename:config.py',                   "groq", "config"),
+    ('"GROQ_API_KEY" filename:config.ts',                   "groq", "config"),
+    ('"GROQ_API_KEY" filename:docker-compose.yml',          "groq", "docker"),
+    ('"GROQ_API_KEY" path:.github/workflows',               "groq", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FIREWORKS AI  (fw_ prefix — NOT in secret scanning)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"FIREWORKS_API_KEY" filename:.env',                   "fireworks", "env"),
+    ('"FIREWORKS_AI_API_KEY" filename:.env',                "fireworks", "env"),
+    ('"FIREWORKS_API_KEY" filename:.env.local',             "fireworks", "env"),
+    ('"FIREWORKS_API_KEY" filename:.env.production',        "fireworks", "env"),
+
+    ('"FIREWORKS_API_KEY" language:python',                 "fireworks", "code"),
+    ('"FIREWORKS_API_KEY" language:javascript',             "fireworks", "code"),
+    ('"FIREWORKS_API_KEY" language:typescript',             "fireworks", "code"),
+    ('"FIREWORKS_API_KEY" language:go',                     "fireworks", "code"),
+    ('"api.fireworks.ai" language:python',                  "fireworks", "code"),
+    ('"api.fireworks.ai" language:javascript',              "fireworks", "code"),
+    ('"api.fireworks.ai" language:typescript',              "fireworks", "code"),
+
+    ('"FIREWORKS_API_KEY" extension:ipynb',                 "fireworks", "notebook"),
+    ('"fireworks" "fw_" extension:ipynb',                   "fireworks", "notebook"),
+    ('"FIREWORKS_API_KEY" filename:config.py',              "fireworks", "config"),
+    ('"FIREWORKS_API_KEY" filename:config.ts',              "fireworks", "config"),
+    ('"FIREWORKS_API_KEY" filename:docker-compose.yml',     "fireworks", "docker"),
+    ('"FIREWORKS_API_KEY" path:.github/workflows',          "fireworks", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # OPENROUTER  (sk-or-v1- prefix — extremely distinctive, NOT in scanning)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"OPENROUTER_API_KEY" filename:.env',                  "openrouter", "env"),
+    ('"OR_API_KEY" filename:.env',                          "openrouter", "env"),
+    ('"OPENROUTER_API_KEY" filename:.env.local',            "openrouter", "env"),
+    ('"OPENROUTER_API_KEY" filename:.env.production',       "openrouter", "env"),
+    ('"sk-or-v1-" filename:.env',                           "openrouter", "env"),
+
+    ('"OPENROUTER_API_KEY" language:python',                "openrouter", "code"),
+    ('"OPENROUTER_API_KEY" language:javascript',            "openrouter", "code"),
+    ('"OPENROUTER_API_KEY" language:typescript',            "openrouter", "code"),
+    ('"OPENROUTER_API_KEY" language:go',                    "openrouter", "code"),
+    ('"openrouter.ai" "sk-or" language:python',             "openrouter", "code"),
+    ('"openrouter.ai" "sk-or" language:javascript',         "openrouter", "code"),
+    ('"openrouter.ai" "sk-or" language:typescript',         "openrouter", "code"),
+    ('"openrouter.ai/api" language:python',                 "openrouter", "code"),
+    ('"openrouter.ai/api" language:javascript',             "openrouter", "code"),
+
+    ('"OPENROUTER_API_KEY" extension:ipynb',                "openrouter", "notebook"),
+    ('"sk-or-v1-" extension:ipynb',                         "openrouter", "notebook"),
+    ('"OPENROUTER_API_KEY" filename:config.py',             "openrouter", "config"),
+    ('"OPENROUTER_API_KEY" filename:config.ts',             "openrouter", "config"),
+    ('"OPENROUTER_API_KEY" filename:docker-compose.yml',    "openrouter", "docker"),
+    ('"OPENROUTER_API_KEY" path:.github/workflows',         "openrouter", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # MISTRAL AI  (context-only — MISTRAL_API_KEY, no unique prefix)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"MISTRAL_API_KEY" filename:.env',                     "mistral", "env"),
+    ('"MISTRAL_API_KEY" filename:.env.local',               "mistral", "env"),
+    ('"MISTRAL_API_KEY" filename:.env.production',          "mistral", "env"),
+    ('"MISTRAL_KEY" filename:.env',                         "mistral", "env"),
+
+    ('"MISTRAL_API_KEY" language:python',                   "mistral", "code"),
+    ('"MISTRAL_API_KEY" language:javascript',               "mistral", "code"),
+    ('"MISTRAL_API_KEY" language:typescript',               "mistral", "code"),
+    ('"MISTRAL_API_KEY" language:go',                       "mistral", "code"),
+    ('"api.mistral.ai" language:python',                    "mistral", "code"),
+    ('"api.mistral.ai" language:javascript',                "mistral", "code"),
+    ('"api.mistral.ai" language:typescript',                "mistral", "code"),
+    ('"mistral" "api_key" language:python',                 "mistral", "code"),
+
+    ('"MISTRAL_API_KEY" extension:ipynb',                   "mistral", "notebook"),
+    ('"mistral" "api_key" extension:ipynb',                 "mistral", "notebook"),
+    ('"MISTRAL_API_KEY" filename:config.py',                "mistral", "config"),
+    ('"MISTRAL_API_KEY" filename:config.ts',                "mistral", "config"),
+    ('"MISTRAL_API_KEY" filename:docker-compose.yml',       "mistral", "docker"),
+    ('"MISTRAL_API_KEY" path:.github/workflows',            "mistral", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # COHERE  (context-only — COHERE_API_KEY, no unique prefix)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"COHERE_API_KEY" filename:.env',                      "cohere", "env"),
+    ('"CO_API_KEY" filename:.env',                          "cohere", "env"),
+    ('"COHERE_API_KEY" filename:.env.local',                "cohere", "env"),
+    ('"COHERE_API_KEY" filename:.env.production',           "cohere", "env"),
+
+    ('"COHERE_API_KEY" language:python',                    "cohere", "code"),
+    ('"COHERE_API_KEY" language:javascript',                "cohere", "code"),
+    ('"COHERE_API_KEY" language:typescript',                "cohere", "code"),
+    ('"COHERE_API_KEY" language:go',                        "cohere", "code"),
+    ('"api.cohere.ai" language:python',                     "cohere", "code"),
+    ('"api.cohere.ai" language:javascript',                 "cohere", "code"),
+    ('"api.cohere.com" language:python',                    "cohere", "code"),
+    ('"cohere" "api_key" language:python',                  "cohere", "code"),
+
+    ('"COHERE_API_KEY" extension:ipynb',                    "cohere", "notebook"),
+    ('"cohere" "api_key" extension:ipynb',                  "cohere", "notebook"),
+    ('"COHERE_API_KEY" filename:config.py',                 "cohere", "config"),
+    ('"COHERE_API_KEY" filename:config.ts',                 "cohere", "config"),
+    ('"COHERE_API_KEY" filename:docker-compose.yml',        "cohere", "docker"),
+    ('"COHERE_API_KEY" path:.github/workflows',             "cohere", "ci"),
 ]
 
 
@@ -1456,4 +1725,27 @@ GITEE_QUERIES: list[tuple[str, str, str]] = [
     # ── Perplexity ────────────────────────────────────────────────────────
     ('"PERPLEXITY_API_KEY"',                              "perplexity",  "env"),
     ('"pplx-"',                                           "perplexity",  "code"),
+
+    # ── Groq AI ─────────────────────────────────────────────────────────
+    ('"GROQ_API_KEY"',                                    "groq",        "env"),
+    ('"api.groq.com"',                                    "groq",        "code"),
+    ('"gsk_" "groq"',                                     "groq",        "code"),
+
+    # ── Fireworks AI ────────────────────────────────────────────────────
+    ('"FIREWORKS_API_KEY"',                               "fireworks",   "env"),
+    ('"api.fireworks.ai"',                                "fireworks",   "code"),
+
+    # ── OpenRouter ──────────────────────────────────────────────────────
+    ('"OPENROUTER_API_KEY"',                              "openrouter",  "env"),
+    ('"sk-or-v1-"',                                       "openrouter",  "code"),
+    ('"openrouter.ai"',                                   "openrouter",  "code"),
+
+    # ── Mistral AI ──────────────────────────────────────────────────────
+    ('"MISTRAL_API_KEY"',                                 "mistral",     "env"),
+    ('"api.mistral.ai"',                                  "mistral",     "code"),
+
+    # ── Cohere ──────────────────────────────────────────────────────────
+    ('"COHERE_API_KEY"',                                  "cohere",      "env"),
+    ('"CO_API_KEY"',                                      "cohere",      "env"),
+    ('"api.cohere.ai"',                                   "cohere",      "code"),
 ]

@@ -69,6 +69,13 @@ _AI_TRIGGER = (
     "DEEPSEEK", "deepseek",
     "ARK_API", "ark_api", "DOUBAO", "doubao",
     "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
+    "gsk_",                     # Groq AI
+    "fw_",                      # Fireworks AI
+    "sk-or-v1",                 # OpenRouter
+    "FIREWORKS", "fireworks",   # Fireworks context
+    "OPENROUTER", "openrouter", # OpenRouter context
+    "MISTRAL", "mistral",       # Mistral AI
+    "COHERE", "cohere",         # Cohere
 )
 _INFRA_TRIGGER = (
     "://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",

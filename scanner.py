@@ -355,7 +355,7 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
 
     # Fast-path: skip heavy regex if no trigger strings present anywhere in content.
     # Saves CPU on large files that are clearly irrelevant (e.g. pure binary-as-text).
-    # Keep in sync with gitee_scanner._AI_TRIGGER when adding new providers.
+    # Keep in sync with gitee_scanner._AI_TRIGGER and events_scanner._AI_TRIGGER.
     _AI_TRIGGER    = (
         "sk-", "AIzaSy", "eyJ",           # OpenAI / Google / JWT
         "hf_",                             # HuggingFace
@@ -370,6 +370,13 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
         "DOUBAO", "doubao",               # Doubao
         "VOLCSTACK", "VOLCENGINE_API",    # Volcengine alt names
         "VOLC_ACCESSKEY",                 # Volcengine alt names
+        "gsk_",                           # Groq AI
+        "fw_",                            # Fireworks AI
+        "sk-or-v1",                       # OpenRouter
+        "FIREWORKS", "fireworks",         # Fireworks context
+        "OPENROUTER", "openrouter",       # OpenRouter context
+        "MISTRAL", "mistral",             # Mistral AI
+        "COHERE", "cohere",               # Cohere
     )
     _INFRA_TRIGGER = ("://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
                       "AKIA", "AIPA", "AIDA", "AROA", "ASIA")
