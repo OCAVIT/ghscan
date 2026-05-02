@@ -104,6 +104,7 @@ _TARGET_PATHS = [
 # outside known org namespaces (students, startups, independent developers).
 # No auth required for this endpoint.
 _SEARCH_QUERIES = [
+    # Chinese AI ecosystem — original
     "seedance",
     "doubao",
     "volcengine",
@@ -119,6 +120,28 @@ _SEARCH_QUERIES = [
     "chatglm",
     "deepseek-api",
     "minimax-api",
+    # Universal providers — also common in Chinese dev repos
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "HUGGINGFACE_TOKEN",
+    "TOGETHER_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "COHERE_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "REPLICATE_API_TOKEN",
+    "RUNWAYML_API_SECRET",
+    "FAL_KEY",
+    # Chinese video / image APIs
+    "wan-video",
+    "happyhorse",
+    "runhappyhorse",
+    "wan-api",
+    # Chinese platform ecosystems (repos here often embed AI provider keys)
+    "modelscope",
+    "dashscope",
 ]
 
 # Seed list of Chinese AI orgs/users with high key density.
@@ -146,6 +169,15 @@ GITEE_TARGET_ORGS: list[tuple[str, str]] = [
     ("org",  "InternLM"),          # Shanghai AI Lab
     ("org",  "MiniMax-AI"),        # MiniMax
     ("org",  "coze-dev"),          # ByteDance Coze
+    # Expanded — Chinese AI companies whose repos often embed provider keys
+    ("org",  "qwenlm"),            # Alibaba Qwen / Tongyi
+    ("org",  "dashscope"),         # Alibaba DashScope API platform
+    ("org",  "stepfun-ai"),        # StepFun AI
+    ("org",  "deepseek-coder"),    # DeepSeek Coder team
+    ("org",  "sensetime"),         # SenseTime
+    ("org",  "megvii"),            # Megvii / Face++
+    ("org",  "netease-youdao"),    # NetEase AI (Youdao / LLM research)
+    ("org",  "4paradigm"),         # 4Paradigm
 ]
 
 # Additional users known to work on Chinese AI projects

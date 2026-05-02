@@ -49,6 +49,7 @@ _LIMITS = httpx.Limits(
 _WATCH_NAMES: frozenset[str] = frozenset({
     ".env", ".env.local", ".env.example", ".env.production",
     ".env.development", ".env.staging", ".env.backup",
+    ".env.dev", ".env.test", ".env.qa",
     "config.py", "settings.py", "api_config.py",
     "config.yaml", "config.yml", "config.json", "config.toml",
     "config.ts", "config.js",
@@ -59,6 +60,15 @@ _WATCH_NAMES: frozenset[str] = frozenset({
     "llm_config.yaml", "model_config.json",
     "main.yml", "ci.yml", "deploy.yml",  # CI workflow leaf names
     "Makefile",
+    # Explicit secret/credential files
+    "secrets.py", "secrets.js", "secrets.yaml", "secrets.json",
+    "credentials.json", "credentials.py",
+    "keys.py", "keys.js", "keys.yaml",
+    # Helm / k8s values (often contain AI provider keys injected via env)
+    "values.yaml", "values-dev.yaml", "values-prod.yaml",
+    "values-staging.yaml", "values-production.yaml",
+    # Terraform
+    "terraform.tfvars", "variables.tfvars",
 })
 
 _AI_TRIGGER = (

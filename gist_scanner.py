@@ -50,6 +50,7 @@ _LIMITS = httpx.Limits(
 _WATCH_NAMES: frozenset[str] = frozenset({
     ".env", ".env.local", ".env.example", ".env.production",
     ".env.development", ".env.staging", ".env.backup",
+    ".env.dev", ".env.test", ".env.qa",
     "config.py", "settings.py", "api_config.py",
     "config.yaml", "config.yml", "config.json", "config.toml",
     "config.ts", "config.js",
@@ -60,6 +61,8 @@ _WATCH_NAMES: frozenset[str] = frozenset({
     "secrets.py", "secrets.js", "secrets.yaml", "secrets.json",
     "credentials.json", "credentials.py",
     "keys.py", "keys.js", "keys.yaml",
+    "values.yaml", "values-dev.yaml", "values-prod.yaml",
+    "terraform.tfvars", "variables.tfvars",
     "Makefile",
     # Gist-specific: devs often name pastes descriptively
     "env.txt", "env.sh", "environment.txt",

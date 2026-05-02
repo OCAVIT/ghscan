@@ -1621,6 +1621,77 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"COHERE_API_KEY" filename:config.ts',                 "cohere", "config"),
     ('"COHERE_API_KEY" filename:docker-compose.yml',        "cohere", "docker"),
     ('"COHERE_API_KEY" path:.github/workflows',             "cohere", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLANKET (no language filter) — unique prefixes, near-zero false positives
+    # Catches Rust, C++, Dart, Swift, Scala, Shell, HCL, Lua, Elixir, etc.
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Groq  (gsk_ is globally unique to Groq)
+    ('"gsk_"',                                              "groq",        "code"),
+    ('"gsk_" extension:env',                                "groq",        "env"),
+    ('"gsk_" extension:toml',                               "groq",        "code"),
+    ('"GROQ_API_KEY" extension:env',                        "groq",        "env"),
+    ('"GROQ_API_KEY" extension:yaml',                       "groq",        "yaml"),
+    ('"GROQ_API_KEY" extension:toml',                       "groq",        "code"),
+
+    # OpenRouter  (sk-or-v1- is the most unique prefix in the ecosystem)
+    ('"sk-or-v1-"',                                         "openrouter",  "code"),
+    ('"sk-or-v1-" extension:env',                           "openrouter",  "env"),
+    ('"OPENROUTER_API_KEY" extension:env',                  "openrouter",  "env"),
+    ('"OPENROUTER_API_KEY" extension:yaml',                 "openrouter",  "yaml"),
+
+    # Fireworks  (fw_ needs context to avoid noise)
+    ('"fw_" "fireworks"',                                   "fireworks",   "code"),
+    ('"fw_" "FIREWORKS_API_KEY"',                           "fireworks",   "env"),
+    ('"FIREWORKS_API_KEY" extension:env',                   "fireworks",   "env"),
+    ('"FIREWORKS_API_KEY" extension:yaml',                  "fireworks",   "yaml"),
+    ('"FIREWORKS_API_KEY" extension:toml',                  "fireworks",   "code"),
+
+    # Perplexity  (pplx- is unique)
+    ('"pplx-"',                                             "perplexity",  "code"),
+    ('"pplx-" extension:env',                               "perplexity",  "env"),
+    ('"PERPLEXITY_API_KEY" extension:env',                  "perplexity",  "env"),
+    ('"PERPLEXITY_API_KEY" extension:yaml',                 "perplexity",  "yaml"),
+
+    # Replicate  (r8_ is unique)
+    ('"r8_"',                                               "replicate",   "code"),
+    ('"r8_" extension:env',                                 "replicate",   "env"),
+    ('"REPLICATE_API_TOKEN" extension:env',                 "replicate",   "env"),
+    ('"REPLICATE_API_TOKEN" extension:yaml',                "replicate",   "yaml"),
+    ('"REPLICATE_API_TOKEN" extension:toml',                "replicate",   "code"),
+
+    # HuggingFace  (hf_ well-known prefix)
+    ('"hf_" extension:env',                                 "huggingface", "env"),
+    ('"HF_TOKEN" extension:env',                            "huggingface", "env"),
+    ('"HF_TOKEN" extension:yaml',                           "huggingface", "yaml"),
+    ('"HF_TOKEN" extension:toml',                           "huggingface", "code"),
+    ('"HUGGING_FACE_HUB_TOKEN" extension:env',              "huggingface", "env"),
+
+    # Grok / xAI  (xai- is unique)
+    ('"xai-"',                                              "grok",        "code"),
+    ('"xai-" extension:env',                                "grok",        "env"),
+    ('"XAI_API_KEY" extension:env',                         "grok",        "env"),
+    ('"XAI_API_KEY" extension:yaml',                        "grok",        "yaml"),
+    ('"XAI_API_KEY" extension:toml',                        "grok",        "code"),
+
+    # ─── extension:env / yaml / toml blanket for remaining providers ──────
+    ('"sk-proj-" extension:env',                            "openai",      "env"),
+    ('"sk-proj-" extension:yaml',                           "openai",      "yaml"),
+    ('"OPENAI_API_KEY" extension:toml',                     "openai",      "code"),
+    ('"sk-ant-api03-" extension:env',                       "anthropic",   "env"),
+    ('"ANTHROPIC_API_KEY" extension:yaml',                  "anthropic",   "yaml"),
+    ('"ANTHROPIC_API_KEY" extension:toml',                  "anthropic",   "code"),
+    ('"AIzaSy" extension:env',                              "google",      "env"),
+    ('"GEMINI_API_KEY" extension:yaml',                     "google",      "yaml"),
+    ('"DEEPSEEK_API_KEY" extension:env',                    "deepseek",    "env"),
+    ('"DEEPSEEK_API_KEY" extension:yaml',                   "deepseek",    "yaml"),
+    ('"MISTRAL_API_KEY" extension:env',                     "mistral",     "env"),
+    ('"MISTRAL_API_KEY" extension:yaml',                    "mistral",     "yaml"),
+    ('"MISTRAL_API_KEY" extension:toml',                    "mistral",     "code"),
+    ('"COHERE_API_KEY" extension:env',                      "cohere",      "env"),
+    ('"COHERE_API_KEY" extension:yaml',                     "cohere",      "yaml"),
+    ('"COHERE_API_KEY" extension:toml',                     "cohere",      "code"),
 ]
 
 
