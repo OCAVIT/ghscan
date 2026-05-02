@@ -280,6 +280,9 @@ async def validate_elevenlabs(key: str) -> bool:
             if r.status_code != 200:
                 return False
             sub   = (r.json() or {}).get("subscription", {}) or {}
+            tier  = (sub.get("tier") or "").lower()
+            if tier == "free":
+                return False  # free plan — not useful for generation pipeline
             used  = sub.get("character_count", 0) or 0
             limit = sub.get("character_limit", 0) or 0
             # limit=0 or unlimited tier → has quota; otherwise must have headroom
@@ -364,10 +367,17 @@ async def validate_ark(key: str) -> bool:
 
     Detects:
       - 401 / AuthenticationFailed → dead key
+      - 403 AccountOverdueError / InsufficientBalance → account in arrears (useless)
       - ModelNotOpen on every Seedance model → no video access
       - InvalidEndpointOrModel.NotFound on every probe → no Seedance available
       - 200 / 429 / param-level 4xx on any Seedance model → valid
     """
+    # Billing error codes: account authenticated but cannot generate (overdue/no balance)
+    _BILLING_DEAD = frozenset({
+        "AccountOverdueError", "InsufficientBalance", "AccountBalanceNotEnough",
+        "ChargeNotEnoughError", "ResourceInsufficient",
+    })
+
     for region in _ARK_REGIONS:
         # Step 1: auth pre-check via cheap Doubao chat (~$0.0000005).
         status, body = await _ark_post(f"{region}/api/v3/chat/completions", key, {
@@ -380,6 +390,8 @@ async def validate_ark(key: str) -> bool:
         code = _ark_err_code(body)
         if status == 401 or code in ("AuthenticationFailed", "InvalidApiKey", "Unauthorized"):
             return False  # dead key — no point trying other regions
+        if code in _BILLING_DEAD:
+            return False  # account overdue / no balance — can't generate anything
 
         # Step 2: probe Seedance models via task endpoint with empty content.
         # Volcengine validates auth → model permission → params in that order,

