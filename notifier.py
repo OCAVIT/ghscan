@@ -297,6 +297,10 @@ async def flush_unverified_buffer() -> int:
                 )
     except Exception as e:
         log.error("flush buffer err: %s", e)
+        # Restore buffer so the batch is retried next cycle instead of silently dropped
+        async with _lock():
+            _BUFFER[:0] = data
+        return 0
 
     return len(data)
 
