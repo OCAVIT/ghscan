@@ -201,6 +201,24 @@ def update_key_validity(key_hash: str, is_valid: bool):
         )
 
 
+def update_key_provider(key_hash: str, provider: str):
+    """Reclassify an existing key to a new provider label (e.g. ark → ark_fast)."""
+    with _conn() as c:
+        c.execute(
+            "UPDATE found_keys SET provider=? WHERE key_hash=?",
+            (provider, key_hash),
+        )
+
+
+def get_valid_keys_by_provider(provider: str) -> list[dict]:
+    """Return all is_valid=1 keys for a given provider."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT id, key_hash, provider, key_full FROM found_keys WHERE is_valid=1 AND provider=?",
+            (provider,),
+        ).fetchall()]
+
+
 def get_valid_keys_to_revalidate(max_age_hours: int = 12, limit: int = 200) -> list[dict]:
     """
     Return up to `limit` keys currently marked valid that haven't been

@@ -34,13 +34,17 @@ def _ai_rarity(provider: str, key: str, is_valid: bool) -> str:
     """Drop tier for an AI-provider key find."""
     if is_valid:
         if provider in ("openai", "openai_image", "anthropic"):
-            return "mythic"      # paid tier + org-verified for image
-        return "legendary"        # any other live key
+            return "mythic"
+        if provider in ("ark_fast", "grok"):
+            return "mythic"   # Seedance 2.0-fast and Grok are high-value video/frontier
+        return "legendary"
     if "sk-proj-" in key or "sk-svcacct-" in key or "sk-ant-api03-" in key:
-        return "epic"             # paid-tier format signal even unverified
+        return "epic"
     if provider in ("openai", "openai_image", "anthropic", "google", "deepseek", "elevenlabs"):
         return "rare"
-    if provider in ("ark", "happyhorse"):
+    if provider in ("ark_fast", "grok"):
+        return "rare"
+    if provider in ("ark", "happyhorse", "suno", "inworld"):
         return "uncommon"
     return "common"
 
@@ -68,8 +72,12 @@ _PROVIDER_EMOJI = {
     "google":        "🔵",
     "deepseek":      "🟡",
     "elevenlabs":    "🟠",
-    "ark":           "🔴",
+    "ark_fast":      "⚡",   # Seedance 2.0-fast
+    "ark":           "🔴",   # Seedance 2.0-standard
     "happyhorse":    "🐴",
+    "grok":          "✖️",
+    "suno":          "🎵",
+    "inworld":       "🗣️",
 }
 
 _CRED_EMOJI = {

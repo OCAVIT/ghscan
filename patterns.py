@@ -202,7 +202,7 @@ _ARK_CTX = re.compile(
 )
 
 
-def extract_ark(content: str) -> list[str]:
+def _extract_ark_uuids(content: str) -> list[str]:
     found = []
     for m in _ARK_CTX.finditer(content):
         key = m.group(1)
@@ -211,6 +211,15 @@ def extract_ark(content: str) -> list[str]:
             continue
         found.append(key)
     return list(dict.fromkeys(found))
+
+
+def extract_ark_fast(content: str) -> list[str]:
+    """Same extraction as ark — validator decides if 2.0-fast is accessible."""
+    return _extract_ark_uuids(content)
+
+
+def extract_ark(content: str) -> list[str]:
+    return _extract_ark_uuids(content)
 
 
 # ── OpenAI Image (gpt-image-2) ───────────────────────────────────────────────
@@ -258,6 +267,74 @@ def extract_happyhorse(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ── Grok / xAI ───────────────────────────────────────────────────────────────
+# xAI keys have a unique "xai-" prefix followed by ~70 base62 chars.
+# Long enough to scan standalone (false-positive rate near zero).
+_GROK_STANDALONE = re.compile(r'(?<![A-Za-z0-9_\-])(xai-[A-Za-z0-9]{60,90})(?![A-Za-z0-9])')
+_GROK_CTX = re.compile(
+    r'(?:XAI_API_KEY|GROK_API_KEY|xAI_KEY|api\.x\.ai|grok-[23]|grok_api)'
+    r'[\s\S]{0,200}'
+    r'(xai-[A-Za-z0-9]{60,90})',
+    re.IGNORECASE,
+)
+
+
+def extract_grok(content: str) -> list[str]:
+    found = []
+    for m in _GROK_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _GROK_STANDALONE.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Suno AI ───────────────────────────────────────────────────────────────────
+# No unique key prefix — context-only extraction near SUNO_API_KEY / suno.com.
+_SUNO_CTX = re.compile(
+    r'(?:SUNO_API_KEY|SUNO_SECRET|SUNO_TOKEN|suno\.ai|sunoapi\.org|api\.suno\.com)'
+    r'[\s\S]{0,200}'
+    r'([A-Za-z0-9_\-]{32,120})',
+    re.IGNORECASE,
+)
+
+
+def extract_suno(content: str) -> list[str]:
+    if not re.search(r'(?i)suno', content):
+        return []
+    found = []
+    for m in _SUNO_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 32 and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Inworld AI ────────────────────────────────────────────────────────────────
+# Inworld uses Basic Auth with base64(api_key:api_secret). We look for the
+# pre-encoded base64 string stored near INWORLD_BASE64/INWORLD_AUTH context.
+_INWORLD_CTX = re.compile(
+    r'(?:INWORLD_BASE64|INWORLD_AUTH|INWORLD_KEY_SECRET|inworld\.ai)'
+    r'[\s\S]{0,200}'
+    r'([A-Za-z0-9+/=]{40,160})',
+    re.IGNORECASE,
+)
+
+
+def extract_inworld(content: str) -> list[str]:
+    if not re.search(r'(?i)inworld', content):
+        return []
+    found = []
+    for m in _INWORLD_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 40 and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
     "openai":        extract_openai,
@@ -266,8 +343,12 @@ EXTRACTORS: dict[str, callable] = {
     "google":        extract_google,
     "deepseek":      extract_deepseek,
     "elevenlabs":    extract_elevenlabs,
-    "ark":           extract_ark,
+    "ark_fast":      extract_ark_fast,   # Seedance 2.0-fast — BEFORE ark (hash-dedup priority)
+    "ark":           extract_ark,        # Seedance 2.0-standard
     "happyhorse":    extract_happyhorse,
+    "grok":          extract_grok,
+    "suno":          extract_suno,
+    "inworld":       extract_inworld,
 }
 
 
@@ -615,4 +696,99 @@ QUERIES: list[tuple[str, str, str]] = [
     # Notebooks
     ('"HAPPY_HORSE_API_KEY" extension:ipynb',             "happyhorse", "notebook"),
     ('"runhappyhorse" extension:ipynb',                   "happyhorse", "notebook"),
+
+    # Happy Horse — Alibaba image-to-video context (HH is often used alongside Alibaba video APIs)
+    ('"happyhorse" "alibaba" filename:.env',              "happyhorse", "env"),
+    ('"HH_API_KEY" "ALIBABA" filename:.env',             "happyhorse", "env"),
+    ('"runhappyhorse" "image_to_video" language:python',  "happyhorse", "code"),
+    ('"runhappyhorse" "text_to_video" language:python',   "happyhorse", "code"),
+    ('"runhappyhorse" "video_generation" language:python',"happyhorse", "code"),
+    ('"runhappyhorse.net" language:javascript',           "happyhorse", "code"),
+    ('"runhappyhorse.net" language:typescript',           "happyhorse", "code"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # GROK / xAI  (unique "xai-" prefix — high precision)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"XAI_API_KEY" filename:.env',                       "grok", "env"),
+    ('"XAI_API_KEY" filename:.env.local',                 "grok", "env"),
+    ('"XAI_API_KEY" filename:.env.production',            "grok", "env"),
+    ('"GROK_API_KEY" filename:.env',                      "grok", "env"),
+    ('"XAI_API_KEY" filename:.env.example "xai-"',        "grok", "env"),
+    ('"xai-" "XAI_API_KEY" filename:.env',                "grok", "env"),
+    ('"xai-" filename:.env',                              "grok", "env"),
+
+    ('"XAI_API_KEY" extension:ipynb',                     "grok", "notebook"),
+    ('"xai-" "grok" extension:ipynb',                     "grok", "notebook"),
+
+    ('"api.x.ai" language:python',                        "grok", "code"),
+    ('"api.x.ai" language:javascript',                    "grok", "code"),
+    ('"api.x.ai" language:typescript',                    "grok", "code"),
+    ('"api.x.ai" language:go',                            "grok", "code"),
+    ('"api.x.ai" language:java',                          "grok", "code"),
+    ('"api.x.ai" language:rust',                          "grok", "code"),
+    ('"XAI_API_KEY" language:python',                     "grok", "code"),
+    ('"XAI_API_KEY" language:javascript',                 "grok", "code"),
+    ('"XAI_API_KEY" language:typescript',                 "grok", "code"),
+    ('"XAI_API_KEY" language:go',                         "grok", "code"),
+    ('"xai-" "grok-3" language:python',                   "grok", "code"),
+    ('"xai-" "grok-2" language:python',                   "grok", "code"),
+    ('"XAI_API_KEY" filename:config.py',                  "grok", "config"),
+    ('"XAI_API_KEY" filename:config.ts',                  "grok", "config"),
+    ('"XAI_API_KEY" filename:docker-compose.yml',         "grok", "docker"),
+    ('"XAI_API_KEY" path:.github/workflows',              "grok", "ci"),
+    ('"GROK_API_KEY" path:.github/workflows',             "grok", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SUNO AI  (music generation — no prefix, context-only)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"SUNO_API_KEY" filename:.env',                      "suno", "env"),
+    ('"SUNO_API_KEY" filename:.env.local',                "suno", "env"),
+    ('"SUNO_API_KEY" filename:.env.example',              "suno", "env"),
+    ('"SUNO_API_KEY" filename:.env.production',           "suno", "env"),
+    ('"suno" "api_key" filename:.env',                    "suno", "env"),
+
+    ('"SUNO_API_KEY" language:python',                    "suno", "code"),
+    ('"SUNO_API_KEY" language:javascript',                "suno", "code"),
+    ('"SUNO_API_KEY" language:typescript',                "suno", "code"),
+    ('"sunoapi.org" language:python',                     "suno", "code"),
+    ('"sunoapi.org" language:javascript',                 "suno", "code"),
+    ('"sunoapi.org" language:typescript',                 "suno", "code"),
+    ('"api.suno.com" language:python',                    "suno", "code"),
+    ('"api.suno.com" language:javascript',                "suno", "code"),
+    ('"SUNO_API_KEY" extension:ipynb',                    "suno", "notebook"),
+    ('"SUNO_API_KEY" filename:config.py',                 "suno", "config"),
+    ('"SUNO_API_KEY" filename:config.ts',                 "suno", "config"),
+    ('"SUNO_API_KEY" path:.github/workflows',             "suno", "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INWORLD AI TTS  (Basic auth base64 key:secret pair)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"INWORLD_API_KEY" filename:.env',                   "inworld", "env"),
+    ('"INWORLD_SECRET" filename:.env',                    "inworld", "env"),
+    ('"INWORLD_BASE64" filename:.env',                    "inworld", "env"),
+    ('"INWORLD_AUTH" filename:.env',                      "inworld", "env"),
+    ('"INWORLD_KEY_SECRET" filename:.env',                "inworld", "env"),
+    ('"inworld.ai" "api_key" language:python',            "inworld", "code"),
+    ('"inworld.ai" "api_key" language:javascript',        "inworld", "code"),
+    ('"inworld.ai" "api_key" language:typescript',        "inworld", "code"),
+    ('"INWORLD_API_KEY" language:python',                 "inworld", "code"),
+    ('"INWORLD_API_KEY" language:javascript',             "inworld", "code"),
+    ('"INWORLD_API_KEY" extension:ipynb',                 "inworld", "notebook"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # NANO BANANA PRO  (Google Gemini model — uses standard AIzaSy keys)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"NANOBANANA_GEMINI_API_KEY" filename:.env',         "google", "env"),
+    ('"NANOBANANA_API_KEY" filename:.env',                "google", "env"),
+    ('"nano-banana" "GEMINI_API_KEY"',                    "google", "env"),
+    ('"google-nano-banana-pro" language:python',          "google", "code"),
+    ('"google-nano-banana-pro" language:javascript',      "google", "code"),
+    ('"google-nano-banana-pro" language:typescript',      "google", "code"),
+    ('"nano_banana" "api_key" language:python',           "google", "code"),
+    ('"nano-banana-pro" extension:ipynb',                 "google", "notebook"),
+    ('"NANOBANANA_GEMINI_API_KEY" extension:ipynb',       "google", "notebook"),
 ]

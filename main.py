@@ -381,6 +381,37 @@ async def admin_revalidate(authorization: str | None = Header(default=None)):
     }
 
 
+@app.post("/admin/fix_ark")
+async def admin_fix_ark(authorization: str | None = Header(default=None)):
+    """
+    Reclassify existing 'ark' is_valid=1 keys by probing which 2.0 model they can access:
+      • 2.0-fast accessible → update provider to 'ark_fast'
+      • 2.0-standard only   → keep provider as 'ark'
+      • neither (1.0 only)  → mark is_valid=0
+    Run once after deploying the ark_fast split to fix legacy DB entries.
+    """
+    _check_admin(authorization)
+    from validators import validate_ark_fast as _vfast, validate_ark as _vstd
+    rows = db.get_valid_keys_by_provider("ark")
+    results = {"ark_fast": [], "ark": [], "invalidated": []}
+    for row in rows:
+        key  = row["key_full"]
+        khash = row["key_hash"]
+        if await _vfast(key):
+            db.update_key_provider(khash, "ark_fast")
+            db.update_key_validity(khash, True)
+            results["ark_fast"].append(key[:16] + "…")
+        elif await _vstd(key):
+            db.update_key_validity(khash, True)   # provider stays 'ark'
+            results["ark"].append(key[:16] + "…")
+        else:
+            db.update_key_validity(khash, False)  # 1.0-only → dead
+            results["invalidated"].append(key[:16] + "…")
+    log.info("fix_ark: %d→ark_fast, %d→ark, %d invalidated",
+             len(results["ark_fast"]), len(results["ark"]), len(results["invalidated"]))
+    return results
+
+
 @app.post("/admin/vacuum")
 async def admin_vacuum(authorization: str | None = Header(default=None)):
     """Full SQLite VACUUM — repacks DB file after bulk deletes. Takes a few seconds."""
