@@ -702,8 +702,6 @@ async def validate_glm(key: str) -> bool:
                     "max_tokens": 1,
                 },
             )
-        if r.status_code == 200:
-            return True
         if r.status_code == 429:
             return True   # rate-limited but key is alive
         if r.status_code in (401, 403):
@@ -714,7 +712,7 @@ async def validate_glm(key: str) -> bool:
             body = {}
         code = str(_err_field(body, "error", "code"))
         msg  = _err_field(body, "error", "message").lower()
-        # No balance / no resource pack
+        # No balance / no resource pack (can arrive as 200 or 4xx)
         if code == "1113":
             return False
         # Rate-limited via error code (some versions return 200+1301)
@@ -724,6 +722,8 @@ async def validate_glm(key: str) -> bool:
         if any(kw in msg for kw in ("not found", "not exist", "no permission",
                                      "找不到", "不存在", "没有权限", "model")):
             return False
+        if r.status_code == 200:
+            return True
         # Any other 4xx with a parseable error but not auth failure = key alive
         if 400 <= r.status_code < 500:
             return True
