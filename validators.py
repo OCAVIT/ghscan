@@ -1043,6 +1043,44 @@ async def validate_cohere(key: str) -> bool:
         return False
 
 
+async def validate_cerebras(key: str) -> bool:
+    """
+    Cerebras Cloud — POST /v1/chat/completions with llama3.1-8b, max_tokens=1.
+    csk- prefix. NOT in GitHub secret scanning → very high validity rate.
+    401/403 = dead. 429 = rate-limited (alive). 200 = active with quota.
+    """
+    try:
+        async with _client() as c:
+            r = await c.post(
+                "https://api.cerebras.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model":      "llama3.1-8b",
+                    "messages":   [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        if r.status_code == 429:
+            return True
+        try:
+            body = r.json()
+            msg  = _err_field(body, "error", "message").lower()
+            if "invalid" in msg and "key" in msg:
+                return False
+            if "quota" in msg or "exhausted" in msg:
+                return False
+        except Exception:
+            pass
+        return r.status_code in (500, 502, 503)
+    except Exception as e:
+        log.debug("cerebras validate err: %s", e)
+        return False
+
+
 VALIDATORS: dict[str, callable] = {
     "openai":       validate_openai,
     "openai_image": validate_openai_image,
@@ -1070,6 +1108,7 @@ VALIDATORS: dict[str, callable] = {
     "openrouter":   validate_openrouter,
     "mistral":      validate_mistral,
     "cohere":       validate_cohere,
+    "cerebras":     validate_cerebras,
 }
 
 

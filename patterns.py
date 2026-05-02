@@ -743,6 +743,34 @@ def extract_cohere(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ── Cerebras ─────────────────────────────────────────────────────────────────
+# Keys: csk- + ~48 alphanumeric chars. Unique prefix → near-zero false positives.
+# NOT in GitHub secret scanning → very high validity rate.
+# Cerebras Cloud: ultra-fast inference (100k+ tokens/sec on Llama/Mistral).
+_CEREBRAS_STANDALONE = re.compile(
+    r'(?<![A-Za-z0-9_])(csk-[A-Za-z0-9]{32,80})(?![A-Za-z0-9])',
+)
+_CEREBRAS_CTX = re.compile(
+    r'(?:CEREBRAS_API_KEY|CEREBRAS_KEY|api\.cerebras\.ai)'
+    r'[\s\S]{0,200}'
+    r'(csk-[A-Za-z0-9]{32,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_cerebras(content: str) -> list[str]:
+    found = []
+    for m in _CEREBRAS_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _CEREBRAS_STANDALONE.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
     "openai":        extract_openai,
@@ -771,6 +799,7 @@ EXTRACTORS: dict[str, callable] = {
     "openrouter":    extract_openrouter,
     "mistral":       extract_mistral,
     "cohere":        extract_cohere,
+    "cerebras":      extract_cerebras,
 }
 
 
@@ -1692,6 +1721,64 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"COHERE_API_KEY" extension:env',                      "cohere",      "env"),
     ('"COHERE_API_KEY" extension:yaml',                     "cohere",      "yaml"),
     ('"COHERE_API_KEY" extension:toml',                     "cohere",      "code"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CEREBRAS  (csk- unique prefix — ultra-fast inference, NOT in secret scanning)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"csk-" filename:.env',                                "cerebras",    "env"),
+    ('"CEREBRAS_API_KEY" filename:.env',                    "cerebras",    "env"),
+    ('"CEREBRAS_API_KEY" filename:.env.local',              "cerebras",    "env"),
+    ('"csk-" filename:.env.local',                          "cerebras",    "env"),
+    ('"csk-" extension:env',                                "cerebras",    "env"),
+    ('"CEREBRAS_API_KEY" extension:env',                    "cerebras",    "env"),
+    ('"csk-" language:python',                              "cerebras",    "code"),
+    ('"csk-" language:javascript',                          "cerebras",    "code"),
+    ('"csk-" language:typescript',                          "cerebras",    "code"),
+    ('"csk-" language:go',                                  "cerebras",    "code"),
+    ('"csk-" language:Shell',                               "cerebras",    "code"),
+    ('"csk-"',                                              "cerebras",    "code"),
+    ('"CEREBRAS_API_KEY" language:python',                  "cerebras",    "code"),
+    ('"CEREBRAS_API_KEY" language:javascript',              "cerebras",    "code"),
+    ('"api.cerebras.ai" language:python',                   "cerebras",    "code"),
+    ('"api.cerebras.ai" language:javascript',               "cerebras",    "code"),
+    ('"csk-" extension:ipynb',                              "cerebras",    "notebook"),
+    ('"CEREBRAS_API_KEY" extension:ipynb',                  "cerebras",    "notebook"),
+    ('"CEREBRAS_API_KEY" filename:config.py',               "cerebras",    "config"),
+    ('"CEREBRAS_API_KEY" filename:docker-compose.yml',      "cerebras",    "docker"),
+    ('"CEREBRAS_API_KEY" path:.github/workflows',           "cerebras",    "ci"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SHELL SCRIPTS  (language:Shell — ops automation, CI pipelines, deploy scripts)
+    # DevOps engineers hardcode keys in bash/sh for quick automation; these files
+    # are almost never flagged by IDE secret scanners.
+    # ═══════════════════════════════════════════════════════════════════════
+
+    ('"OPENAI_API_KEY" "sk-" language:Shell',               "openai",      "code"),
+    ('"sk-proj-" language:Shell',                           "openai",      "code"),
+    ('"sk-ant-api03-" language:Shell',                      "anthropic",   "code"),
+    ('"ANTHROPIC_API_KEY" "sk-ant-" language:Shell',        "anthropic",   "code"),
+    ('"AIzaSy" language:Shell',                             "google",      "code"),
+    ('"GOOGLE_API_KEY" "AIzaSy" language:Shell',            "google",      "code"),
+    ('"DEEPSEEK_API_KEY" language:Shell',                   "deepseek",    "code"),
+    ('"ARK_API_KEY" language:Shell',                        "ark",         "code"),
+    ('"DOUBAO_API_KEY" language:Shell',                     "ark",         "code"),
+    ('"gsk_" language:Shell',                               "groq",        "code"),
+    ('"GROQ_API_KEY" language:Shell',                       "groq",        "code"),
+    ('"HF_TOKEN" language:Shell',                           "huggingface", "code"),
+    ('"hf_" "HF_TOKEN" language:Shell',                     "huggingface", "code"),
+    ('"xai-" language:Shell',                               "grok",        "code"),
+    ('"XAI_API_KEY" language:Shell',                        "grok",        "code"),
+    ('"fw_" "FIREWORKS" language:Shell',                    "fireworks",   "code"),
+    ('"FIREWORKS_API_KEY" language:Shell',                  "fireworks",   "code"),
+    ('"sk-or-v1-" language:Shell',                          "openrouter",  "code"),
+    ('"OPENROUTER_API_KEY" language:Shell',                 "openrouter",  "code"),
+    ('"MISTRAL_API_KEY" language:Shell',                    "mistral",     "code"),
+    ('"REPLICATE_API_TOKEN" language:Shell',                "replicate",   "code"),
+    ('"MOONSHOT_API_KEY" language:Shell',                   "kimi",        "code"),
+    ('"ZHIPUAI_API_KEY" language:Shell',                    "glm",         "code"),
+    ('"pplx-" language:Shell',                              "perplexity",  "code"),
+    ('"PERPLEXITY_API_KEY" language:Shell',                 "perplexity",  "code"),
 ]
 
 

@@ -94,6 +94,7 @@ _PROVIDER_EMOJI = {
     "openrouter":    "🔀",
     "mistral":       "🌬️",
     "cohere":        "🌊",
+    "cerebras":      "🧠",
 }
 
 _CRED_EMOJI = {

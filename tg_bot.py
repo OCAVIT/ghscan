@@ -58,6 +58,7 @@ _PROV: dict[str, dict] = {
     "elevenlabs":   {"e": "🟠", "n": "ElevenLabs"},
     "inworld":      {"e": "🗣️",  "n": "Inworld AI"},
     "suno":         {"e": "🎵", "n": "Suno Music"},
+    "cerebras":     {"e": "🧠", "n": "Cerebras"},
 }
 
 # ── Category → provider mapping ───────────────────────────────────────────
@@ -69,7 +70,8 @@ _CATS: dict[str, dict] = {
     "text": {
         "e": "💬", "n": "AI Text",
         "p": ["openai", "anthropic", "google", "deepseek", "kimi", "glm", "grok",
-              "together", "perplexity", "mistral", "cohere", "groq", "openrouter", "huggingface"],
+              "together", "perplexity", "mistral", "cohere", "groq", "openrouter",
+              "huggingface", "cerebras"],
     },
     "image": {
         "e": "🖼️", "n": "AI Image",
