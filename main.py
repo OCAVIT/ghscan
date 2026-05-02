@@ -3,8 +3,12 @@ FastAPI entrypoint.
 
 Background tasks (all concurrent, independent):
   _scan_loop()          — code-search scanner, N parallel workers per PAT
-  _hourly_alert_loop()  — Telegram digest every hour
   trufflehog_loop()     — org/user sweep via trufflehog (if configured)
+  tg_bot.bot_loop()     — Telegram interactive Key Vault (inline keyboard)
+
+Intentionally disabled:
+  _flush_loop()         — 15-min roulette push (replaced by on-demand bot vault)
+  _hourly_alert_loop()  — hourly digest push (replaced by on-demand bot vault)
 """
 
 import asyncio
@@ -127,8 +131,6 @@ async def lifespan(app: FastAPI):
     db.init_db()
     tasks = [
         asyncio.create_task(_scan_loop(),           name="scan_loop"),
-        asyncio.create_task(_hourly_alert_loop(),   name="hourly_alert"),
-        asyncio.create_task(_flush_loop(),          name="flush_buffer"),
         asyncio.create_task(_cleanup_loop(),        name="db_cleanup"),
         asyncio.create_task(_revalidation_loop(),   name="revalidation"),
         asyncio.create_task(trufflehog_loop(),      name="trufflehog"),

