@@ -136,8 +136,9 @@ def _main_keyboard(counts: dict[str, int]) -> dict:
     infra_label = f"🏗️ Infra Creds  (🔴{ic['high']} / 🟡{ic['medium']})"
     rows.append([{"text": infra_label, "callback_data": "i"}])
     rows.append([
-        {"text": "📊 Stats",      "callback_data": "s"},
-        {"text": "🔄 Reval All", "callback_data": "rv"},
+        {"text": "📊 Stats",        "callback_data": "s"},
+        {"text": "🔄 Reval All",   "callback_data": "rv"},
+        {"text": "↻ Refresh",      "callback_data": "m"},
     ])
     return {"inline_keyboard": rows}
 
