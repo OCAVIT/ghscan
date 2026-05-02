@@ -80,7 +80,11 @@ _AI_TRIGGER = (
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
     "GROQ_API_KEY", "CEREBRAS_API_KEY", "REPLICATE_API_TOKEN",
     "FIREWORKS_API_KEY", "MISTRAL_API_KEY", "COHERE_API_KEY",
-    "os.environ", "getenv", "dotenv",
+    "DEEPSEEK", "deepseek", "ARK_API", "DOUBAO",
+    "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
+    "klingai", "KLINGAI", "KLING_",
+    "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
+    "os.environ[", "os.getenv(",
 )
 _INFRA_TRIGGER = (
     "://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
@@ -97,6 +101,16 @@ def _headers() -> dict:
 
 def _claim_key(space_id: str, filepath: str) -> str:
     return hashlib.sha256(f"hf:{space_id}:{filepath}".encode()).hexdigest()[:40]
+
+
+async def _check_token(client: httpx.AsyncClient) -> bool:
+    try:
+        r = await client.get(
+            f"{_API_BASE}/whoami-v2", headers=_headers(), timeout=10
+        )
+        return r.status_code == 200
+    except Exception:
+        return True  # network hiccup — assume alive, will surface on first list call
 
 
 async def _list_spaces(client: httpx.AsyncClient,
@@ -241,6 +255,10 @@ async def run_hf_cycle():
     sem = asyncio.Semaphore(_CONCURRENT)
 
     async with httpx.AsyncClient(follow_redirects=False, limits=_LIMITS) as client:
+        if not await _check_token(client):
+            log.error("[hf] token dead (401 on /api/whoami-v2) — skipping cycle")
+            return
+
         # Two passes: recently modified (fresh leaks) + trending (popular repos)
         all_spaces: list[dict] = []
         seen_ids: set[str] = set()

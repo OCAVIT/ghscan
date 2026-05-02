@@ -91,7 +91,11 @@ _AI_TRIGGER = (
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
     "GROQ_API_KEY", "CEREBRAS_API_KEY", "REPLICATE_API_TOKEN",
     "FIREWORKS_API_KEY", "MISTRAL_API_KEY", "COHERE_API_KEY",
-    "HF_TOKEN", "huggingface_hub", "deepseek",
+    "HF_TOKEN", "huggingface_hub",
+    "DEEPSEEK", "deepseek", "ARK_API", "DOUBAO",
+    "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
+    "klingai", "KLINGAI", "KLING_",
+    "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
 )
 
 

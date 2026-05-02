@@ -143,6 +143,9 @@ _AI_TRIGGER = (
     "GROQ_API_KEY", "CEREBRAS_API_KEY",
     "DEEPSEEK", "deepseek",
     "ARK_API", "DOUBAO",
+    "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
+    "klingai", "KLINGAI", "KLING_",
+    "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
     "MISTRAL", "COHERE",
 )
 _INFRA_TRIGGER = (
@@ -172,19 +175,19 @@ async def _check_token(client: httpx.AsyncClient, token: str) -> bool:
                 f"{_BASE}/user", headers=_headers(token), timeout=12
             )
             if r.status_code == 200:
-                _TOKEN_STATUS[token[:12]] = {"alive": True}
+                _TOKEN_STATUS[hashlib.sha256(token.encode()).hexdigest()[:12]] = {"alive": True}
                 return True
             if r.status_code in (401, 403):
-                _TOKEN_STATUS[token[:12]] = {"alive": False}
+                _TOKEN_STATUS[hashlib.sha256(token.encode()).hexdigest()[:12]] = {"alive": False}
                 return False
-            _TOKEN_STATUS[token[:12]] = {"alive": True}
+            _TOKEN_STATUS[hashlib.sha256(token.encode()).hexdigest()[:12]] = {"alive": True}
             return True
         except Exception as e:
             if attempt == 0:
                 await asyncio.sleep(3)
                 continue
             log.debug("codeberg check_token exception (treating as alive): %s", e)
-            _TOKEN_STATUS[token[:12]] = {"alive": True}
+            _TOKEN_STATUS[hashlib.sha256(token.encode()).hexdigest()[:12]] = {"alive": True}
             return True
     return True
 
@@ -210,7 +213,7 @@ async def _search_repos(client: httpx.AsyncClient,
                 timeout=20,
             )
             if r.status_code in (401, 403):
-                _TOKEN_STATUS[token[:12]] = {"alive": False}
+                _TOKEN_STATUS[hashlib.sha256(token.encode()).hexdigest()[:12]] = {"alive": False}
                 break
             if r.status_code != 200:
                 break
