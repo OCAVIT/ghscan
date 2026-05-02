@@ -4,3 +4,4 @@ httpx==0.28.1
 boto3==1.38.14
 cryptography==44.0.3
 PyJWT==2.10.1
+kaggle>=2.1.0

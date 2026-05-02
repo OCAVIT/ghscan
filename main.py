@@ -30,6 +30,9 @@ from trufflehog_runner import trufflehog_loop
 from gitee_scanner import gitee_loop
 from events_scanner import events_loop
 from gist_scanner import gists_loop
+from kaggle_scanner import kaggle_loop
+from hf_scanner import hf_loop
+from codeberg_scanner import codeberg_loop
 from tg_bot import bot_loop
 
 logging.basicConfig(
@@ -137,6 +140,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(gitee_loop(),           name="gitee_scanner"),
         asyncio.create_task(events_loop(),          name="events_scanner"),
         asyncio.create_task(gists_loop(),           name="gists_scanner"),
+        asyncio.create_task(kaggle_loop(),          name="kaggle_scanner"),
+        asyncio.create_task(hf_loop(),              name="hf_scanner"),
+        asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield

@@ -97,3 +97,34 @@ TRUFFLEHOG_USERS       = [u.strip() for u in os.environ.get("TRUFFLEHOG_USERS", 
 TRUFFLEHOG_INTERVAL    = int(os.environ.get("TRUFFLEHOG_INTERVAL", "7200"))
 TRUFFLEHOG_CONCURRENCY = int(os.environ.get("TRUFFLEHOG_CONCURRENCY", "50"))
 TRUFFLEHOG_TOKEN       = os.environ.get("TRUFFLEHOG_TOKEN", "")  # dedicated PAT, optional
+
+# ── Kaggle token pool ──────────────────────────────────────────────────────
+# KAGGLE_TOKENS=KGAT_key1,KGAT_key2  — KGAT_ bearer tokens (new Kaggle format).
+# Username is auto-introspected by the kaggle Python package; no need to specify it.
+# Falls back to single KAGGLE_TOKEN.
+_kaggle_multi  = os.environ.get("KAGGLE_TOKENS", "")
+_kaggle_single = os.environ.get("KAGGLE_TOKEN", "")
+if _kaggle_multi:
+    KAGGLE_TOKENS = [t.strip() for t in _kaggle_multi.split(",") if t.strip()]
+elif _kaggle_single:
+    KAGGLE_TOKENS = [_kaggle_single]
+else:
+    KAGGLE_TOKENS = []
+
+KAGGLE_SCAN_INTERVAL = int(os.environ.get("KAGGLE_SCAN_INTERVAL", "3600"))  # 1h default
+
+# ── HuggingFace token ──────────────────────────────────────────────────────
+# HF_TOKEN — read-scope token for HuggingFace Spaces API.
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+HF_SCAN_INTERVAL = int(os.environ.get("HF_SCAN_INTERVAL", "1800"))  # 30min default
+
+# ── Codeberg token pool ────────────────────────────────────────────────────
+# CODEBERG_TOKENS=token1,token2  — Forgejo/Codeberg API tokens (repository read scope).
+# Rate limit: 300 req/min per token (much more generous than GitHub).
+_codeberg_multi = os.environ.get("CODEBERG_TOKENS", "")
+if _codeberg_multi:
+    CODEBERG_TOKENS = [t.strip() for t in _codeberg_multi.split(",") if t.strip()]
+else:
+    CODEBERG_TOKENS = []
+
+CODEBERG_SCAN_INTERVAL = int(os.environ.get("CODEBERG_SCAN_INTERVAL", "3600"))  # 1h default
