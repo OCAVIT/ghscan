@@ -1,11 +1,13 @@
 """
-Gitee (gitee.com) scanner — org/user enumeration + targeted file fetch.
+Gitee (gitee.com) scanner — org/user enumeration + repo keyword search + targeted file fetch.
 
 Gitee has NO public code search API (unlike GitHub /search/code).
 This scanner works by:
   1. Enumerating repos of known Chinese AI orgs + users
-  2. Fetching repo file tree to find config/env files
-  3. Running the same extractors/validators as the GitHub scanner
+  2. Keyword search via /api/v5/search/repositories (no auth required, finds
+     community repos outside org namespaces — students, startups, forks)
+  3. Fetching known config/env paths in each repo
+  4. Running the same extractors/validators as the GitHub scanner
 
 Covered orgs: DeepSeek, Baidu PaddlePaddle, Zhipu AI (THUDM), Moonshot,
 ByteDance/Volcengine, Huawei MindSpore, Alibaba ModelScope, + community forks.
@@ -39,6 +41,7 @@ _CONCURRENT_ITEMS = 6    # parallel file fetches per worker
 _PAGE_SLEEP       = 2    # seconds between repo-listing pages
 _REPO_SLEEP       = 1    # seconds between repos in same org
 _MAX_REPO_PAGES   = 10   # max pages per org (100 repos/page = 1000 repos)
+_SEARCH_PAGES     = 3    # max pages per search query (100/page = 300 repos)
 
 _LIMITS = httpx.Limits(
     max_connections=80,
@@ -76,10 +79,42 @@ _TARGET_PATHS = [
     ".github/workflows/ci.yml",
     ".github/workflows/deploy.yml",
     "Makefile",
+    # Spring Boot / Java (common in Chinese enterprise AI projects)
+    "application.yml",
+    "application.yaml",
+    "application.properties",
+    "application-dev.yml",
+    "application-prod.yml",
+    "bootstrap.yml",
+    "src/main/resources/application.yml",
+    "src/main/resources/application.properties",
+    # .NET
+    "appsettings.json",
+    "appsettings.Development.json",
+]
+
+# Keyword queries for /api/v5/search/repositories — catches community repos
+# outside known org namespaces (students, startups, independent developers).
+# No auth required for this endpoint.
+_SEARCH_QUERIES = [
+    "seedance",
+    "doubao",
+    "volcengine",
+    "ark_api_key",
+    "VOLC_ACCESSKEY",
+    "VOLCSTACK",
+    "kling",
+    "klingai",
+    "hailuo",
+    "doubao-seedance",
+    "moonshot-api",
+    "zhipuai",
+    "chatglm",
+    "deepseek-api",
+    "minimax-api",
 ]
 
 # Seed list of Chinese AI orgs/users with high key density.
-# Mix of major AI companies + active community contributors.
 GITEE_TARGET_ORGS: list[tuple[str, str]] = [
     # (type, name)  type = "org" | "user"
     ("org",  "deepseek-ai"),
@@ -88,7 +123,8 @@ GITEE_TARGET_ORGS: list[tuple[str, str]] = [
     ("org",  "openvino-project"),
     ("org",  "mindspore-ai"),
     ("org",  "huaweicloud"),
-    ("org",  "volcano-engine"),    # ByteDance Volcengine
+    ("org",  "volcengine"),        # ByteDance Volcengine (correct Gitee name)
+    ("org",  "bytedance"),         # ByteDance main org
     ("org",  "modelscope-ai"),     # Alibaba ModelScope
     ("org",  "openmmlab"),         # OpenMMLab
     ("org",  "baidu"),
@@ -168,6 +204,53 @@ async def _list_repos(client: httpx.AsyncClient,
     return all_repos
 
 
+async def _search_repos(client: httpx.AsyncClient,
+                        query: str, token: str) -> list[dict]:
+    """Search public repos by keyword via /search/repositories.
+
+    No auth required but token prevents anonymous rate-limiting.
+    Returns repos sorted by most recently updated (best for fresh key finds).
+    """
+    all_repos = []
+    for page in range(1, _SEARCH_PAGES + 1):
+        try:
+            r = await client.get(
+                f"{_BASE}/search/repositories",
+                headers=_headers(token),
+                params={
+                    "q":        query,
+                    "per_page": 100,
+                    "page":     page,
+                    "order":    "desc",
+                    "sort":     "updated",
+                },
+                timeout=20,
+            )
+            if r.status_code in (401, 403):
+                _TOKEN_STATUS[token[:8]] = {"alive": False}
+                break
+            if r.status_code != 200:
+                break
+            data = r.json()
+            # API returns {"total_count": N, "items": [...]} or bare list
+            if isinstance(data, dict):
+                batch = data.get("items", [])
+            elif isinstance(data, list):
+                batch = data
+            else:
+                break
+            if not batch:
+                break
+            all_repos.extend(batch)
+            if len(batch) < 100:
+                break
+            await asyncio.sleep(_PAGE_SLEEP)
+        except Exception as e:
+            log.debug("gitee search_repos err [%s]: %s", query, e)
+            break
+    return all_repos
+
+
 async def _get_file(client: httpx.AsyncClient,
                     full_name: str, path: str, token: str) -> str | None:
     """Fetch a single file from a Gitee repo."""
@@ -199,7 +282,8 @@ async def _scan_file(full_name: str, path: str, content: str,
     """Run extractors on content and persist/notify findings."""
     _AI_TRIGGER    = ("sk-", "AIzaSy", "eyJ", "hf_", "pplx-", "xai-", "r8_",
                       "ZHIPUAI", "moonshot", "klingai", "KLING_",
-                      "DEEPSEEK", "ARK_API", "DOUBAO")
+                      "DEEPSEEK", "ARK_API", "DOUBAO",
+                      "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY")
     _INFRA_TRIGGER = ("://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
                       "AKIA", "AIPA", "AIDA", "AROA", "ASIA")
 
@@ -227,7 +311,6 @@ async def _scan_file(full_name: str, path: str, content: str,
                              "VALID" if is_valid else "found", prov, full_name, path)
 
     if has_infra:
-        import hashlib as _hl
         risk_cache = None
         for iprov, ifn in INFRA_EXTRACTORS.items():
             creds = ifn(content)
@@ -274,6 +357,7 @@ async def _scan_repo(client: httpx.AsyncClient, repo: dict,
 
 async def _run_worker(client: httpx.AsyncClient,
                       targets: list[tuple[str, str]],
+                      search_queries: list[str],
                       token: str, sem: asyncio.Semaphore, worker_id: int):
     alive = await _check_token(client, token)
     if not alive:
@@ -284,8 +368,13 @@ async def _run_worker(client: httpx.AsyncClient,
         log.error("[gitee w%d token=%s...] DEAD — skipped", worker_id, token[:8])
         return
 
-    log.info("[gitee w%d token=%s...] %d targets", worker_id, token[:8], len(targets))
+    log.info("[gitee w%d token=%s...] %d org/user targets + %d search queries",
+             worker_id, token[:8], len(targets), len(search_queries))
 
+    # Track repos scanned this cycle to avoid rescanning via search
+    scanned: set[str] = set()
+
+    # Phase 1: org / user enumeration
     for kind, name in targets:
         repos = await _list_repos(client, kind, name, token)
         if not repos:
@@ -293,8 +382,27 @@ async def _run_worker(client: httpx.AsyncClient,
             continue
         log.info("[gitee w%d] %s/%s → %d repos", worker_id, kind, name, len(repos))
         for repo in repos:
+            fn = repo.get("full_name", "")
+            if fn:
+                scanned.add(fn)
             await _scan_repo(client, repo, sem, token)
             await asyncio.sleep(_REPO_SLEEP)
+
+    # Phase 2: keyword search — finds community repos outside org namespaces
+    for query in search_queries:
+        repos = await _search_repos(client, query, token)
+        new_repos = [r for r in repos if r.get("full_name") not in scanned]
+        if not new_repos:
+            log.debug("[gitee w%d] search '%s' → all already scanned", worker_id, query)
+            continue
+        log.info("[gitee w%d] search '%s' → %d new repos", worker_id, query, len(new_repos))
+        for repo in new_repos:
+            fn = repo.get("full_name", "")
+            if fn:
+                scanned.add(fn)
+            await _scan_repo(client, repo, sem, token)
+            await asyncio.sleep(_REPO_SLEEP)
+        await asyncio.sleep(_PAGE_SLEEP)
 
 
 async def run_gitee_cycle():
@@ -306,13 +414,20 @@ async def run_gitee_cycle():
         *[("user", u) for u in GITEE_TARGET_USERS],
     ]
     n = len(GITEE_TOKENS)
+
+    # Distribute org/user targets across tokens
     chunks: list[list] = [[] for _ in range(n)]
     for i, t in enumerate(all_targets):
         chunks[i % n].append(t)
 
+    # Distribute search queries across tokens
+    query_chunks: list[list] = [[] for _ in range(n)]
+    for i, q in enumerate(_SEARCH_QUERIES):
+        query_chunks[i % n].append(q)
+
     log.info(
-        "=== gitee cycle start | %d tokens | %d targets | %d file paths each ===",
-        n, len(all_targets), len(_TARGET_PATHS),
+        "=== gitee cycle start | %d tokens | %d org targets | %d search queries | %d paths each ===",
+        n, len(all_targets), len(_SEARCH_QUERIES), len(_TARGET_PATHS),
     )
 
     sem = asyncio.Semaphore(_CONCURRENT_ITEMS)
@@ -320,7 +435,8 @@ async def run_gitee_cycle():
     async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS) as client:
         workers = [
             asyncio.create_task(
-                _run_worker(client, chunks[i], GITEE_TOKENS[i], sem, i)
+                _run_worker(client, chunks[i], query_chunks[i],
+                            GITEE_TOKENS[i], sem, i)
             )
             for i in range(n)
         ]
@@ -337,8 +453,10 @@ async def gitee_loop():
         log.info("gitee: no GITEE_TOKENS configured — skipping")
         return
 
-    log.info("gitee scanner started | %d tokens | %d orgs+users | interval=%ds",
-             len(GITEE_TOKENS), len(GITEE_TARGET_ORGS) + len(GITEE_TARGET_USERS),
+    log.info("gitee scanner started | %d tokens | %d orgs+users | %d search queries | interval=%ds",
+             len(GITEE_TOKENS),
+             len(GITEE_TARGET_ORGS) + len(GITEE_TARGET_USERS),
+             len(_SEARCH_QUERIES),
              GITEE_SCAN_INTERVAL)
 
     while True:
