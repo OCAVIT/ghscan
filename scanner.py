@@ -355,7 +355,22 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
 
     # Fast-path: skip heavy regex if no trigger strings present anywhere in content.
     # Saves CPU on large files that are clearly irrelevant (e.g. pure binary-as-text).
-    _AI_TRIGGER    = ("sk-", "AIzaSy", "eyJ")
+    # Keep in sync with gitee_scanner._AI_TRIGGER when adding new providers.
+    _AI_TRIGGER    = (
+        "sk-", "AIzaSy", "eyJ",           # OpenAI / Google / JWT
+        "hf_",                             # HuggingFace
+        "pplx-",                           # Perplexity
+        "xai-",                            # xAI / Grok
+        "r8_",                             # Replicate
+        "ZHIPUAI", "zhipuai",             # GLM
+        "moonshot", "MOONSHOT",            # Kimi
+        "klingai", "KLINGAI", "KLING_",   # Kling
+        "DEEPSEEK", "deepseek",           # DeepSeek
+        "ARK_API", "ark_api",             # Volcengine ARK
+        "DOUBAO", "doubao",               # Doubao
+        "VOLCSTACK", "VOLCENGINE_API",    # Volcengine alt names
+        "VOLC_ACCESSKEY",                 # Volcengine alt names
+    )
     _INFRA_TRIGGER = ("://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
                       "AKIA", "AIPA", "AIDA", "AROA", "ASIA")
     has_ai_trigger    = any(t in content for t in _AI_TRIGGER)
