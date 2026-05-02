@@ -27,7 +27,7 @@ import logging
 import httpx
 
 import db
-from config import GITEE_TOKENS, GITEE_SCAN_INTERVAL
+from config import GITEE_TOKENS, GITEE_SCAN_INTERVAL, evomi_proxy_url
 from patterns import EXTRACTORS, is_skippable_path
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate
@@ -432,7 +432,21 @@ async def run_gitee_cycle():
 
     sem = asyncio.Semaphore(_CONCURRENT_ITEMS)
 
-    async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS) as client:
+    # Route only gitee.com traffic through Evomi CN residential proxy.
+    # Validator calls (moonshot, openai, glm…) go direct — saves proxy bandwidth.
+    proxy = evomi_proxy_url()
+    mounts = (
+        {
+            "https://gitee.com": httpx.AsyncHTTPTransport(proxy=proxy),
+            "http://gitee.com":  httpx.AsyncHTTPTransport(proxy=proxy),
+        }
+        if proxy else {}
+    )
+    if proxy:
+        log.info("gitee: routing via Evomi CN proxy (gitee.com only)")
+
+    async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS,
+                                 mounts=mounts) as client:
         workers = [
             asyncio.create_task(
                 _run_worker(client, chunks[i], query_chunks[i],

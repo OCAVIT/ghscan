@@ -61,6 +61,21 @@ else:
 
 GITEE_SCAN_INTERVAL = int(os.environ.get("GITEE_SCAN_INTERVAL", "3600"))  # 1h default
 
+# ── Evomi residential proxy (for Gitee — Chinese IPs only) ────────────────
+# Set EVOMI_USER + EVOMI_PASS to enable. Only gitee.com traffic is proxied.
+# Country defaults to "cn" (China) — Gitee geo-blocks non-CN server IPs.
+# Format used: http://user-country-cn:pass@rp.evomi.com:1000
+EVOMI_USER    = os.environ.get("EVOMI_USER",    "")
+EVOMI_PASS    = os.environ.get("EVOMI_PASS",    "")
+EVOMI_COUNTRY = os.environ.get("EVOMI_COUNTRY", "cn")
+
+def evomi_proxy_url() -> str | None:
+    """Return Evomi HTTP proxy URL or None if not configured."""
+    if not EVOMI_USER or not EVOMI_PASS:
+        return None
+    user = f"{EVOMI_USER}-country-{EVOMI_COUNTRY}"
+    return f"http://{user}:{EVOMI_PASS}@rp.evomi.com:1000"
+
 # ── Trufflehog secondary scanner ──────────────────────────────────────────
 # TRUFFLEHOG_ORGS=org1,org2,org3  — GitHub orgs to sweep with trufflehog
 # TRUFFLEHOG_TOKEN — dedicated PAT for trufflehog (keeps it off the main quota pool).
