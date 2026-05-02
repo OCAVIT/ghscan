@@ -343,99 +343,65 @@ async def infra_stats():
 
 @app.get("/check-tokens")
 async def check_tokens():
-    """Live-check all configured tokens across all platforms. Returns login/username for each."""
+    """Live-check all configured tokens across all platforms. All requests run in parallel."""
     import httpx as _httpx
     from config import (GITHUB_TOKENS, GITEE_TOKENS, CODEBERG_TOKENS,
                         HF_TOKEN, KAGGLE_TOKENS)
 
-    results = {}
+    async def _check(c, label, url, headers=None, params=None):
+        try:
+            r = await c.get(url, headers=headers or {}, params=params or {})
+            if r.status_code == 200:
+                try:
+                    d = r.json()
+                except Exception:
+                    d = {}
+                return {"token": label, "status": "ok", "data": d}
+            return {"token": label, "status": f"dead ({r.status_code})", "body": r.text[:150]}
+        except Exception as e:
+            return {"token": label, "status": f"error: {type(e).__name__}: {str(e)[:100]}"}
 
-    async with _httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
+    async with _httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+        tasks = {}
 
-        # ── GitHub ────────────────────────────────────────────────────────────
-        gh_results = []
         for tok in GITHUB_TOKENS:
-            try:
-                r = await c.get("https://api.github.com/user",
-                                headers={"Authorization": f"token {tok}",
-                                         "User-Agent": "ghscan/1.0"})
-                if r.status_code == 200:
-                    d = r.json()
-                    gh_results.append({"token": tok[:12] + "...", "status": "ok",
-                                       "login": d.get("login"), "name": d.get("name")})
-                else:
-                    gh_results.append({"token": tok[:12] + "...", "status": f"dead ({r.status_code})"})
-            except Exception as e:
-                gh_results.append({"token": tok[:12] + "...", "status": f"error: {e}"})
-        results["github"] = gh_results
+            tasks[f"gh:{tok[:12]}"] = _check(c, tok[:12] + "...",
+                "https://api.github.com/user",
+                headers={"Authorization": f"token {tok}", "User-Agent": "ghscan/1.0"})
 
-        # ── Codeberg ──────────────────────────────────────────────────────────
-        cb_results = []
         for tok in CODEBERG_TOKENS:
-            try:
-                r = await c.get("https://codeberg.org/api/v1/user",
-                                headers={"Authorization": f"token {tok}",
-                                         "User-Agent": "Mozilla/5.0"})
-                if r.status_code == 200:
-                    d = r.json()
-                    cb_results.append({"token": tok[:12] + "...", "status": "ok",
-                                       "login": d.get("login"), "full_name": d.get("full_name")})
-                else:
-                    cb_results.append({"token": tok[:12] + "...", "status": f"dead ({r.status_code})",
-                                       "body": r.text[:120]})
-            except Exception as e:
-                cb_results.append({"token": tok[:12] + "...", "status": f"error: {e}"})
-        results["codeberg"] = cb_results
+            tasks[f"cb:{tok[:12]}"] = _check(c, tok[:12] + "...",
+                "https://codeberg.org/api/v1/user",
+                headers={"Authorization": f"token {tok}", "User-Agent": "Mozilla/5.0"})
 
-        # ── Gitee ─────────────────────────────────────────────────────────────
-        gt_results = []
         for tok in GITEE_TOKENS:
-            try:
-                r = await c.get("https://gitee.com/api/v5/user",
-                                params={"access_token": tok})
-                if r.status_code == 200:
-                    d = r.json()
-                    gt_results.append({"token": tok[:12] + "...", "status": "ok",
-                                       "login": d.get("login"), "name": d.get("name")})
-                else:
-                    gt_results.append({"token": tok[:12] + "...", "status": f"dead ({r.status_code})"})
-            except Exception as e:
-                gt_results.append({"token": tok[:12] + "...", "status": f"error: {e}"})
-        results["gitee"] = gt_results
+            tasks[f"gt:{tok[:12]}"] = _check(c, tok[:12] + "...",
+                "https://gitee.com/api/v5/user", params={"access_token": tok})
 
-        # ── HuggingFace ───────────────────────────────────────────────────────
         if HF_TOKEN:
-            try:
-                r = await c.get("https://huggingface.co/api/whoami-v2",
-                                headers={"Authorization": f"Bearer {HF_TOKEN}"})
-                if r.status_code == 200:
-                    d = r.json()
-                    results["huggingface"] = {"token": HF_TOKEN[:12] + "...", "status": "ok",
-                                              "name": d.get("name"), "isPro": d.get("isPro")}
-                else:
-                    results["huggingface"] = {"token": HF_TOKEN[:12] + "...",
-                                              "status": f"dead ({r.status_code})"}
-            except Exception as e:
-                results["huggingface"] = {"token": HF_TOKEN[:12] + "...", "status": f"error: {e}"}
-        else:
-            results["huggingface"] = "not configured"
+            tasks["hf"] = _check(c, HF_TOKEN[:12] + "...",
+                "https://huggingface.co/api/whoami-v2",
+                headers={"Authorization": f"Bearer {HF_TOKEN}"})
 
-        # ── Kaggle ────────────────────────────────────────────────────────────
-        kg_results = []
         for tok in KAGGLE_TOKENS:
-            try:
-                r = await c.get("https://www.kaggle.com/api/v1/kernels/list",
-                                headers={"Authorization": f"Bearer {tok}"},
-                                params={"pageSize": 1, "sortBy": "hotness", "language": "python"})
-                if r.status_code == 200:
-                    kg_results.append({"token": tok[:12] + "...", "status": "ok"})
-                else:
-                    kg_results.append({"token": tok[:12] + "...", "status": f"dead ({r.status_code})"})
-            except Exception as e:
-                kg_results.append({"token": tok[:12] + "...", "status": f"error: {e}"})
-        results["kaggle"] = kg_results
+            tasks[f"kg:{tok[:12]}"] = _check(c, tok[:12] + "...",
+                "https://www.kaggle.com/api/v1/kernels/list",
+                headers={"Authorization": f"Bearer {tok}"},
+                params={"pageSize": 1, "sortBy": "hotness", "language": "python"})
 
-    return results
+        raw = await asyncio.gather(*tasks.values())
+        tagged = dict(zip(tasks.keys(), raw))
+
+    def _group(prefix):
+        return [v for k, v in tagged.items() if k.startswith(prefix)]
+
+    return {
+        "github":      _group("gh:"),
+        "codeberg":    _group("cb:"),
+        "gitee":       _group("gt:"),
+        "huggingface": tagged.get("hf", "not configured"),
+        "kaggle":      _group("kg:"),
+    }
 
 
 @app.get("/health")
