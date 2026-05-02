@@ -654,20 +654,51 @@ async def validate_kimi(key: str) -> bool:
 
 async def validate_glm(key: str) -> bool:
     """
-    Zhipu AI / ChatGLM — GET /api/paas/v4/models: 200 = live key, 401 = dead.
-    Key format: {hex32}.{base62_16} — unique, low false-positive.
+    Zhipu AI / ChatGLM — POST /chat/completions probe with glm-5.1.
+    Key is valid only if it can reach glm-5.1 AND has active balance.
+
+    Known error codes:
+      1113 — 余额不足/no resource pack (balance dead) → False
+      1301 — rate limited (key is alive) → True
+    If glm-5.1 returns model-not-found or no-access → False (not useful to us).
     """
     try:
         async with _client() as c:
-            r = await c.get(
-                "https://open.bigmodel.cn/api/paas/v4/models",
+            r = await c.post(
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model":      "glm-5.1",
+                    "messages":   [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
             )
         if r.status_code == 200:
             return True
+        if r.status_code == 429:
+            return True   # rate-limited but key is alive
         if r.status_code in (401, 403):
             return False
-        return r.status_code == 429
+        try:
+            body = r.json()
+        except Exception:
+            body = {}
+        code = str(_err_field(body, "error", "code"))
+        msg  = _err_field(body, "error", "message").lower()
+        # No balance / no resource pack
+        if code == "1113":
+            return False
+        # Rate-limited via error code (some versions return 200+1301)
+        if code == "1301":
+            return True
+        # glm-5.1 not available / not enabled on this account
+        if any(kw in msg for kw in ("not found", "not exist", "no permission",
+                                     "找不到", "不存在", "没有权限", "model")):
+            return False
+        # Any other 4xx with a parseable error but not auth failure = key alive
+        if 400 <= r.status_code < 500:
+            return True
+        return False
     except Exception as e:
         log.debug("glm validate err: %s", e)
         return False
