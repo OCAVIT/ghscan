@@ -631,21 +631,50 @@ async def validate_inworld(key: str) -> bool:
 
 async def validate_kimi(key: str) -> bool:
     """
-    Kimi / Moonshot AI — GET /v1/models: 200 = live key, 401 = dead.
-    Both CN (api.moonshot.cn) and international (api.moonshot.ai) endpoints tried.
+    Kimi / Moonshot AI — POST /v1/chat/completions with kimi-k2.6 probe.
+    Key is valid only if it can reach kimi-k2.6 AND has active balance.
+
+    Known error types:
+      exceeded_current_quota_error — account suspended (no balance) → False
+    CN endpoint tried first, falls back to international (.ai).
     """
+    payload = {
+        "model":      "kimi-k2.6",
+        "messages":   [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }
     for base in ("https://api.moonshot.cn", "https://api.moonshot.ai"):
         try:
             async with _client() as c:
-                r = await c.get(
-                    f"{base}/v1/models",
+                r = await c.post(
+                    f"{base}/v1/chat/completions",
                     headers={"Authorization": f"Bearer {key}"},
+                    json=payload,
                 )
             if r.status_code == 200:
                 return True
+            if r.status_code == 429:
+                return True   # rate-limited = alive
             if r.status_code in (401, 403):
                 return False
-            if r.status_code == 429:
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            etype = _err_field(body, "error", "type")
+            msg   = _err_field(body, "error", "message").lower()
+            # No balance / suspended account
+            if etype == "exceeded_current_quota_error":
+                return False
+            if "insufficient balance" in msg or "suspended" in msg:
+                return False
+            # kimi-k2.6 not available on this account
+            if "model" in msg and any(kw in msg for kw in
+                                      ("not found", "not exist", "no permission",
+                                       "not support", "invalid")):
+                return False
+            # Other 4xx with parseable body = key alive but params wrong
+            if 400 <= r.status_code < 500:
                 return True
         except Exception:
             continue
