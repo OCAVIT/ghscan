@@ -962,9 +962,15 @@ async def validate_fireworks(key: str) -> bool:
 
 async def validate_openrouter(key: str) -> bool:
     """
-    OpenRouter — GET /api/v1/auth/key: 200 = live, 401 = dead.
-    sk-or-v1- prefix, NOT in GitHub secret scanning.
-    Checks remaining credits: limit=null means no limit (prepaid unlimited).
+    OpenRouter — GET /api/v1/auth/key.
+
+    Key signals:
+      is_free_tier=true  → never purchased credits → 402 on paid models → False
+      limit != null AND usage >= limit → spending limit exhausted → False
+      otherwise (paid account, within/no limit) → True
+
+    NOTE: limit=null means "no spending limit set", NOT unlimited credits.
+    The real paid-vs-free signal is is_free_tier.
     """
     try:
         async with _client() as c:
@@ -974,17 +980,22 @@ async def validate_openrouter(key: str) -> bool:
             )
         if r.status_code in (401, 403):
             return False
+        if r.status_code == 429:
+            return True
         if r.status_code == 200:
             try:
-                data = (r.json().get("data") or {})
-                limit = data.get("limit")
-                usage = float(data.get("usage", 0) or 0)
-                if limit is not None and float(limit) <= usage:
+                data = r.json().get("data") or {}
+                if data.get("is_free_tier") is True:
                     return False
+                limit = data.get("limit")
+                if limit is not None:
+                    usage = float(data.get("usage", 0) or 0)
+                    if float(limit) <= usage:
+                        return False
             except Exception:
                 pass
             return True
-        return r.status_code == 429
+        return False
     except Exception as e:
         log.debug("openrouter validate err: %s", e)
         return False
