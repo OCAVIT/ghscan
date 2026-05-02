@@ -384,11 +384,17 @@ async def notify_hourly_digest(by_provider: list[dict], total_new: int,
 
 
 async def notify_dead_token(token_preview: str):
-    """Alert when a GitHub PAT returns 401 (revoked / expired). Immediate — rare critical event."""
+    """Alert when a token returns 401. token_preview may be 'platform:hash' or bare hash."""
+    if token_preview.startswith("codeberg:"):
+        platform, env_var = "CODEBERG", "CODEBERG_TOKENS"
+    elif token_preview.startswith("gitee:"):
+        platform, env_var = "GITEE", "GITEE_TOKENS"
+    else:
+        platform, env_var = "GITHUB", "GITHUB_TOKENS"
     await _send(
-        f"💀 <b>GITHUB TOKEN DEAD</b>\n"
+        f"💀 <b>{platform} TOKEN DEAD</b>\n"
         f"Token <code>{token_preview}...</code> returned 401.\n"
-        f"Worker skipped — update <code>GITHUB_TOKENS</code> on Railway."
+        f"Worker skipped — update <code>{env_var}</code> on Railway."
     )
 
 
