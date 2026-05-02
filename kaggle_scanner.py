@@ -40,6 +40,7 @@ _BASE         = "https://www.kaggle.com/api/v1"
 _PULL_SLEEP   = 1.5   # seconds between pulls per token
 _SEARCH_SLEEP = 2.0   # seconds between search queries
 _MAX_PAGES    = 3     # search pages per query (20 results/page = 60 notebooks)
+_LANGUAGES    = ["python", "r"]  # R community uses openai/ellmer R packages
 
 _LIMITS = httpx.Limits(
     max_connections=40,
@@ -92,10 +93,12 @@ _AI_TRIGGER = (
     "GROQ_API_KEY", "CEREBRAS_API_KEY", "REPLICATE_API_TOKEN",
     "FIREWORKS_API_KEY", "MISTRAL_API_KEY", "COHERE_API_KEY",
     "HF_TOKEN", "huggingface_hub",
-    "DEEPSEEK", "deepseek", "ARK_API", "DOUBAO",
+    "DEEPSEEK", "deepseek", "ARK_API", "ark_api", "DOUBAO", "doubao",
     "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
     "klingai", "KLINGAI", "KLING_",
     "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
+    "FIREWORKS", "fireworks", "OPENROUTER", "openrouter",
+    "MISTRAL", "mistral", "COHERE", "cohere",
 )
 
 
@@ -144,7 +147,8 @@ def _extract_notebook_text(ipynb_content: str) -> str:
 
 
 async def _search_kernels(client: httpx.AsyncClient,
-                          token: str, query: str, page: int) -> list[dict]:
+                          token: str, query: str, page: int,
+                          language: str = "python") -> list[dict]:
     """Search Kaggle kernels by keyword. Returns list of kernel refs."""
     try:
         r = await client.get(
@@ -155,7 +159,7 @@ async def _search_kernels(client: httpx.AsyncClient,
                 "page":      page,
                 "pageSize":  20,
                 "sortBy":    "hotness",
-                "language":  "python",
+                "language":  language,
             },
             timeout=20,
         )
@@ -245,30 +249,31 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
         scanned: set[str] = set()
 
         for query in queries:
-            for page in range(1, _MAX_PAGES + 1):
-                kernels = await _search_kernels(client, token, query, page)
-                if not kernels:
-                    break
+            for lang in _LANGUAGES:
+                for page in range(1, _MAX_PAGES + 1):
+                    kernels = await _search_kernels(client, token, query, page, lang)
+                    if not kernels:
+                        break
 
-                for k in kernels:
-                    ref = k.get("ref", "")
-                    if not ref or ref in scanned:
-                        continue
+                    for k in kernels:
+                        ref = k.get("ref", "")
+                        if not ref or ref in scanned:
+                            continue
 
-                    ck = _claim_key(ref)
-                    if not db.try_claim_file(ck):
-                        continue
+                        ck = _claim_key(ref)
+                        if not db.try_claim_file(ck):
+                            continue
 
-                    scanned.add(ref)
-                    content = await _fetch_kernel_source(token, ref)
-                    if content:
-                        await _scan_notebook(ref, content)
+                        scanned.add(ref)
+                        content = await _fetch_kernel_source(token, ref)
+                        if content:
+                            await _scan_notebook(ref, content)
 
-                    await asyncio.sleep(_PULL_SLEEP)
+                        await asyncio.sleep(_PULL_SLEEP)
 
-                if len(kernels) < 20:
-                    break
-                await asyncio.sleep(_SEARCH_SLEEP)
+                    if len(kernels) < 20:
+                        break
+                    await asyncio.sleep(_SEARCH_SLEEP)
 
             await asyncio.sleep(_SEARCH_SLEEP)
 

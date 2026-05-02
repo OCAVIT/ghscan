@@ -142,11 +142,12 @@ _AI_TRIGGER = (
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
     "GROQ_API_KEY", "CEREBRAS_API_KEY",
     "DEEPSEEK", "deepseek",
-    "ARK_API", "DOUBAO",
+    "ARK_API", "ark_api", "DOUBAO", "doubao",
     "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
     "klingai", "KLINGAI", "KLING_",
     "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
-    "MISTRAL", "COHERE",
+    "FIREWORKS", "fireworks", "OPENROUTER", "openrouter",
+    "MISTRAL", "mistral", "COHERE", "cohere",
 )
 _INFRA_TRIGGER = (
     "://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
