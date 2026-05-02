@@ -331,7 +331,10 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
             t    = row["total"]
             mark = "✅" if v > 0 else "  "
             lines.append(f"{mark} {meta['e']} {meta['n']}: {t} found, <b>{v} valid</b>")
-        back_kb = {"inline_keyboard": [[{"text": "◀ Назад", "callback_data": "m"}]]}
+        back_kb = {"inline_keyboard": [
+            [{"text": "🗑️ Reset SHA dedup (force rescan)", "callback_data": "xsha"}],
+            [{"text": "◀ Назад", "callback_data": "m"}],
+        ]}
         await _api(client, "editMessageText",
                    chat_id=chat_id, message_id=msg_id,
                    text="\n".join(lines), parse_mode="HTML",
@@ -581,6 +584,21 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
                          f"❌ {dead} убрано из базы"),
                    parse_mode="HTML",
                    reply_markup=back_kb)
+        return
+
+    # ── Reset SHA dedup table ─────────────────────────────────────────
+    if data == "xsha":
+        await _api(client, "answerCallbackQuery",
+                   callback_query_id=cbq_id, text="⏳ Сбрасываю…")
+        deleted = db.clear_scanned_files()
+        await _api(client, "editMessageText",
+                   chat_id=chat_id, message_id=msg_id,
+                   text=(f"🗑️ <b>SHA dedup сброшен</b>\n\n"
+                         f"Удалено: <b>{deleted:,}</b> записей\n\n"
+                         "Следующий цикл — полный холодный rescan "
+                         "по новым порогам (365d / 100★)."),
+                   parse_mode="HTML",
+                   reply_markup={"inline_keyboard": [[{"text": "◀ Назад", "callback_data": "m"}]]})
         return
 
     # unknown data — just ack

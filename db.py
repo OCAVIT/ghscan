@@ -121,6 +121,14 @@ def try_claim_file(sha: str) -> bool:
         return cur.rowcount == 1  # 1 = new insert (claim granted), 0 = already existed
 
 
+def clear_scanned_files() -> int:
+    """Delete all rows from scanned_files. Returns count of deleted rows."""
+    with _conn() as c:
+        cnt = c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
+        c.execute("DELETE FROM scanned_files")
+        return cnt
+
+
 # kept for backward compat with any external callers
 def is_file_scanned(sha: str) -> bool:
     with _conn() as c:
