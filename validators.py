@@ -806,10 +806,11 @@ async def validate_kling(key: str) -> bool:
 
 async def validate_huggingface(key: str) -> bool:
     """
-    HuggingFace — GET /api/whoami-v2: 200 = live token.
-    hf_ tokens can have write/read/inference scopes — all usable for inference API.
+    HuggingFace — GET /api/whoami-v2: live token check.
+    HF can return HTTP 200 with {"error": "Invalid username or password."} for
+    revoked/invalid tokens (not always a 401), so we parse the body too.
+    hf_ tokens with any scope (read/write/inference) are usable.
     """
-    # Strip context prefix added by non-prefixed ctx extractor
     if key.startswith("hf_ctx:"):
         key = key[7:]
     try:
@@ -818,11 +819,20 @@ async def validate_huggingface(key: str) -> bool:
                 "https://huggingface.co/api/whoami-v2",
                 headers={"Authorization": f"Bearer {key}"},
             )
-        if r.status_code == 200:
+        if r.status_code == 429:
             return True
         if r.status_code in (401, 403):
             return False
-        return r.status_code == 429
+        if r.status_code == 200:
+            try:
+                body = r.json()
+                # HF sometimes returns 200 + error body for revoked tokens
+                if "error" in body:
+                    return False
+            except Exception:
+                pass
+            return True
+        return False
     except Exception as e:
         log.debug("huggingface validate err: %s", e)
         return False
