@@ -556,8 +556,8 @@ VALIDATORS: dict[str, callable] = {
     "google":       validate_google,
     "deepseek":     validate_deepseek,
     "elevenlabs":   validate_elevenlabs,
-    "ark_fast":     validate_ark_fast,   # Seedance 2.0-fast — registered BEFORE ark
-    "ark":          validate_ark,        # Seedance 2.0-standard
+    "ark":          validate_ark,         # Seedance 2.0-standard — higher value, first
+    "ark_fast":     validate_ark_fast,   # Seedance 2.0-fast
     "happyhorse":   validate_happyhorse,
     "grok":         validate_grok,
     "suno":         validate_suno,

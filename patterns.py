@@ -343,8 +343,8 @@ EXTRACTORS: dict[str, callable] = {
     "google":        extract_google,
     "deepseek":      extract_deepseek,
     "elevenlabs":    extract_elevenlabs,
-    "ark_fast":      extract_ark_fast,   # Seedance 2.0-fast — BEFORE ark (hash-dedup priority)
-    "ark":           extract_ark,        # Seedance 2.0-standard
+    "ark":           extract_ark,        # Seedance 2.0-standard — BEFORE ark_fast (higher value)
+    "ark_fast":      extract_ark_fast,   # Seedance 2.0-fast
     "happyhorse":    extract_happyhorse,
     "grok":          extract_grok,
     "suno":          extract_suno,
