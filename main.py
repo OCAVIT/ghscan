@@ -41,6 +41,33 @@ async def _scan_loop():
         await asyncio.sleep(SCAN_INTERVAL)
 
 
+async def _revalidation_loop():
+    """
+    Re-validate keys already in DB as is_valid=1 every 12 h.
+    Catches quota expiry (Google free-tier resets daily but runs out quickly),
+    depleted balances (DeepSeek/OpenAI), and revoked keys.
+    Updates is_valid=0 + last_validated_at so the web UI and future reports
+    reflect current reality, not the snapshot from when the key was first found.
+    """
+    from validators import validate as _validate
+    while True:
+        await asyncio.sleep(43200)  # 12 h
+        try:
+            rows = db.get_valid_keys_to_revalidate(max_age_hours=12)
+            if not rows:
+                continue
+            n_dead = 0
+            for row in rows:
+                ok = await _validate(row["provider"], row["key_full"])
+                db.update_key_validity(row["key_hash"], ok)
+                if not ok:
+                    n_dead += 1
+            log.info("revalidation: %d/%d keys now dead, %d still alive",
+                     n_dead, len(rows), len(rows) - n_dead)
+        except Exception as e:
+            log.error("revalidation loop err: %s", e)
+
+
 async def _cleanup_loop():
     """Daily cleanup of old low-risk infra findings to keep DB size bounded."""
     while True:
@@ -93,11 +120,12 @@ async def _hourly_alert_loop():
 async def lifespan(app: FastAPI):
     db.init_db()
     tasks = [
-        asyncio.create_task(_scan_loop(),          name="scan_loop"),
-        asyncio.create_task(_hourly_alert_loop(),  name="hourly_alert"),
-        asyncio.create_task(_flush_loop(),         name="flush_buffer"),
-        asyncio.create_task(_cleanup_loop(),       name="db_cleanup"),
-        asyncio.create_task(trufflehog_loop(),     name="trufflehog"),
+        asyncio.create_task(_scan_loop(),           name="scan_loop"),
+        asyncio.create_task(_hourly_alert_loop(),   name="hourly_alert"),
+        asyncio.create_task(_flush_loop(),          name="flush_buffer"),
+        asyncio.create_task(_cleanup_loop(),        name="db_cleanup"),
+        asyncio.create_task(_revalidation_loop(),   name="revalidation"),
+        asyncio.create_task(trufflehog_loop(),      name="trufflehog"),
     ]
     yield
     for t in tasks:

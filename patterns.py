@@ -191,8 +191,11 @@ _UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 _ARK_CTX = re.compile(
     r'(?:ARK_API_KEY|VOLCENGINE_API_KEY|DOUBAO_API_KEY|VOLC_API_KEY'
     r'|SEEDANCE_API_KEY|VOLC_ACCESSKEY|ARK_KEY'
+    r'|BYTEPLUS_API_KEY|BYTEPLUS_ACCESS_KEY|BYTEPLUS_SECRET_KEY'
     r'|ark\.cn-beijing\.volces\.com|ark\.ap-southeast\.volces\.com'
-    r'|volces\.com|seedance\.ai|doubao)'
+    r'|ark\.cn-shanghai\.volces\.com|ark\.us-east-1\.volces\.com'
+    r'|maas-api\.byteplus\.com|byteplus\.com'
+    r'|volces\.com|seedance|doubao-seedance)'
     r'[\s\S]{0,300}'
     r'(' + _UUID + r')',
     re.IGNORECASE,
@@ -353,7 +356,19 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"GEMINI_API_KEY" language:java',                  "google", "code"),
     ('"google.generativeai" "AIzaSy" language:python',  "google", "code"),
     ('"generativelanguage.googleapis.com" "AIzaSy"',    "google", "code"),
-    # Veo / Vertex AI
+    # Veo / Vertex AI video generation — model names and env var patterns
+    ('"VEO_API_KEY" filename:.env',                      "google", "env"),
+    ('"GOOGLE_VEO_API_KEY" filename:.env',               "google", "env"),
+    ('"veo-2" "AIzaSy" language:python',                 "google", "code"),
+    ('"veo-3" "AIzaSy" language:python',                 "google", "code"),
+    ('"veo-2" "GOOGLE_API_KEY" language:python',         "google", "code"),
+    ('"veo-3" "GOOGLE_API_KEY" language:python',         "google", "code"),
+    ('"veo-2" "generate_video" language:python',         "google", "code"),
+    ('"veo-3" "generate_video" language:python',         "google", "code"),
+    ('"veo-2.0-generate-001" language:python',           "google", "code"),
+    ('"veo-3.0-generate-001" language:python',           "google", "code"),
+    ('"generate_video" "GEMINI_API_KEY" language:python', "google", "code"),
+    ('"generate_video" "GOOGLE_API_KEY" language:python', "google", "code"),
     ('"GOOGLE_APPLICATION_CREDENTIALS" filename:docker-compose.yml', "google", "docker"),
     ('"aiplatform" "service_account" language:python',  "google", "code"),
 
@@ -489,6 +504,26 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"doubao" "api_key" language:python',                  "ark", "code"),
     ('"doubao" "api_key" language:javascript',              "ark", "code"),
     ('"doubao" "api_key" language:java',                    "ark", "code"),
+
+    # Seedance model names literally in code — very high precision
+    # (devs hardcode model IDs like doubao-seedance-1-0-lite-i2v-250428)
+    ('"doubao-seedance" language:python',                   "ark", "code"),
+    ('"doubao-seedance" language:javascript',               "ark", "code"),
+    ('"doubao-seedance" language:typescript',               "ark", "code"),
+    ('"doubao-seedance" language:go',                       "ark", "code"),
+    ('"doubao-seedance" language:java',                     "ark", "code"),
+    ('"doubao-seedance" language:rust',                     "ark", "code"),
+    ('"doubao-seedance" filename:.env',                     "ark", "env"),
+    ('"doubao-seedance-1-0" extension:ipynb',               "ark", "notebook"),
+
+    # BytePlus — ByteDance international brand (same ARK/Volcengine backend)
+    ('"BYTEPLUS_API_KEY" filename:.env',                    "ark", "env"),
+    ('"BYTEPLUS_ACCESS_KEY" filename:.env',                 "ark", "env"),
+    ('"byteplus.com" "api_key" language:python',            "ark", "code"),
+    ('"byteplus.com" "api_key" language:javascript',        "ark", "code"),
+    ('"maas-api.byteplus.com" language:python',             "ark", "code"),
+    ('"maas-api.byteplus.com" language:javascript',         "ark", "code"),
+    ('"byteplus" "secret_key" filename:.env',               "ark", "env"),
 
     # Docker / CI
     ('"ARK_API_KEY" filename:docker-compose.yml',           "ark", "docker"),

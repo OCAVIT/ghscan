@@ -86,6 +86,14 @@ def init_db():
                 c.execute(f"ALTER TABLE infra_findings ADD COLUMN {col} {defn}")
             except Exception:
                 pass  # already exists
+        # found_keys migrations
+        for col, defn in [
+            ("last_validated_at", "TEXT DEFAULT NULL"),  # last re-validation timestamp
+        ]:
+            try:
+                c.execute(f"ALTER TABLE found_keys ADD COLUMN {col} {defn}")
+            except Exception:
+                pass
 
 
 def _now():
@@ -182,6 +190,34 @@ def save_key(provider: str, key: str, repo: str, file_path: str,
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+def update_key_validity(key_hash: str, is_valid: bool):
+    """Update is_valid and stamp last_validated_at. Called by revalidation loop."""
+    with _conn() as c:
+        c.execute(
+            "UPDATE found_keys SET is_valid=?, last_validated_at=? WHERE key_hash=?",
+            (int(is_valid), _now(), key_hash),
+        )
+
+
+def get_valid_keys_to_revalidate(max_age_hours: int = 12, limit: int = 200) -> list[dict]:
+    """
+    Return up to `limit` keys currently marked valid that haven't been
+    re-validated within `max_age_hours`. NULLs (never re-validated) come first.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT id, key_hash, provider, key_full FROM found_keys
+               WHERE is_valid=1
+                 AND (last_validated_at IS NULL OR last_validated_at < ?)
+               ORDER BY
+                 CASE WHEN last_validated_at IS NULL THEN 0 ELSE 1 END,
+                 last_validated_at ASC
+               LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()]
 
 
 # ── Stats / Results ────────────────────────────────────────────────────────
