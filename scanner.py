@@ -324,13 +324,15 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
     if not full_name or not sha:
         return
 
-    # claim first: atomic INSERT OR IGNORE — skippable paths also get claimed
-    # so we never revisit them (avoids re-fetch on next cycle)
-    if not db.try_claim_file(sha):
-        return
+    # Fast path: skip known-useless paths before any DB/API work.
     if is_skippable_path(file_path):
         return
 
+    # Check repo filter BEFORE claiming the SHA so filtered repos don't
+    # permanently consume SHA slots. This allows the file to be re-evaluated
+    # in future cycles (e.g. after the repo gains stars, or filter thresholds
+    # are relaxed). Repo meta is cached for REPO_RESCAN_DAYS so the API cost
+    # is one call per repo per week, not per cycle.
     if db.should_scan_repo(full_name):
         meta = await get_repo_meta(client, full_name, token_headers)
         if not meta:
@@ -348,6 +350,10 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
                 return
         else:
             stars, created_at = 0, ""
+
+    # Claim after filter: only files that pass the filter consume a SHA slot.
+    if not db.try_claim_file(sha):
+        return
 
     content = await get_file_content(client, content_url, token_headers)
     if not content:
