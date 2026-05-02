@@ -167,14 +167,30 @@ def _claim_key(full_name: str, path: str) -> str:
 
 
 async def _check_token(client: httpx.AsyncClient, token: str) -> bool:
-    try:
-        r = await client.get(f"{_BASE}/user", headers=_headers(token), timeout=10)
-        alive = r.status_code == 200
-        _TOKEN_STATUS[token[:8]] = {"alive": alive}
-        return alive
-    except Exception:
-        _TOKEN_STATUS[token[:8]] = {"alive": False}
-        return False
+    """Return False ONLY on hard auth failure (401/403). Transient errors → True
+    (retry next cycle) so a single Evomi timeout doesn't kill a valid token."""
+    for attempt in range(2):
+        try:
+            r = await client.get(f"{_BASE}/user", headers=_headers(token), timeout=12)
+            if r.status_code == 200:
+                _TOKEN_STATUS[token[:8]] = {"alive": True}
+                return True
+            if r.status_code in (401, 403):
+                _TOKEN_STATUS[token[:8]] = {"alive": False}
+                return False
+            # 429 / 5xx — transient, treat as alive
+            log.debug("gitee check_token status=%d (transient) token=%s...",
+                      r.status_code, token[:8])
+            _TOKEN_STATUS[token[:8]] = {"alive": True}
+            return True
+        except Exception as e:
+            if attempt == 0:
+                await asyncio.sleep(3)
+                continue
+            log.debug("gitee check_token exception (treating as alive): %s", e)
+            _TOKEN_STATUS[token[:8]] = {"alive": True}
+            return True  # network blip ≠ dead token
+    return True  # unreachable but satisfies type checker
 
 
 async def _list_repos(client: httpx.AsyncClient,
