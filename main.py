@@ -36,6 +36,7 @@ from codeberg_scanner import codeberg_loop
 from postman_scanner import postman_loop
 from npm_scanner import npm_loop
 from pypi_scanner import pypi_loop
+from commoncrawl_scanner import cc_loop
 from tg_bot import bot_loop
 
 logging.basicConfig(
@@ -149,6 +150,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(postman_loop(),         name="postman_scanner"),
         asyncio.create_task(npm_loop(),             name="npm_scanner"),
         asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
+        asyncio.create_task(cc_loop(),              name="commoncrawl_scanner"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield

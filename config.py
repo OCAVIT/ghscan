@@ -156,3 +156,12 @@ NPM_SCAN_INTERVAL = int(os.environ.get("NPM_SCAN_INTERVAL", "10800"))  # 3h defa
 # via sdist tarball download + extraction.
 PYPI_ENABLED = os.environ.get("PYPI_ENABLED", "1") == "1"
 PYPI_SCAN_INTERVAL = int(os.environ.get("PYPI_SCAN_INTERVAL", "10800"))  # 3h default
+
+# ── Common Crawl scanner ──────────────────────────────────────────────────
+# No auth needed — Common Crawl is fully public (s3://commoncrawl/ + https
+# mirror). Petabyte-scale web crawl indexed monthly. NOT in any partner
+# program — keys we find here aren't auto-revoked by AI providers.
+# Bandwidth: ~5-20GB inbound per cycle (free on Railway).
+CC_ENABLED       = os.environ.get("CC_ENABLED", "1") == "1"
+CC_SCAN_INTERVAL = int(os.environ.get("CC_SCAN_INTERVAL", "86400"))  # 24h default
+CC_PER_PATTERN_CAP = int(os.environ.get("CC_PER_PATTERN_CAP", "5000"))
