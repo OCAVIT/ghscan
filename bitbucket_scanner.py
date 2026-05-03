@@ -107,10 +107,17 @@ def _parse_token(entry: str) -> tuple[str, str] | None:
     return (email.strip(), token.strip()) if email and token else None
 
 
-def _headers(token: str) -> dict:
-    """Bearer auth for Atlassian API tokens with scopes."""
+def _basic_auth(email: str, token: str) -> str:
+    """Basic auth header value: 'Basic base64(email:token)'."""
+    import base64
+    raw = f"{email}:{token}".encode()
+    return "Basic " + base64.b64encode(raw).decode()
+
+
+def _headers(email: str, token: str) -> dict:
+    """Atlassian API tokens with scopes use BASIC auth (per Atlassian docs)."""
     return {
-        "Authorization": f"Bearer {token}",
+        "Authorization": _basic_auth(email, token),
         "Accept": "application/json",
         "User-Agent": "ghscan-bitbucket/1.0",
     }
@@ -126,15 +133,18 @@ def _token_id(token: str) -> str:
 
 
 async def _check_token(client: httpx.AsyncClient, email: str, token: str) -> bool:
-    """Verify token by hitting /user. Returns False only on hard auth failure."""
+    """Verify token by hitting /user. Returns False only on hard auth failure.
+    Logs response body on auth failure to surface scope/format issues."""
     tid = _token_id(token)
     for attempt in range(2):
         try:
-            r = await client.get(f"{_BASE}/user", headers=_headers(token), timeout=12)
+            r = await client.get(f"{_BASE}/user", headers=_headers(email, token), timeout=12)
             if r.status_code == 200:
                 _TOKEN_STATUS[tid] = {"alive": True}
                 return True
             if r.status_code in (401, 403):
+                log.error("bitbucket auth FAIL email=%s status=%d body=%s",
+                          email, r.status_code, r.text[:300])
                 _TOKEN_STATUS[tid] = {"alive": False}
                 return False
             _TOKEN_STATUS[tid] = {"alive": True}
@@ -149,7 +159,7 @@ async def _check_token(client: httpx.AsyncClient, email: str, token: str) -> boo
     return True
 
 
-async def _list_public_repos(client: httpx.AsyncClient, token: str) -> list[dict]:
+async def _list_public_repos(client: httpx.AsyncClient, email: str, token: str) -> list[dict]:
     """List recently-updated public repos (1500 per cycle by default)."""
     all_repos: list[dict] = []
     next_url = (f"{_BASE}/repositories?pagelen=100&sort=-updated_on"
@@ -158,7 +168,7 @@ async def _list_public_repos(client: httpx.AsyncClient, token: str) -> list[dict
 
     for _ in range(_LIST_PAGES):
         try:
-            r = await client.get(next_url, headers=_headers(token), timeout=20)
+            r = await client.get(next_url, headers=_headers(email, token), timeout=20)
             if r.status_code in (401, 403):
                 _TOKEN_STATUS[_token_id(token)] = {"alive": False}
                 break
@@ -202,12 +212,12 @@ _INTERESTING_ROOT_DIRS = frozenset({
 
 async def _has_interesting_root(client: httpx.AsyncClient,
                                 full_name: str, branch: str,
-                                token: str) -> bool:
+                                email: str, token: str) -> bool:
     """Pre-check repo root listing to skip empty/docs-only repos."""
     try:
         r = await client.get(
             f"{_BASE}/repositories/{full_name}/src/{branch}/?pagelen=50",
-            headers=_headers(token), timeout=10,
+            headers=_headers(email, token), timeout=10,
         )
         if r.status_code != 200:
             return True
@@ -230,7 +240,7 @@ async def _has_interesting_root(client: httpx.AsyncClient,
 
 async def _get_file(client: httpx.AsyncClient,
                     full_name: str, branch: str, path: str,
-                    token: str) -> str | None:
+                    email: str, token: str) -> str | None:
     """Fetch raw file content from a Bitbucket repo."""
     ck = _claim_key(full_name, path)
     if not db.try_claim_file(ck):
@@ -239,7 +249,7 @@ async def _get_file(client: httpx.AsyncClient,
     try:
         r = await client.get(
             f"{_BASE}/repositories/{full_name}/src/{branch}/{path}",
-            headers=_headers(token), timeout=15,
+            headers=_headers(email, token), timeout=15,
         )
         if r.status_code != 200:
             return None
@@ -300,7 +310,7 @@ async def _scan_file(full_name: str, path: str, content: str, file_url: str):
 
 
 async def _scan_repo(client: httpx.AsyncClient, repo: dict,
-                     sem: asyncio.Semaphore, token: str):
+                     sem: asyncio.Semaphore, email: str, token: str):
     full_name = repo.get("full_name", "")
     if not full_name:
         return
@@ -308,7 +318,7 @@ async def _scan_repo(client: httpx.AsyncClient, repo: dict,
     branch = (repo.get("mainbranch") or {}).get("name") or "main"
 
     async with sem:
-        interesting = await _has_interesting_root(client, full_name, branch, token)
+        interesting = await _has_interesting_root(client, full_name, branch, email, token)
     if not interesting:
         log.debug("bitbucket skip (no interesting root): %s", full_name)
         return
@@ -319,7 +329,7 @@ async def _scan_repo(client: httpx.AsyncClient, repo: dict,
         if is_skippable_path(path):
             return
         async with sem:
-            content = await _get_file(client, full_name, branch, path, token)
+            content = await _get_file(client, full_name, branch, path, email, token)
         if content:
             file_url = f"{base_url}/{path}"
             await _scan_file(full_name, path, content, file_url)
@@ -341,12 +351,12 @@ async def _run_worker(client: httpx.AsyncClient, email: str, token: str,
         return
 
     log.info("[bitbucket w%d email=%s] fetching recent public repos", worker_id, email)
-    repos = await _list_public_repos(client, token)
+    repos = await _list_public_repos(client, email, token)
     log.info("[bitbucket w%d] %d public repos to scan", worker_id, len(repos))
 
     for repo in repos:
         try:
-            await _scan_repo(client, repo, sem, token)
+            await _scan_repo(client, repo, sem, email, token)
             await asyncio.sleep(_REPO_SLEEP)
         except Exception as e:
             log.debug("[bitbucket w%d] scan err %s: %s",

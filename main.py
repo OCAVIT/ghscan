@@ -404,7 +404,8 @@ async def check_tokens():
             label = f"{email}:{tok[:8]}..."
             tasks[f"bb:{email[:12]}"] = _check(c, label,
                 "https://api.bitbucket.org/2.0/user",
-                headers={"Authorization": f"Bearer {tok}"})
+                headers={"Authorization": "Basic " + __import__("base64").b64encode(
+                    f"{email}:{tok}".encode()).decode()})
 
         for tok in POSTMAN_TOKENS:
             tasks[f"pm:{tok[:12]}"] = _check(c, tok[:12] + "...",
