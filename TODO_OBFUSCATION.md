@@ -1,7 +1,32 @@
-# Obfuscation methods to handle
+# Obfuscation methods + new providers tracker
 
-Tracker for credential-pool obfuscation patterns we've encountered in real
-public repos. Each entry: detection signal + decoding approach + status.
+Tracker for credential-pool obfuscation patterns AND new AI providers we've
+encountered in real public repos. Each entry: detection signal + decoding
+approach + status.
+
+## New providers to add (verified seen with valid keys)
+
+### Commonstack — Claude/GPT/DeepSeek/Kimi/GLM aggregator
+- **Where seen:** `Wangtrotro/EduAgent/.env.example` (2026-05) — key was
+  `ak-aa2901d47f8a79297eb18548438eec02c8fb195d28edfca7753021ac439a245d`
+  (HARDCODED in .env.example, validated 200 OK on /chat/completions)
+- **Endpoint:** `https://api.commonstack.ai/v1` (OpenAI-compatible)
+- **Auth:** `Authorization: Bearer ak-...`  (key is `ak-` + 64 hex)
+- **Available models:** `anthropic/claude-opus-4-7`, `anthropic/claude-sonnet-4-6`,
+  `openai/gpt-5.5`, `deepseek/deepseek-v4-pro`, `moonshotai/kimi-k2.6`,
+  `zai-org/glm-5.1`, `xiaomi/mimo-v2-pro`, `xiaomi/mimo-v2-omni`, more
+- **Validation:** `GET /v1/models` (200 = alive). Per-token billing visible
+  in /models response (pricing field). For dead/exhausted detection a
+  /chat/completions probe with max_tokens=1 may be needed (cost: 1 token
+  ≈ $0.0000005 on cheapest model).
+- **Why valuable:** one key → Claude Opus 4.7 (newest!) + GPT 5.5 + GLM 5.1
+  + Kimi K2.6 + DeepSeek v4-pro all through ONE aggregator. Much like
+  OpenRouter but smaller/less-scanned.
+- **Status:** ❌ NOT yet a provider in EXTRACTORS/VALIDATORS. Pending add.
+- **Add when:** we have ≥3 leaked Commonstack keys observed, OR user
+  explicitly wants it now.
+
+
 
 ## Methods seen in the wild
 
