@@ -709,17 +709,53 @@ async def admin_walk_author(
     return {"ok": "error" not in result, "login": login, **result}
 
 
+_AUTHOR_CYCLE_RUNNING: bool = False
+_AUTHOR_CYCLE_LAST_RESULT: dict = {}
+
+
 @app.post("/admin/run_author_cycle")
 async def admin_run_author_cycle(
     authorization: str | None = Header(default=None),
 ):
     """Manually trigger one author-walk batch cycle (instead of waiting 24h).
 
-    Picks AUTHOR_WALK_BATCH watched authors with stale last_walked_at
-    and walks each. Useful right after deploy or after explicit reset.
+    Fire-and-forget: returns immediately while the cycle runs in
+    background. Walking 30 authors × ~30 repos × ~30 file fetches takes
+    well over Railway's 300s gateway timeout, so we cannot await here.
+
+    Poll /admin/author_cycle_status to see when it finishes and the
+    result counters.
     """
     _check_admin(authorization)
-    return {"ok": True, **(await run_author_cycle())}
+    global _AUTHOR_CYCLE_RUNNING
+    if _AUTHOR_CYCLE_RUNNING:
+        return {"ok": False, "error": "cycle already running",
+                "last_result": _AUTHOR_CYCLE_LAST_RESULT}
+
+    async def _bg():
+        global _AUTHOR_CYCLE_RUNNING, _AUTHOR_CYCLE_LAST_RESULT
+        _AUTHOR_CYCLE_RUNNING = True
+        try:
+            _AUTHOR_CYCLE_LAST_RESULT = await run_author_cycle()
+        except Exception as e:
+            log.error("manual author cycle err: %s", e)
+            _AUTHOR_CYCLE_LAST_RESULT = {"error": str(e)}
+        finally:
+            _AUTHOR_CYCLE_RUNNING = False
+
+    asyncio.create_task(_bg(), name="manual_author_cycle")
+    return {"ok": True, "message": "cycle started in background — poll /admin/author_cycle_status"}
+
+
+@app.get("/admin/author_cycle_status")
+async def admin_author_cycle_status(
+    authorization: str | None = Header(default=None),
+):
+    _check_admin(authorization)
+    return {
+        "running":     _AUTHOR_CYCLE_RUNNING,
+        "last_result": _AUTHOR_CYCLE_LAST_RESULT,
+    }
 
 
 @app.post("/admin/backfill_authors")
