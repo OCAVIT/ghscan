@@ -54,7 +54,6 @@ _PROV: dict[str, dict] = {
     "elevenlabs":   {"e": "🟠", "n": "ElevenLabs"},
     "inworld":      {"e": "🗣️",  "n": "Inworld AI"},
     "suno":         {"e": "🎵", "n": "Suno Music"},
-    "cerebras":     {"e": "🧠", "n": "Cerebras"},
     # Aggregators (one key → Claude/Gemini/GPT/GPT Image/Nano Banana access)
     "aimlapi":      {"e": "🌀", "n": "AIMLAPI"},
     "deepinfra":    {"e": "🟦", "n": "DeepInfra"},
@@ -71,7 +70,7 @@ _CATS: dict[str, dict] = {
     "text": {
         "e": "💬", "n": "AI Text",
         "p": ["openai", "anthropic", "google", "deepseek", "kimi", "glm", "grok",
-              "perplexity", "openrouter", "huggingface", "cerebras",
+              "perplexity", "openrouter", "huggingface",
               "aimlapi", "deepinfra", "hyperbolic"],
     },
     "image": {

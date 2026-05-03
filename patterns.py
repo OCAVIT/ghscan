@@ -635,34 +635,6 @@ def extract_openrouter(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-# ── Cerebras ─────────────────────────────────────────────────────────────────
-# Keys: csk- + ~48 alphanumeric chars. Unique prefix → near-zero false positives.
-# NOT in GitHub secret scanning → very high validity rate.
-# Cerebras Cloud: ultra-fast inference (100k+ tokens/sec on Llama/Mistral).
-_CEREBRAS_STANDALONE = re.compile(
-    r'(?<![A-Za-z0-9_])(csk-[A-Za-z0-9]{32,80})(?![A-Za-z0-9])',
-)
-_CEREBRAS_CTX = re.compile(
-    r'(?:CEREBRAS_API_KEY|CEREBRAS_KEY|api\.cerebras\.ai)'
-    r'[\s\S]{0,200}'
-    r'(csk-[A-Za-z0-9]{32,80})',
-    re.IGNORECASE,
-)
-
-
-def extract_cerebras(content: str) -> list[str]:
-    found = []
-    for m in _CEREBRAS_CTX.finditer(content):
-        key = m.group(1)
-        if not _FAKE.search(key):
-            found.append(key)
-    for m in _CEREBRAS_STANDALONE.finditer(content):
-        key = m.group(1)
-        if key not in found and not _FAKE.search(key):
-            found.append(key)
-    return list(dict.fromkeys(found))
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Aggregator providers (one key → access to Claude, Gemini, GPT, GPT Image…)
 # Critical for finding LIVE keys to closed providers since their direct keys
@@ -812,7 +784,6 @@ EXTRACTORS: dict[str, callable] = {
     "kling":         extract_kling,
     "fireworks":     extract_fireworks,
     "openrouter":    extract_openrouter,
-    "cerebras":      extract_cerebras,
     # Aggregators — single key gives access to multiple closed providers
     "aimlapi":       extract_aimlapi,
     "deepinfra":     extract_deepinfra,
@@ -845,7 +816,6 @@ AI_TRIGGER: tuple[str, ...] = (
     "r8_",          # Replicate
     "fw_",          # Fireworks
     "sk-or-v1",     # OpenRouter
-    "csk-",         # Cerebras
 
     # ── OpenAI / OpenAI Image ───────────────────────────────────────────
     "OPENAI_API_KEY", "openai", "api.openai.com",
@@ -929,8 +899,6 @@ AI_TRIGGER: tuple[str, ...] = (
     "OPENROUTER_API_KEY", "OR_API_KEY", "OPENROUTER_KEY",
     "OPENROUTER", "openrouter", "openrouter.ai",
 
-    # ── Cerebras ────────────────────────────────────────────────────────
-    "CEREBRAS_API_KEY", "CEREBRAS_KEY", "cerebras", "api.cerebras.ai",
 
     # ── Aggregators (Claude/Gemini/GPT/GPT Image proxy) ─────────────────
     "AIMLAPI", "aimlapi", "AIML_API_KEY", "api.aimlapi.com",
@@ -1784,27 +1752,6 @@ QUERIES: list[tuple[str, str, str]] = [
     # CEREBRAS  (csk- unique prefix — ultra-fast inference, NOT in secret scanning)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"csk-" filename:.env',                                "cerebras",    "env"),
-    ('"CEREBRAS_API_KEY" filename:.env',                    "cerebras",    "env"),
-    ('"CEREBRAS_API_KEY" filename:.env.local',              "cerebras",    "env"),
-    ('"csk-" filename:.env.local',                          "cerebras",    "env"),
-    ('"csk-" extension:env',                                "cerebras",    "env"),
-    ('"CEREBRAS_API_KEY" extension:env',                    "cerebras",    "env"),
-    ('"csk-" language:python',                              "cerebras",    "code"),
-    ('"csk-" language:javascript',                          "cerebras",    "code"),
-    ('"csk-" language:typescript',                          "cerebras",    "code"),
-    ('"csk-" language:go',                                  "cerebras",    "code"),
-    ('"csk-" language:Shell',                               "cerebras",    "code"),
-    ('"csk-"',                                              "cerebras",    "code"),
-    ('"CEREBRAS_API_KEY" language:python',                  "cerebras",    "code"),
-    ('"CEREBRAS_API_KEY" language:javascript',              "cerebras",    "code"),
-    ('"api.cerebras.ai" language:python',                   "cerebras",    "code"),
-    ('"api.cerebras.ai" language:javascript',               "cerebras",    "code"),
-    ('"csk-" extension:ipynb',                              "cerebras",    "notebook"),
-    ('"CEREBRAS_API_KEY" extension:ipynb',                  "cerebras",    "notebook"),
-    ('"CEREBRAS_API_KEY" filename:config.py',               "cerebras",    "config"),
-    ('"CEREBRAS_API_KEY" filename:docker-compose.yml',      "cerebras",    "docker"),
-    ('"CEREBRAS_API_KEY" path:.github/workflows',           "cerebras",    "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # SHELL SCRIPTS  (language:Shell — ops automation, CI pipelines, deploy scripts)
@@ -2002,14 +1949,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"XAI_API_KEY" filename:.claude/settings.json',	"grok",	"claude_code"),
     ('"XAI_API_KEY" filename:claude_desktop_config.json',	"grok",	"mcp_config"),
     ('"XAI_API_KEY" filename:mcp.json',	"grok",	"mcp_config"),
-    ('"CEREBRAS_API_KEY" filename:.cursor/mcp.json',	"cerebras",	"cursor_mcp"),
-    ('"CEREBRAS_API_KEY" filename:.continue/config.json',	"cerebras",	"continue_cfg"),
-    ('"CEREBRAS_API_KEY" filename:.continue/config.yaml',	"cerebras",	"continue_cfg"),
-    ('"CEREBRAS_API_KEY" filename:.aider.conf.yml',	"cerebras",	"aider_cfg"),
-    ('"CEREBRAS_API_KEY" filename:.claude/settings.local.json',	"cerebras",	"claude_code"),
-    ('"CEREBRAS_API_KEY" filename:.claude/settings.json',	"cerebras",	"claude_code"),
-    ('"CEREBRAS_API_KEY" filename:claude_desktop_config.json',	"cerebras",	"mcp_config"),
-    ('"CEREBRAS_API_KEY" filename:mcp.json',	"cerebras",	"mcp_config"),
     ('"RUNWAYML_API_SECRET" filename:.cursor/mcp.json',	"runway",	"cursor_mcp"),
     ('"RUNWAYML_API_SECRET" filename:.continue/config.json',	"runway",	"continue_cfg"),
     ('"RUNWAYML_API_SECRET" filename:.continue/config.yaml',	"runway",	"continue_cfg"),
@@ -2129,9 +2068,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"XAI_API_KEY" filename:litellm_config.yaml',	"grok",	"litellm"),
     ('"XAI_API_KEY" filename:litellm.yaml',	"grok",	"litellm"),
     ('"XAI_API_KEY" filename:litellm_config.json',	"grok",	"litellm"),
-    ('"CEREBRAS_API_KEY" filename:litellm_config.yaml',	"cerebras",	"litellm"),
-    ('"CEREBRAS_API_KEY" filename:litellm.yaml',	"cerebras",	"litellm"),
-    ('"CEREBRAS_API_KEY" filename:litellm_config.json',	"cerebras",	"litellm"),
     ('"RUNWAYML_API_SECRET" filename:litellm_config.yaml',	"runway",	"litellm"),
     ('"RUNWAYML_API_SECRET" filename:litellm.yaml',	"runway",	"litellm"),
     ('"RUNWAYML_API_SECRET" filename:litellm_config.json',	"runway",	"litellm"),
@@ -2279,15 +2215,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"XAI_API_KEY" filename:serverless.yml',	"grok",	"serverless"),
     ('"XAI_API_KEY" filename:serverless.yaml',	"grok",	"serverless"),
     ('"XAI_API_KEY" filename:app.yaml',	"grok",	"gae"),
-    ('"CEREBRAS_API_KEY" filename:vercel.json',	"cerebras",	"vercel"),
-    ('"CEREBRAS_API_KEY" filename:netlify.toml',	"cerebras",	"netlify"),
-    ('"CEREBRAS_API_KEY" filename:wrangler.toml',	"cerebras",	"wrangler"),
-    ('"CEREBRAS_API_KEY" filename:railway.toml',	"cerebras",	"railway"),
-    ('"CEREBRAS_API_KEY" filename:fly.toml',	"cerebras",	"fly"),
-    ('"CEREBRAS_API_KEY" filename:Procfile',	"cerebras",	"heroku"),
-    ('"CEREBRAS_API_KEY" filename:serverless.yml',	"cerebras",	"serverless"),
-    ('"CEREBRAS_API_KEY" filename:serverless.yaml',	"cerebras",	"serverless"),
-    ('"CEREBRAS_API_KEY" filename:app.yaml',	"cerebras",	"gae"),
     ('"RUNWAYML_API_SECRET" filename:vercel.json',	"runway",	"vercel"),
     ('"RUNWAYML_API_SECRET" filename:netlify.toml',	"runway",	"netlify"),
     ('"RUNWAYML_API_SECRET" filename:wrangler.toml',	"runway",	"wrangler"),
@@ -2572,7 +2499,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"AIzaSy" filename:claude_desktop_config.json',	"google",	"claude_desktop"),
     ('"hf_" filename:litellm_config.yaml',	"huggingface",	"litellm"),
     ('"r8_" filename:litellm_config.yaml',	"replicate",	"litellm"),
-    ('"csk-" filename:litellm_config.yaml',	"cerebras",	"litellm"),
     ('"fw_" filename:litellm_config.yaml',	"fireworks",	"litellm"),
     ('"xai-" filename:.cursor/mcp.json',	"grok",	"cursor_mcp"),
     ('"OPENAI_API_KEY" path:mcp-servers',	"openai",	"mcp_dir"),

@@ -1005,46 +1005,6 @@ async def validate_openrouter(key: str) -> bool:
         return False
 
 
-async def validate_cerebras(key: str) -> bool:
-    """
-    Cerebras Cloud — POST /v1/chat/completions with gpt-oss-120b.
-    Switched from llama3.1-8b which deprecates 2026-05-27. gpt-oss-120b is
-    current free-tier-accessible production model.
-    csk- prefix. NOT in GitHub secret scanning → very high validity rate.
-    401/403 = dead. 429 = rate-limited (alive). 200 = active with quota.
-    """
-    try:
-        async with _client() as c:
-            r = await c.post(
-                "https://api.cerebras.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model":      "gpt-oss-120b",
-                    "messages":   [{"role": "user", "content": "hi"}],
-                    "max_tokens": 1,
-                },
-            )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
-            return False
-        if r.status_code == 429:
-            return True
-        try:
-            body = r.json()
-            msg  = _err_field(body, "error", "message").lower()
-            if "invalid" in msg and "key" in msg:
-                return False
-            if "quota" in msg or "exhausted" in msg:
-                return False
-        except Exception:
-            pass
-        return r.status_code in (500, 502, 503)
-    except Exception as e:
-        log.debug("cerebras validate err: %s", e)
-        return False
-
-
 async def validate_aimlapi(key: str) -> bool:
     """AIMLAPI — GET /v1/models returns model list. 401 = dead, 200 = alive."""
     try:
@@ -1154,7 +1114,6 @@ VALIDATORS: dict[str, callable] = {
     "kling":        validate_kling,
     "fireworks":    validate_fireworks,
     "openrouter":   validate_openrouter,
-    "cerebras":     validate_cerebras,
     "aimlapi":      validate_aimlapi,
     "deepinfra":    validate_deepinfra,
     "hyperbolic":   validate_hyperbolic,
