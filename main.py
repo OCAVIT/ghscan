@@ -35,6 +35,8 @@ from hf_scanner import hf_loop
 from codeberg_scanner import codeberg_loop
 from bitbucket_scanner import bitbucket_loop
 from postman_scanner import postman_loop
+from npm_scanner import npm_loop
+from pypi_scanner import pypi_loop
 from tg_bot import bot_loop
 
 logging.basicConfig(
@@ -147,6 +149,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
         asyncio.create_task(bitbucket_loop(),       name="bitbucket_scanner"),
         asyncio.create_task(postman_loop(),         name="postman_scanner"),
+        asyncio.create_task(npm_loop(),             name="npm_scanner"),
+        asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield
@@ -400,8 +404,7 @@ async def check_tokens():
             label = f"{email}:{tok[:8]}..."
             tasks[f"bb:{email[:12]}"] = _check(c, label,
                 "https://api.bitbucket.org/2.0/user",
-                headers={"Authorization": "Basic " + __import__("base64").b64encode(
-                    f"{email}:{tok}".encode()).decode()})
+                headers={"Authorization": f"Bearer {tok}"})
 
         for tok in POSTMAN_TOKENS:
             tasks[f"pm:{tok[:12]}"] = _check(c, tok[:12] + "...",

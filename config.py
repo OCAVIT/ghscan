@@ -152,3 +152,16 @@ else:
     POSTMAN_TOKENS = []
 
 POSTMAN_SCAN_INTERVAL = int(os.environ.get("POSTMAN_SCAN_INTERVAL", "10800"))  # 3h default
+
+# ── npm registry scanner ──────────────────────────────────────────────────
+# No auth needed — public registry. Scans `.claude/settings.local.json`,
+# `.env`, and other config files via unpkg.com CDN.
+# Set NPM_ENABLED=0 to disable.
+NPM_ENABLED = os.environ.get("NPM_ENABLED", "1") == "1"
+NPM_SCAN_INTERVAL = int(os.environ.get("NPM_SCAN_INTERVAL", "10800"))  # 3h default
+
+# ── PyPI scanner ──────────────────────────────────────────────────────────
+# No auth needed — public registry. Scans newest packages + AI-related libs
+# via sdist tarball download + extraction.
+PYPI_ENABLED = os.environ.get("PYPI_ENABLED", "1") == "1"
+PYPI_SCAN_INTERVAL = int(os.environ.get("PYPI_SCAN_INTERVAL", "10800"))  # 3h default

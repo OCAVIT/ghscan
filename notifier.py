@@ -385,12 +385,19 @@ async def notify_hourly_digest(by_provider: list[dict], total_new: int,
 
 async def notify_dead_token(token_preview: str):
     """Alert when a token returns 401. token_preview may be 'platform:hash' or bare hash."""
-    if token_preview.startswith("codeberg:"):
-        platform, env_var = "CODEBERG", "CODEBERG_TOKENS"
-    elif token_preview.startswith("gitee:"):
-        platform, env_var = "GITEE", "GITEE_TOKENS"
-    else:
-        platform, env_var = "GITHUB", "GITHUB_TOKENS"
+    _PREFIX_MAP = {
+        "codeberg:":  ("CODEBERG",  "CODEBERG_TOKENS"),
+        "gitee:":     ("GITEE",     "GITEE_TOKENS"),
+        "bitbucket:": ("BITBUCKET", "BITBUCKET_TOKENS"),
+        "postman:":   ("POSTMAN",   "POSTMAN_TOKENS"),
+        "kaggle:":    ("KAGGLE",    "KAGGLE_TOKENS"),
+        "hf:":        ("HUGGINGFACE", "HF_TOKEN"),
+    }
+    platform, env_var = "GITHUB", "GITHUB_TOKENS"
+    for prefix, (p, e) in _PREFIX_MAP.items():
+        if token_preview.startswith(prefix):
+            platform, env_var = p, e
+            break
     await _send(
         f"💀 <b>{platform} TOKEN DEAD</b>\n"
         f"Token <code>{token_preview}...</code> returned 401.\n"
