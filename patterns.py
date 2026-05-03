@@ -56,9 +56,15 @@ def is_server_path(path: str) -> bool:
 
 
 # ── OpenAI ──────────────────────────────────────────────────────────────────
+# Current 2026 key formats:
+#   sk-proj-{156 chars}   — project keys (now default for new accounts)
+#   sk-svcacct-{...}      — service account keys (rare)
+#   sk-admin-{124 chars}  — admin keys, only call admin endpoints (org owner)
+#   sk-{48}               — legacy account keys (still issued for old accounts)
 _OAI_PATTERNS = [
     re.compile(r'sk-proj-[A-Za-z0-9_\-]{40,220}'),
     re.compile(r'sk-svcacct-[A-Za-z0-9_\-]{40,220}'),
+    re.compile(r'sk-admin-[A-Za-z0-9_\-]{100,200}'),
     re.compile(r'sk-[A-Za-z0-9]{48}'),
 ]
 
@@ -275,35 +281,6 @@ def extract_huggingface(content: str) -> list[str]:
                 key = "hf_ctx:" + key  # distinguish non-prefixed ctx matches
             if key not in found and not _FAKE.search(key):
                 found.append(key)
-    return list(dict.fromkeys(found))
-
-
-# ── Together AI ───────────────────────────────────────────────────────────────
-# Keys are 64-char hex strings — no unique prefix, context-only.
-_TOGETHER_DIRECT = re.compile(
-    r'TOGETHER(?:_AI)?_API_KEY\s*[=:]\s*["\']?([a-f0-9]{64})',
-    re.IGNORECASE,
-)
-_TOGETHER_CTX = re.compile(
-    r'(?:TOGETHER(?:_AI)?_API_KEY|api\.together\.xyz|api\.together\.ai|together\.ai)'
-    r'[\s\S]{0,300}'
-    r'([a-f0-9]{64})',
-    re.IGNORECASE,
-)
-
-
-def extract_together(content: str) -> list[str]:
-    if not re.search(r'(?i)together|TOGETHER_API', content):
-        return []
-    found = []
-    for m in _TOGETHER_DIRECT.finditer(content):
-        key = m.group(1)
-        if not _FAKE.search(key):
-            found.append(key)
-    for m in _TOGETHER_CTX.finditer(content):
-        key = m.group(1)
-        if key not in found and not _FAKE.search(key):
-            found.append(key)
     return list(dict.fromkeys(found))
 
 
@@ -608,31 +585,6 @@ def extract_kling(content: str) -> list[str]:
     return [f"{access_keys[0]}:{secret_keys[0]}"]
 
 
-# ── Groq AI ───────────────────────────────────────────────────────────────────
-# gsk_ prefix + ~52 alphanumeric chars. Unique — standalone scan safe.
-# NOT in GitHub secret scanning (mid-2026) → high validity rate.
-_GROQ_STANDALONE = re.compile(r'(?<![A-Za-z0-9_])(gsk_[A-Za-z0-9]{48,60})(?![A-Za-z0-9])')
-_GROQ_CTX = re.compile(
-    r'(?:GROQ_API_KEY|GROQ_KEY|api\.groq\.com)'
-    r'[\s\S]{0,200}'
-    r'(gsk_[A-Za-z0-9]{48,60})',
-    re.IGNORECASE,
-)
-
-
-def extract_groq(content: str) -> list[str]:
-    found = []
-    for m in _GROQ_CTX.finditer(content):
-        key = m.group(1)
-        if not _FAKE.search(key):
-            found.append(key)
-    for m in _GROQ_STANDALONE.finditer(content):
-        key = m.group(1)
-        if key not in found and not _FAKE.search(key):
-            found.append(key)
-    return list(dict.fromkeys(found))
-
-
 # ── Fireworks AI ──────────────────────────────────────────────────────────────
 # Keys: fw_ + alphanumeric 30-50 chars. NOT in GitHub secret scanning.
 _FW_STANDALONE = re.compile(r'(?<![A-Za-z0-9_])(fw_[A-Za-z0-9]{30,60})(?![A-Za-z0-9])')
@@ -679,66 +631,6 @@ def extract_openrouter(content: str) -> list[str]:
     for m in _OR_STANDALONE.finditer(content):
         key = m.group(1)
         if key not in found and not _FAKE.search(key):
-            found.append(key)
-    return list(dict.fromkeys(found))
-
-
-# ── Mistral AI ────────────────────────────────────────────────────────────────
-# Keys: ~32 alphanumeric (no unique prefix). Context-only to avoid false positives.
-# NOT in GitHub secret scanning.
-_MISTRAL_DIRECT = re.compile(
-    r'MISTRAL_API_KEY\s*[=:]\s*["\']?([A-Za-z0-9]{32,64})',
-    re.IGNORECASE,
-)
-_MISTRAL_CTX = re.compile(
-    r'(?:MISTRAL_API_KEY|MISTRAL_KEY|MISTRAL_TOKEN|api\.mistral\.ai)'
-    r'[\s\S]{0,200}'
-    r'([A-Za-z0-9]{32,64})',
-    re.IGNORECASE,
-)
-
-
-def extract_mistral(content: str) -> list[str]:
-    if not re.search(r'(?i)mistral', content):
-        return []
-    found = []
-    for m in _MISTRAL_DIRECT.finditer(content):
-        key = m.group(1)
-        if not _FAKE.search(key):
-            found.append(key)
-    for m in _MISTRAL_CTX.finditer(content):
-        key = m.group(1)
-        if len(key) >= 32 and key not in found and not _FAKE.search(key):
-            found.append(key)
-    return list(dict.fromkeys(found))
-
-
-# ── Cohere ────────────────────────────────────────────────────────────────────
-# Keys: ~40 alphanumeric (no unique prefix). Context-only extraction.
-# NOT in GitHub secret scanning.
-_COHERE_DIRECT = re.compile(
-    r'(?:COHERE_API_KEY|CO_API_KEY|COHERE_TOKEN)\s*[=:]\s*["\']?([A-Za-z0-9_\-]{32,80})',
-    re.IGNORECASE,
-)
-_COHERE_CTX = re.compile(
-    r'(?:COHERE_API_KEY|CO_API_KEY|COHERE_TOKEN|api\.cohere\.ai|api\.cohere\.com)'
-    r'[\s\S]{0,200}'
-    r'([A-Za-z0-9_\-]{32,80})',
-    re.IGNORECASE,
-)
-
-
-def extract_cohere(content: str) -> list[str]:
-    if not re.search(r'(?i)cohere', content):
-        return []
-    found = []
-    for m in _COHERE_DIRECT.finditer(content):
-        key = m.group(1)
-        if not _FAKE.search(key):
-            found.append(key)
-    for m in _COHERE_CTX.finditer(content):
-        key = m.group(1)
-        if len(key) >= 32 and key not in found and not _FAKE.search(key):
             found.append(key)
     return list(dict.fromkeys(found))
 

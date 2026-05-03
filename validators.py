@@ -859,27 +859,6 @@ async def validate_huggingface(key: str) -> bool:
         return False
 
 
-async def validate_together(key: str) -> bool:
-    """
-    Together AI — GET /v1/models: 200 = live key, 401 = dead.
-    Free tier has credits, so most non-revoked keys are active.
-    """
-    try:
-        async with _client() as c:
-            r = await c.get(
-                "https://api.together.xyz/v1/models",
-                headers={"Authorization": f"Bearer {key}"},
-            )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
-            return False
-        return r.status_code == 429
-    except Exception as e:
-        log.debug("together validate err: %s", e)
-        return False
-
-
 async def validate_perplexity(key: str) -> bool:
     """
     Perplexity AI — cheap 1-token sonar completion probe.
@@ -936,27 +915,6 @@ async def validate_runway(key: str) -> bool:
         return r.status_code == 429
     except Exception as e:
         log.debug("runway validate err: %s", e)
-        return False
-
-
-async def validate_groq(key: str) -> bool:
-    """
-    Groq — GET /openai/v1/models: 200 = live key, 401 = dead.
-    gsk_ prefix, NOT in GitHub secret scanning → high validity rate.
-    """
-    try:
-        async with _client() as c:
-            r = await c.get(
-                "https://api.groq.com/openai/v1/models",
-                headers={"Authorization": f"Bearer {key}"},
-            )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
-            return False
-        return r.status_code == 429
-    except Exception as e:
-        log.debug("groq validate err: %s", e)
         return False
 
 
@@ -1044,48 +1002,6 @@ async def validate_openrouter(key: str) -> bool:
         return False
     except Exception as e:
         log.debug("openrouter validate err: %s", e)
-        return False
-
-
-async def validate_mistral(key: str) -> bool:
-    """
-    Mistral AI — GET /v1/models: 200 = live, 401 = dead.
-    NOT in GitHub secret scanning.
-    """
-    try:
-        async with _client() as c:
-            r = await c.get(
-                "https://api.mistral.ai/v1/models",
-                headers={"Authorization": f"Bearer {key}"},
-            )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
-            return False
-        return r.status_code == 429
-    except Exception as e:
-        log.debug("mistral validate err: %s", e)
-        return False
-
-
-async def validate_cohere(key: str) -> bool:
-    """
-    Cohere — GET /v2/models: 200 = live, 401 = dead.
-    NOT in GitHub secret scanning.
-    """
-    try:
-        async with _client() as c:
-            r = await c.get(
-                "https://api.cohere.com/v2/models",
-                headers={"Authorization": f"bearer {key}"},
-            )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
-            return False
-        return r.status_code == 429
-    except Exception as e:
-        log.debug("cohere validate err: %s", e)
         return False
 
 
