@@ -128,3 +128,27 @@ else:
     CODEBERG_TOKENS = []
 
 CODEBERG_SCAN_INTERVAL = int(os.environ.get("CODEBERG_SCAN_INTERVAL", "3600"))  # 1h default
+
+# ── Bitbucket Cloud token pool ────────────────────────────────────────────
+# BITBUCKET_TOKENS=email1:apitoken1,email2:apitoken2
+# Atlassian API tokens (NOT legacy app passwords) — auth via Basic base64(email:token).
+# Required scopes: read:repository:bitbucket, read:account.
+# Rate limit: 1000 req/h per account.
+_bb_multi = os.environ.get("BITBUCKET_TOKENS", "")
+if _bb_multi:
+    BITBUCKET_TOKENS = [t.strip() for t in _bb_multi.split(",") if t.strip() and ":" in t]
+else:
+    BITBUCKET_TOKENS = []
+
+BITBUCKET_SCAN_INTERVAL = int(os.environ.get("BITBUCKET_SCAN_INTERVAL", "10800"))  # 3h default
+
+# ── Postman API key pool ──────────────────────────────────────────────────
+# POSTMAN_TOKENS=PMAK-xxx,PMAK-yyy — Postman API keys, auth via X-Api-Key header.
+# Rate limit: free tier ~60 req/min per key.
+_postman_multi = os.environ.get("POSTMAN_TOKENS", "")
+if _postman_multi:
+    POSTMAN_TOKENS = [t.strip() for t in _postman_multi.split(",") if t.strip()]
+else:
+    POSTMAN_TOKENS = []
+
+POSTMAN_SCAN_INTERVAL = int(os.environ.get("POSTMAN_SCAN_INTERVAL", "10800"))  # 3h default

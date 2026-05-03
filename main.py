@@ -33,6 +33,8 @@ from gist_scanner import gists_loop
 from kaggle_scanner import kaggle_loop
 from hf_scanner import hf_loop
 from codeberg_scanner import codeberg_loop
+from bitbucket_scanner import bitbucket_loop
+from postman_scanner import postman_loop
 from tg_bot import bot_loop
 
 logging.basicConfig(
@@ -143,6 +145,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(kaggle_loop(),          name="kaggle_scanner"),
         asyncio.create_task(hf_loop(),              name="hf_scanner"),
         asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
+        asyncio.create_task(bitbucket_loop(),       name="bitbucket_scanner"),
+        asyncio.create_task(postman_loop(),         name="postman_scanner"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield
@@ -346,7 +350,7 @@ async def check_tokens():
     """Live-check all configured tokens across all platforms. All requests run in parallel."""
     import httpx as _httpx
     from config import (GITHUB_TOKENS, GITEE_TOKENS, CODEBERG_TOKENS,
-                        HF_TOKEN, KAGGLE_TOKENS)
+                        HF_TOKEN, KAGGLE_TOKENS, BITBUCKET_TOKENS, POSTMAN_TOKENS)
 
     async def _check(c, label, url, headers=None, params=None):
         try:
@@ -389,6 +393,21 @@ async def check_tokens():
                 headers={"Authorization": f"Bearer {tok}"},
                 params={"pageSize": 1, "sortBy": "hotness", "language": "python"})
 
+        for entry in BITBUCKET_TOKENS:
+            if ":" not in entry:
+                continue
+            email, _, tok = entry.partition(":")
+            label = f"{email}:{tok[:8]}..."
+            tasks[f"bb:{email[:12]}"] = _check(c, label,
+                "https://api.bitbucket.org/2.0/user",
+                headers={"Authorization": "Basic " + __import__("base64").b64encode(
+                    f"{email}:{tok}".encode()).decode()})
+
+        for tok in POSTMAN_TOKENS:
+            tasks[f"pm:{tok[:12]}"] = _check(c, tok[:12] + "...",
+                "https://api.postman.com/me",
+                headers={"X-Api-Key": tok})
+
         raw = await asyncio.gather(*tasks.values())
         tagged = dict(zip(tasks.keys(), raw))
 
@@ -401,6 +420,8 @@ async def check_tokens():
         "gitee":       _group("gt:"),
         "huggingface": tagged.get("hf", "not configured"),
         "kaggle":      _group("kg:"),
+        "bitbucket":   _group("bb:"),
+        "postman":     _group("pm:"),
     }
 
 
