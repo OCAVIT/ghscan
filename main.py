@@ -503,6 +503,22 @@ async def admin_fix_ark(authorization: str | None = Header(default=None)):
     return results
 
 
+@app.post("/admin/reset_file_claims")
+async def admin_reset_file_claims(authorization: str | None = Header(default=None)):
+    """
+    Drop all SHA-based file dedup claims. After this, next scan cycle will
+    re-fetch ALL previously-scanned files and re-run them through the (now
+    expanded) extractor set. Use after adding new providers or extending
+    regex patterns to backfill findings from existing repos.
+
+    Does NOT delete found_keys — db.key_exists() still de-dups by key value.
+    """
+    _check_admin(authorization)
+    n = await asyncio.to_thread(db.clear_scanned_files)
+    log.info("admin reset_file_claims: cleared %d rows from scanned_files", n)
+    return {"ok": True, "cleared": n}
+
+
 @app.post("/admin/vacuum")
 async def admin_vacuum(authorization: str | None = Header(default=None)):
     """Full SQLite VACUUM — repacks DB file after bulk deletes. Takes a few seconds."""
