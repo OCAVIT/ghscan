@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse
 import db
 from config import (SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES,
                     INFRA_LOW_RISK_MAX_DAYS, DB_PATH)
+from validators import VALIDATORS as EXTRACTORS_AVAILABLE  # actually validators dict
 from scanner import run_cycle, _TOKEN_STATUS
 from notifier import notify_hourly_digest, notify_infra_hourly, flush_unverified_buffer
 from trufflehog_runner import trufflehog_loop
@@ -503,6 +504,80 @@ async def admin_fix_ark(authorization: str | None = Header(default=None)):
     log.info("fix_ark: %d→ark_fast, %d→ark, %d invalidated",
              len(results["ark_fast"]), len(results["ark"]), len(results["invalidated"]))
     return results
+
+
+@app.post("/admin/validate_keys")
+async def admin_validate_keys(
+    body: dict, authorization: str | None = Header(default=None)
+):
+    """
+    Batch-validate a list of keys + save to DB. For ingesting credential dumps
+    found by manual review (decoded base64 obfuscation, etc.).
+
+    Request body:
+      {
+        "source": "manual",                   # used as file_type label
+        "items": [
+          {"provider": "openrouter", "key": "sk-or-v1-...", "repo": "owner/name", "path": "config.js"},
+          ...
+        ]
+      }
+
+    Response: per-item result {provider, preview, is_valid, saved, error}.
+    """
+    _check_admin(authorization)
+    items   = body.get("items") or []
+    src_lbl = (body.get("source") or "manual_dump")[:30]
+
+    from validators import validate as _validate
+
+    out: list[dict] = []
+    n_saved = n_valid = n_dupe = n_no_validator = 0
+
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        prov = (entry.get("provider") or "").strip()
+        key  = (entry.get("key") or "").strip()
+        if not prov or not key:
+            continue
+        if prov not in EXTRACTORS_AVAILABLE:
+            out.append({"provider": prov, "preview": key[:14] + "...",
+                        "is_valid": None, "saved": False,
+                        "error": "no_validator"})
+            n_no_validator += 1
+            continue
+        if db.key_exists(key):
+            out.append({"provider": prov, "preview": key[:14] + "...",
+                        "is_valid": None, "saved": False, "error": "duplicate"})
+            n_dupe += 1
+            continue
+        try:
+            is_valid = await _validate(prov, key)
+        except Exception as e:
+            out.append({"provider": prov, "preview": key[:14] + "...",
+                        "is_valid": None, "saved": False,
+                        "error": f"validate_err:{type(e).__name__}"})
+            continue
+        repo = (entry.get("repo")     or "manual")[:200]
+        path = (entry.get("path")     or "")[:200]
+        url  = (entry.get("file_url") or entry.get("url") or "")[:500]
+        saved = db.save_key(prov, key, repo, path, url, 0, "", src_lbl, is_valid)
+        if saved:
+            n_saved += 1
+            if is_valid:
+                n_valid += 1
+        out.append({"provider": prov, "preview": key[:14] + "...",
+                    "is_valid": is_valid, "saved": saved})
+
+    return {
+        "checked":      len(items),
+        "saved":        n_saved,
+        "valid":        n_valid,
+        "duplicate":    n_dupe,
+        "no_validator": n_no_validator,
+        "results":      out,
+    }
 
 
 @app.post("/admin/refilter_infra")
