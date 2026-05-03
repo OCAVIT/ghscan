@@ -137,48 +137,99 @@ async def _list_public_workspaces(client: httpx.AsyncClient,
         return []
 
 
-async def _search_public_via_web(client: httpx.AsyncClient,
-                                 query: str) -> list[dict]:
-    """Search ALL public Postman workspaces via web-UI search proxy.
-    This bypasses the API-key-scoped /workspaces endpoint and returns
-    workspaces visible to anyone (the global public catalog of ~30K).
-    No auth needed."""
+_SITEMAP_INDEX = "https://www.postman.com/sitemap.xml"
+
+
+async def _enumerate_public_via_sitemap(client: httpx.AsyncClient,
+                                        max_workspaces: int) -> list[dict]:
+    """Enumerate public workspaces via Postman's public sitemap.
+
+    Postman publishes XML sitemaps listing every public team and user
+    workspace at:
+      /api-network-sitemap-public-team-workspaces.xml
+      /api-network-sitemap-public-team-workspaces-{1,2,3}.xml
+      /api-network-sitemap-public-user-workspaces.xml
+      /api-network-sitemap-public-user-workspaces-1.xml
+
+    Each entry is a URL like https://www.postman.com/{owner}/{workspace}.
+    No auth, no rate-limit issues — these are static XML files updated
+    daily by Postman.
+    """
+    import re as _re
     out: list[dict] = []
+    seen: set[str] = set()
+    sitemap_files: list[str] = []
+
     try:
-        # The web UI uses this internal endpoint to power postman.com/explore
-        r = await client.post(
-            f"{_WEB_SEARCH}/search/v3/workspaces",
-            json={
-                "query":      query,
-                "size":       100,
-                "from":       0,
-                "visibility": ["public"],
-                "sortBy":     "RELEVANCE",
-            },
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "Origin":       "https://www.postman.com",
-                "Referer":      "https://www.postman.com/explore",
-            },
-            timeout=20,
+        r = await client.get(_SITEMAP_INDEX, timeout=20)
+        if r.status_code != 200:
+            return out
+        # Find sitemap entries that are workspace-related
+        for m in _re.finditer(r"<loc>([^<]+)</loc>", r.text):
+            url = m.group(1).strip()
+            if "public-team-workspaces" in url or "public-user-workspaces" in url:
+                sitemap_files.append(url)
+    except Exception as e:
+        log.debug("postman sitemap index err: %s", e)
+        return out
+
+    # Process each sitemap file (each holds 50K URLs max per sitemap.xml spec)
+    for sm_url in sitemap_files:
+        if len(out) >= max_workspaces:
+            break
+        try:
+            r = await client.get(sm_url, timeout=30)
+            if r.status_code != 200:
+                continue
+            for m in _re.finditer(r"<loc>([^<]+)</loc>", r.text):
+                ws_url = m.group(1).strip()
+                # Format: https://www.postman.com/{owner}/{workspace}
+                # We can use the path as a workspace handle
+                parts = ws_url.replace("https://www.postman.com/", "").strip("/").split("/")
+                if len(parts) < 2:
+                    continue
+                owner, slug = parts[0], parts[1]
+                handle = f"{owner}/{slug}"
+                if handle in seen:
+                    continue
+                seen.add(handle)
+                # We don't have the workspace UID yet — that comes from /workspaces/{handle}
+                # which we resolve when scanning. Stash slug info for later.
+                out.append({
+                    "id":     None,            # to be resolved
+                    "name":   slug,
+                    "owner":  owner,
+                    "url":    ws_url,
+                    "handle": handle,
+                })
+                if len(out) >= max_workspaces:
+                    break
+        except Exception as e:
+            log.debug("postman sitemap %s err: %s", sm_url, e)
+            continue
+
+    return out
+
+
+async def _resolve_workspace_id(client: httpx.AsyncClient,
+                                token: str, owner: str, slug: str) -> str | None:
+    """Resolve owner/slug → workspace UID via Postman public profile API."""
+    try:
+        # Postman exposes profile data at /_api/profile/{owner}
+        r = await client.get(
+            f"https://www.postman.com/_api/profile/{owner}",
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
         )
         if r.status_code != 200:
-            log.debug("postman web search status=%d query=%r", r.status_code, query)
-            return out
+            return None
         data = r.json() or {}
-        # Response shape: {"data": [{"document": {"workspaceId": ..., "name": ...}}]}
-        results = data.get("data") or data.get("results") or []
-        for item in results:
-            doc = item.get("document") if isinstance(item, dict) else None
-            if not isinstance(doc, dict):
-                continue
-            ws_id = doc.get("workspaceId") or doc.get("id")
-            if ws_id:
-                out.append({"id": ws_id, "name": doc.get("name", ws_id)})
-    except Exception as e:
-        log.debug("postman web search err [%s]: %s", query, e)
-    return out
+        for ws in data.get("workspaces", []) or []:
+            if ws.get("slug") == slug or ws.get("publicHandle") == slug:
+                return ws.get("id") or ws.get("workspaceId")
+    except Exception:
+        pass
+    return None
 
 
 async def _get_workspace_detail(client: httpx.AsyncClient,
@@ -264,8 +315,13 @@ async def _scan_content(uid: str, kind: str, content: str,
 async def _scan_workspace(client: httpx.AsyncClient, token: str,
                           workspace: dict, sem: asyncio.Semaphore):
     """Fetch + scan all collections and environments in a workspace."""
-    ws_id   = workspace.get("id", "")
-    ws_name = workspace.get("name", ws_id)
+    ws_id   = workspace.get("id")
+    ws_name = workspace.get("name", "")
+    # Resolve sitemap-discovered workspaces (no UID yet)
+    if not ws_id and workspace.get("owner") and workspace.get("name"):
+        ws_id = await _resolve_workspace_id(
+            client, token, workspace["owner"], workspace["name"],
+        )
     if not ws_id:
         return
 
@@ -325,24 +381,13 @@ async def _run_worker(client: httpx.AsyncClient, token: str, worker_id: int):
     # 1. API-key-scoped workspaces (limited to what this account sees)
     api_workspaces = await _list_public_workspaces(client, token)
 
-    # 2. Global public catalog via web search proxy (no auth needed)
-    web_workspaces: list[dict] = []
-    seen: set[str] = set()
-    for q in _PUBLIC_SEARCH_QUERIES:
-        results = await _search_public_via_web(client, q)
-        for ws in results:
-            wid = ws.get("id")
-            if wid and wid not in seen:
-                seen.add(wid)
-                web_workspaces.append(ws)
-        await asyncio.sleep(_REQUEST_SLEEP)
-        if len(web_workspaces) >= _MAX_WORKSPACES:
-            break
+    # 2. Global public catalog via Postman's public sitemap (no auth)
+    sitemap_workspaces = await _enumerate_public_via_sitemap(client, _MAX_WORKSPACES)
 
-    workspaces = api_workspaces + web_workspaces
+    workspaces = api_workspaces + sitemap_workspaces
     workspaces = workspaces[:_MAX_WORKSPACES]
-    log.info("[postman w%d] %d workspaces to scan (api=%d web=%d)",
-             worker_id, len(workspaces), len(api_workspaces), len(web_workspaces))
+    log.info("[postman w%d] %d workspaces to scan (api=%d sitemap=%d)",
+             worker_id, len(workspaces), len(api_workspaces), len(sitemap_workspaces))
 
     sem = asyncio.Semaphore(_CONCURRENT)
 

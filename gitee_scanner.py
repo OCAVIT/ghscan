@@ -144,40 +144,22 @@ _SEARCH_QUERIES = [
     "dashscope",
 ]
 
-# Seed list of Chinese AI orgs/users with high key density.
+# Seed list of Chinese AI orgs/users with high key density on Gitee.
+# Most Western-style org names (deepseek-ai/openmmlab/qwenlm) are GitHub-only —
+# their Gitee mirrors live under different handles. We trim to orgs we've
+# actually verified return 200 on /api/v5/orgs/{name}/repos. Adding a dead
+# org just wastes one request per worker per cycle (404 logged but harmless).
+#
+# To extend: visit gitee.com/explore and add active AI org slugs.
 GITEE_TARGET_ORGS: list[tuple[str, str]] = [
     # (type, name)  type = "org" | "user"
-    ("org",  "deepseek-ai"),
-    ("org",  "paddlepaddle"),
-    ("org",  "THUDM"),             # Zhipu AI / ChatGLM — Tsinghua
-    ("org",  "openvino-project"),
-    ("org",  "mindspore-ai"),
-    ("org",  "huaweicloud"),
-    ("org",  "volcengine"),        # ByteDance Volcengine (correct Gitee name)
-    ("org",  "bytedance"),         # ByteDance main org
-    ("org",  "modelscope-ai"),     # Alibaba ModelScope
-    ("org",  "openmmlab"),         # OpenMMLab
-    ("org",  "baidu"),
-    ("org",  "baidu-security"),
-    ("org",  "tencent"),
-    ("org",  "alibaba"),
-    ("org",  "xfyun"),             # iFlytek / Spark LLM
-    ("org",  "moonshot-ai"),       # Kimi
-    ("org",  "klingai"),           # Kling / Kuaishou
-    ("org",  "baichuan-inc"),      # Baichuan LLM
-    ("org",  "01-ai"),             # Yi / 01.AI
-    ("org",  "InternLM"),          # Shanghai AI Lab
-    ("org",  "MiniMax-AI"),        # MiniMax
-    ("org",  "coze-dev"),          # ByteDance Coze
-    # Expanded — Chinese AI companies whose repos often embed provider keys
-    ("org",  "qwenlm"),            # Alibaba Qwen / Tongyi
-    ("org",  "dashscope"),         # Alibaba DashScope API platform
-    ("org",  "stepfun-ai"),        # StepFun AI
-    ("org",  "deepseek-coder"),    # DeepSeek Coder team
-    ("org",  "sensetime"),         # SenseTime
-    ("org",  "megvii"),            # Megvii / Face++
-    ("org",  "netease-youdao"),    # NetEase AI (Youdao / LLM research)
-    ("org",  "4paradigm"),         # 4Paradigm
+    ("org",  "mindspore"),         # Huawei MindSpore (active mirror)
+    ("org",  "paddlepaddle"),      # Baidu PaddlePaddle (active mirror)
+    ("org",  "openharmony"),       # OpenHarmony — many AI demos
+    ("org",  "openeuler"),         # OpenEuler — Huawei OS, lots of AI repos
+    ("org",  "src-openeuler"),
+    ("org",  "minieye"),           # MiniEye AI
+    ("org",  "ascend"),             # Huawei Ascend (NPU SDK + samples)
 ]
 
 # Additional users known to work on Chinese AI projects
