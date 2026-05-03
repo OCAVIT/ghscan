@@ -30,15 +30,36 @@ from datetime import datetime, timezone
 # ══════════════════════════════════════════════════════════════════════════════
 
 _FAKE = re.compile(
-    r'(?:your_|example|placeholder|xxx+|REPLACE|localhost|127\.0\.0\.1'
-    r'|<db|>|\.\.\.|\bfake\b|\bdummy\b|\bsample\b|password123|changeme'
-    r'|root:root|admin:admin|user:password|test:test|postgres:postgres)',
+    r'(?:your_|your-|example|placeholder|xxx+|REPLACE|localhost|127\.0\.0\.1'
+    r'|<db|<your|>|\.\.\.|\bfake\b|\bmock\b|\bdummy\b|\bsample\b|password123'
+    r'|changeme|secret_here|key_here|insert_key|TODO|FIXME'
+    r'|root:root|admin:admin|user:password|test:test|postgres:postgres'
+    r'|user:pass@|user:pass$|host\.docker\.internal|dein_projekt'
+    r'|\$\{[A-Z_][A-Z0-9_]*\}'                # ${ENV_VAR} interpolation
+    r'|<%=|<\?php\s+echo|<<\s*[A-Z_]+\s*>>'    # template interpolation tokens
+    r'|user:password@host|user:password@db)',
     re.IGNORECASE,
 )
 
 
 def _is_fake(s: str) -> bool:
     return bool(_FAKE.search(s))
+
+
+# Detects URL-style creds without password (template patterns like
+# postgres://postgres:5432, postgres://db:5432, redis://redis:6379).
+# Real URLs always have password before @host.
+_TEMPLATE_DSN = re.compile(
+    r'^[a-zA-Z][a-zA-Z0-9+]*://'              # scheme://
+    r'(?!.*@)'                                 # NO @ symbol anywhere = no password
+    r'[a-zA-Z0-9._-]+'                         # user/host
+    r':[0-9]+'                                 # :port
+    r'(?:/|$)',                                # / or end
+)
+
+
+def _is_template_dsn(s: str) -> bool:
+    return bool(_TEMPLATE_DSN.match(s))
 
 
 def extract_destination(connection_string: str) -> str:
@@ -101,11 +122,15 @@ def extract_database(content: str) -> list[str]:
         if not _is_fake(val) and "@" in val:
             found.append(val)
 
-    # Bare DSN in code
+    # Bare DSN in code — also reject template patterns (no password before @host)
     for m in _DB_BARE.finditer(content):
         val = m.group(0)
-        if not _is_fake(val):
-            found.append(val)
+        if _is_fake(val) or _is_template_dsn(val):
+            continue
+        # Real DSN must have @ (separating creds from host); reject pure user:port
+        if "@" not in val:
+            continue
+        found.append(val)
 
     return list(dict.fromkeys(found))
 
