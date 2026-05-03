@@ -505,6 +505,57 @@ async def admin_fix_ark(authorization: str | None = Header(default=None)):
     return results
 
 
+@app.post("/admin/refilter_infra")
+async def admin_refilter_infra(authorization: str | None = Header(default=None)):
+    """
+    Re-apply the current _FAKE / _is_template_dsn filter to all existing
+    infra_findings. Deletes rows that wouldn't be saved under today's rules
+    (templates, mocks, env-var interpolations).
+
+    Run after tightening the infra fake filter — backfills the cleanup that
+    only takes effect on NEW finds otherwise.
+    """
+    _check_admin(authorization)
+    from infra_patterns import _is_fake, _is_template_dsn
+
+    def _filter():
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT id, cred_full FROM infra_findings"
+            ).fetchall()
+            to_delete: list[int] = []
+            for r in rows:
+                cred = r["cred_full"] or ""
+                if _is_fake(cred):
+                    to_delete.append(r["id"])
+                    continue
+                # Database DSNs without @ are templates
+                if "://" in cred and "@" not in cred and _is_template_dsn(cred):
+                    to_delete.append(r["id"])
+                    continue
+            if to_delete:
+                # SQLite IN(...) cap: chunk by 500
+                for i in range(0, len(to_delete), 500):
+                    chunk = to_delete[i:i+500]
+                    placeholders = ",".join("?" * len(chunk))
+                    conn.execute(
+                        f"DELETE FROM infra_findings WHERE id IN ({placeholders})",
+                        chunk,
+                    )
+                conn.commit()
+            return {"total": len(rows), "deleted": len(to_delete)}
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(_filter)
+    log.info("admin refilter_infra: %d/%d removed",
+             result["deleted"], result["total"])
+    return {"ok": True, **result}
+
+
 @app.post("/admin/reset_file_claims")
 async def admin_reset_file_claims(authorization: str | None = Header(default=None)):
     """
