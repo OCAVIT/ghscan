@@ -18,7 +18,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 import db
@@ -173,6 +173,23 @@ def _check_admin(authorization: str | None):
         return  # not configured — open access
     if authorization != f"Bearer {_ADMIN_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# Separate token for hermes-bounty's rotation_proxy. Keeping it distinct from
+# ADMIN_TOKEN means a leak of one doesn't grant the other, and lets us revoke
+# the bounty bridge without locking the admin panel.
+_ROTATION_TOKEN: str = os.environ.get("ROTATION_API_TOKEN", "")
+
+# Only providers used by Hermes are exposed via /api/keys — even with a leaked
+# token, an attacker can't enumerate every provider in the DB this way.
+_ROTATION_ALLOWED_PROVIDERS = frozenset({"deepseek", "kimi", "glm"})
+
+
+def _check_rotation(authorization: str | None) -> None:
+    if not _ROTATION_TOKEN:
+        raise HTTPException(503, detail="ROTATION_API_TOKEN not configured")
+    if authorization != f"Bearer {_ROTATION_TOKEN}":
+        raise HTTPException(401, detail="Unauthorized")
 
 
 # ── Web UI ─────────────────────────────────────────────────────────────────
@@ -447,6 +464,39 @@ async def health():
         "db_mb":        db_mb,
         "files_scanned": db.get_stats().get("files_scanned", 0),
     }
+
+
+# ── Rotation API for hermes-bounty rotation_proxy ─────────────────────────
+# Allows the bounty project's rotation_proxy to pull live valid keys for
+# Hermes-supported providers and report dead keys back. Endpoints are
+# whitelisted to {deepseek, kimi, glm} so this token can't be used to dump
+# every provider's keys.
+
+@app.get("/api/keys")
+async def api_keys_list(
+    provider: str = Query(..., description="One of: deepseek, kimi, glm"),
+    authorization: str | None = Header(default=None),
+):
+    _check_rotation(authorization)
+    if provider not in _ROTATION_ALLOWED_PROVIDERS:
+        raise HTTPException(400, detail=f"provider must be one of {sorted(_ROTATION_ALLOWED_PROVIDERS)}")
+    rows = db.get_valid_keys_by_provider(provider)
+    return [{"hash": r["key_hash"], "key": r["key_full"]} for r in rows]
+
+
+@app.post("/api/keys/dead")
+async def api_keys_dead(
+    payload: dict = Body(...),
+    authorization: str | None = Header(default=None),
+):
+    """rotation_proxy reports a key returned 401/402/insufficient_quota.
+    We mark is_valid=0; the regular re-validation loop will sweep it up later."""
+    _check_rotation(authorization)
+    h = (payload.get("hash") or "").strip()
+    if not h:
+        raise HTTPException(400, detail="missing 'hash'")
+    db.update_key_validity(h, False)
+    return {"ok": True}
 
 
 @app.post("/admin/revalidate")
