@@ -738,6 +738,7 @@ async def admin_backfill_authors(
     _check_admin(authorization)
     import sqlite3
     with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
         # Clear existing aggregates so re-running is idempotent.
         conn.execute("DELETE FROM watched_authors")
         # Aggregate from found_keys. Skip non-github platform prefixes
