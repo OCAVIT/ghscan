@@ -913,17 +913,13 @@ EXTRACTORS: dict[str, callable] = {
     "replicate":     extract_replicate,
     "fal":           extract_fal,
     "huggingface":   extract_huggingface,
-    "together":      extract_together,
     "perplexity":    extract_perplexity,
     "runway":        extract_runway,
     "kimi":          extract_kimi,
     "glm":           extract_glm,
     "kling":         extract_kling,
-    "groq":          extract_groq,
     "fireworks":     extract_fireworks,
     "openrouter":    extract_openrouter,
-    "mistral":       extract_mistral,
-    "cohere":        extract_cohere,
     "cerebras":      extract_cerebras,
     # Aggregators — single key gives access to multiple closed providers
     "aimlapi":       extract_aimlapi,
@@ -955,7 +951,6 @@ AI_TRIGGER: tuple[str, ...] = (
     "pplx-",        # Perplexity
     "xai-",         # xAI / Grok
     "r8_",          # Replicate
-    "gsk_",         # Groq
     "fw_",          # Fireworks
     "sk-or-v1",     # OpenRouter
     "csk-",         # Cerebras
@@ -987,10 +982,6 @@ AI_TRIGGER: tuple[str, ...] = (
     # ── HuggingFace ─────────────────────────────────────────────────────
     "HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN",
     "HF_API_KEY", "HF_API_TOKEN", "huggingface_hub", "huggingface.co",
-
-    # ── Together AI ─────────────────────────────────────────────────────
-    "TOGETHER_API_KEY", "TOGETHER_AI_API_KEY",
-    "together.ai", "together.xyz", "api.together",
 
     # ── Perplexity ──────────────────────────────────────────────────────
     "PERPLEXITY_API_KEY", "PPLX_API_KEY", "PPLX_KEY",
@@ -1038,9 +1029,6 @@ AI_TRIGGER: tuple[str, ...] = (
     "KLING_ACCESS", "KLING_SECRET", "KLING_",
     "klingai", "KLINGAI", "kuaishou", "api.klingai.com",
 
-    # ── Groq ────────────────────────────────────────────────────────────
-    "GROQ_API_KEY", "GROQ_KEY", "api.groq.com",
-
     # ── Fireworks ───────────────────────────────────────────────────────
     "FIREWORKS_API_KEY", "FIREWORKS_AI_API_KEY",
     "FIREWORKS", "fireworks", "api.fireworks.ai",
@@ -1048,14 +1036,6 @@ AI_TRIGGER: tuple[str, ...] = (
     # ── OpenRouter ──────────────────────────────────────────────────────
     "OPENROUTER_API_KEY", "OR_API_KEY", "OPENROUTER_KEY",
     "OPENROUTER", "openrouter", "openrouter.ai",
-
-    # ── Mistral ─────────────────────────────────────────────────────────
-    "MISTRAL_API_KEY", "MISTRAL_KEY", "MISTRAL_TOKEN",
-    "MISTRAL", "mistral", "api.mistral.ai",
-
-    # ── Cohere ──────────────────────────────────────────────────────────
-    "COHERE_API_KEY", "CO_API_KEY", "COHERE_TOKEN",
-    "COHERE", "cohere", "api.cohere.ai", "api.cohere.com",
 
     # ── Cerebras ────────────────────────────────────────────────────────
     "CEREBRAS_API_KEY", "CEREBRAS_KEY", "cerebras", "api.cerebras.ai",
@@ -1646,25 +1626,7 @@ QUERIES: list[tuple[str, str, str]] = [
     # TOGETHER AI  (64-char hex — context-only, moderate density)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"TOGETHER_API_KEY" filename:.env',                  "together", "env"),
-    ('"TOGETHER_AI_API_KEY" filename:.env',               "together", "env"),
-    ('"TOGETHER_API_KEY" filename:.env.local',            "together", "env"),
-    ('"TOGETHER_API_KEY" filename:.env.production',       "together", "env"),
 
-    ('"TOGETHER_API_KEY" language:python',                "together", "code"),
-    ('"TOGETHER_API_KEY" language:javascript',            "together", "code"),
-    ('"TOGETHER_API_KEY" language:typescript',            "together", "code"),
-    ('"TOGETHER_API_KEY" language:go',                    "together", "code"),
-    ('"api.together.xyz" language:python',                "together", "code"),
-    ('"api.together.xyz" language:javascript',            "together", "code"),
-    ('"api.together.xyz" language:typescript',            "together", "code"),
-    ('"api.together.ai" language:python',                 "together", "code"),
-    ('"TOGETHER_API_KEY" extension:ipynb',                "together", "notebook"),
-    ('"together.xyz" "api_key" extension:ipynb',          "together", "notebook"),
-    ('"TOGETHER_API_KEY" filename:config.py',             "together", "config"),
-    ('"TOGETHER_API_KEY" filename:config.ts',             "together", "config"),
-    ('"TOGETHER_API_KEY" filename:docker-compose.yml',    "together", "docker"),
-    ('"TOGETHER_API_KEY" path:.github/workflows',         "together", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # PERPLEXITY AI  (pplx- prefix — unique, moderate density)
@@ -1799,29 +1761,8 @@ QUERIES: list[tuple[str, str, str]] = [
     # GROQ AI  (gsk_ prefix — unique, high validity, NOT in secret scanning)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"GROQ_API_KEY" filename:.env',                        "groq", "env"),
-    ('"GROQ_API_KEY" filename:.env.local',                  "groq", "env"),
-    ('"GROQ_API_KEY" filename:.env.production',             "groq", "env"),
-    ('"GROQ_KEY" filename:.env',                            "groq", "env"),
-    ('"gsk_" filename:.env',                                "groq", "env"),
 
-    ('"GROQ_API_KEY" language:python',                      "groq", "code"),
-    ('"GROQ_API_KEY" language:javascript',                  "groq", "code"),
-    ('"GROQ_API_KEY" language:typescript',                  "groq", "code"),
-    ('"GROQ_API_KEY" language:go',                          "groq", "code"),
-    ('"GROQ_API_KEY" language:java',                        "groq", "code"),
-    ('"GROQ_API_KEY" language:rust',                        "groq", "code"),
-    ('"api.groq.com" language:python',                      "groq", "code"),
-    ('"api.groq.com" language:javascript',                  "groq", "code"),
-    ('"api.groq.com" language:typescript',                  "groq", "code"),
-    ('"api.groq.com" language:go',                          "groq", "code"),
 
-    ('"GROQ_API_KEY" extension:ipynb',                      "groq", "notebook"),
-    ('"gsk_" "groq" extension:ipynb',                       "groq", "notebook"),
-    ('"GROQ_API_KEY" filename:config.py',                   "groq", "config"),
-    ('"GROQ_API_KEY" filename:config.ts',                   "groq", "config"),
-    ('"GROQ_API_KEY" filename:docker-compose.yml',          "groq", "docker"),
-    ('"GROQ_API_KEY" path:.github/workflows',               "groq", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # FIREWORKS AI  (fw_ prefix — NOT in secret scanning)
@@ -1878,51 +1819,15 @@ QUERIES: list[tuple[str, str, str]] = [
     # MISTRAL AI  (context-only — MISTRAL_API_KEY, no unique prefix)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"MISTRAL_API_KEY" filename:.env',                     "mistral", "env"),
-    ('"MISTRAL_API_KEY" filename:.env.local',               "mistral", "env"),
-    ('"MISTRAL_API_KEY" filename:.env.production',          "mistral", "env"),
-    ('"MISTRAL_KEY" filename:.env',                         "mistral", "env"),
 
-    ('"MISTRAL_API_KEY" language:python',                   "mistral", "code"),
-    ('"MISTRAL_API_KEY" language:javascript',               "mistral", "code"),
-    ('"MISTRAL_API_KEY" language:typescript',               "mistral", "code"),
-    ('"MISTRAL_API_KEY" language:go',                       "mistral", "code"),
-    ('"api.mistral.ai" language:python',                    "mistral", "code"),
-    ('"api.mistral.ai" language:javascript',                "mistral", "code"),
-    ('"api.mistral.ai" language:typescript',                "mistral", "code"),
-    ('"mistral" "api_key" language:python',                 "mistral", "code"),
 
-    ('"MISTRAL_API_KEY" extension:ipynb',                   "mistral", "notebook"),
-    ('"mistral" "api_key" extension:ipynb',                 "mistral", "notebook"),
-    ('"MISTRAL_API_KEY" filename:config.py',                "mistral", "config"),
-    ('"MISTRAL_API_KEY" filename:config.ts',                "mistral", "config"),
-    ('"MISTRAL_API_KEY" filename:docker-compose.yml',       "mistral", "docker"),
-    ('"MISTRAL_API_KEY" path:.github/workflows',            "mistral", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # COHERE  (context-only — COHERE_API_KEY, no unique prefix)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"COHERE_API_KEY" filename:.env',                      "cohere", "env"),
-    ('"CO_API_KEY" filename:.env',                          "cohere", "env"),
-    ('"COHERE_API_KEY" filename:.env.local',                "cohere", "env"),
-    ('"COHERE_API_KEY" filename:.env.production',           "cohere", "env"),
 
-    ('"COHERE_API_KEY" language:python',                    "cohere", "code"),
-    ('"COHERE_API_KEY" language:javascript',                "cohere", "code"),
-    ('"COHERE_API_KEY" language:typescript',                "cohere", "code"),
-    ('"COHERE_API_KEY" language:go',                        "cohere", "code"),
-    ('"api.cohere.ai" language:python',                     "cohere", "code"),
-    ('"api.cohere.ai" language:javascript',                 "cohere", "code"),
-    ('"api.cohere.com" language:python',                    "cohere", "code"),
-    ('"cohere" "api_key" language:python',                  "cohere", "code"),
 
-    ('"COHERE_API_KEY" extension:ipynb',                    "cohere", "notebook"),
-    ('"cohere" "api_key" extension:ipynb',                  "cohere", "notebook"),
-    ('"COHERE_API_KEY" filename:config.py',                 "cohere", "config"),
-    ('"COHERE_API_KEY" filename:config.ts',                 "cohere", "config"),
-    ('"COHERE_API_KEY" filename:docker-compose.yml',        "cohere", "docker"),
-    ('"COHERE_API_KEY" path:.github/workflows',             "cohere", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # BLANKET (no language filter) — unique prefixes, near-zero false positives
@@ -1930,12 +1835,6 @@ QUERIES: list[tuple[str, str, str]] = [
     # ═══════════════════════════════════════════════════════════════════════
 
     # Groq  (gsk_ is globally unique to Groq)
-    ('"gsk_"',                                              "groq",        "code"),
-    ('"gsk_" extension:env',                                "groq",        "env"),
-    ('"gsk_" extension:toml',                               "groq",        "code"),
-    ('"GROQ_API_KEY" extension:env',                        "groq",        "env"),
-    ('"GROQ_API_KEY" extension:yaml',                       "groq",        "yaml"),
-    ('"GROQ_API_KEY" extension:toml',                       "groq",        "code"),
 
     # OpenRouter  (sk-or-v1- is the most unique prefix in the ecosystem)
     ('"sk-or-v1-"',                                         "openrouter",  "code"),
@@ -1988,12 +1887,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"GEMINI_API_KEY" extension:yaml',                     "google",      "yaml"),
     ('"DEEPSEEK_API_KEY" extension:env',                    "deepseek",    "env"),
     ('"DEEPSEEK_API_KEY" extension:yaml',                   "deepseek",    "yaml"),
-    ('"MISTRAL_API_KEY" extension:env',                     "mistral",     "env"),
-    ('"MISTRAL_API_KEY" extension:yaml',                    "mistral",     "yaml"),
-    ('"MISTRAL_API_KEY" extension:toml',                    "mistral",     "code"),
-    ('"COHERE_API_KEY" extension:env',                      "cohere",      "env"),
-    ('"COHERE_API_KEY" extension:yaml',                     "cohere",      "yaml"),
-    ('"COHERE_API_KEY" extension:toml',                     "cohere",      "code"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # CEREBRAS  (csk- unique prefix — ultra-fast inference, NOT in secret scanning)
@@ -2036,8 +1929,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"DEEPSEEK_API_KEY" language:Shell',                   "deepseek",    "code"),
     ('"ARK_API_KEY" language:Shell',                        "ark",         "code"),
     ('"DOUBAO_API_KEY" language:Shell',                     "ark",         "code"),
-    ('"gsk_" language:Shell',                               "groq",        "code"),
-    ('"GROQ_API_KEY" language:Shell',                       "groq",        "code"),
     ('"HF_TOKEN" language:Shell',                           "huggingface", "code"),
     ('"hf_" "HF_TOKEN" language:Shell',                     "huggingface", "code"),
     ('"xai-" language:Shell',                               "grok",        "code"),
@@ -2046,7 +1937,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"FIREWORKS_API_KEY" language:Shell',                  "fireworks",   "code"),
     ('"sk-or-v1-" language:Shell',                          "openrouter",  "code"),
     ('"OPENROUTER_API_KEY" language:Shell',                 "openrouter",  "code"),
-    ('"MISTRAL_API_KEY" language:Shell',                    "mistral",     "code"),
     ('"REPLICATE_API_TOKEN" language:Shell',                "replicate",   "code"),
     ('"MOONSHOT_API_KEY" language:Shell',                   "kimi",        "code"),
     ('"ZHIPUAI_API_KEY" language:Shell',                    "glm",         "code"),
@@ -2198,8 +2088,6 @@ GITEE_QUERIES: list[tuple[str, str, str]] = [
     ('"api.x.ai"',                                        "grok",        "code"),
 
     # ── Together AI ───────────────────────────────────────────────────────
-    ('"TOGETHER_API_KEY"',                                "together",    "env"),
-    ('"api.together.xyz"',                                "together",    "code"),
 
     # ── Replicate ─────────────────────────────────────────────────────────
     ('"REPLICATE_API_TOKEN" "r8_"',                       "replicate",   "env"),
@@ -2221,9 +2109,6 @@ GITEE_QUERIES: list[tuple[str, str, str]] = [
     ('"pplx-"',                                           "perplexity",  "code"),
 
     # ── Groq AI ─────────────────────────────────────────────────────────
-    ('"GROQ_API_KEY"',                                    "groq",        "env"),
-    ('"api.groq.com"',                                    "groq",        "code"),
-    ('"gsk_" "groq"',                                     "groq",        "code"),
 
     # ── Fireworks AI ────────────────────────────────────────────────────
     ('"FIREWORKS_API_KEY"',                               "fireworks",   "env"),
@@ -2235,11 +2120,6 @@ GITEE_QUERIES: list[tuple[str, str, str]] = [
     ('"openrouter.ai"',                                   "openrouter",  "code"),
 
     # ── Mistral AI ──────────────────────────────────────────────────────
-    ('"MISTRAL_API_KEY"',                                 "mistral",     "env"),
-    ('"api.mistral.ai"',                                  "mistral",     "code"),
 
     # ── Cohere ──────────────────────────────────────────────────────────
-    ('"COHERE_API_KEY"',                                  "cohere",      "env"),
-    ('"CO_API_KEY"',                                      "cohere",      "env"),
-    ('"api.cohere.ai"',                                   "cohere",      "code"),
 ]

@@ -549,20 +549,39 @@ async def validate_fal(key: str) -> bool:
 
 async def validate_grok(key: str) -> bool:
     """
-    xAI Grok — GET /v1/models: 200 = live key, 401 = dead.
-    xAI gives $25 free credit monthly so most non-revoked keys have quota.
+    xAI Grok — GET /v1/api-key returns key/team status flags.
+
+    Key is INVALID if any of these are true:
+      team_blocked       — team account suspended (no access to anything)
+      api_key_blocked    — this specific key revoked
+      api_key_disabled   — key turned off by user
+
+    GET /v1/models would 200 even on blocked teams (just lists models),
+    so we MUST check the /api-key flags to know real usability.
     """
     try:
         async with _client() as c:
             r = await c.get(
-                "https://api.x.ai/v1/models",
+                "https://api.x.ai/v1/api-key",
                 headers={"Authorization": f"Bearer {key}"},
             )
-        if r.status_code == 200:
-            return True
         if r.status_code in (401, 403):
             return False
-        return r.status_code == 429
+        if r.status_code == 429:
+            return True
+        if r.status_code == 200:
+            try:
+                d = r.json() or {}
+                if d.get("team_blocked"):
+                    return False
+                if d.get("api_key_blocked"):
+                    return False
+                if d.get("api_key_disabled"):
+                    return False
+            except Exception:
+                pass
+            return True
+        return False
     except Exception as e:
         log.debug("grok validate err: %s", e)
         return False
@@ -962,34 +981,59 @@ async def validate_fireworks(key: str) -> bool:
 
 async def validate_openrouter(key: str) -> bool:
     """
-    OpenRouter — GET /api/v1/auth/key.
+    OpenRouter — combined check via /credits + /auth/key.
 
-    Key signals:
-      is_free_tier=true  → never purchased credits → 402 on paid models → False
-      limit != null AND usage >= limit → spending limit exhausted → False
-      otherwise (paid account, within/no limit) → True
+    /api/v1/credits returns {"data":{"total_credits":N,"total_usage":M}}
+      → total_usage >= total_credits  ⇒  exhausted (no spend power) → False
 
-    NOTE: limit=null means "no spending limit set", NOT unlimited credits.
-    The real paid-vs-free signal is is_free_tier.
+    /api/v1/auth/key returns {"is_free_tier":bool,"limit":N|null,"usage":M}
+      → is_free_tier=true and total_credits==0 → free tier, useless → False
+      → limit is set and usage >= limit → spending limit exhausted → False
+
+    Either failure ⇒ False. 401/403 always False.
     """
     try:
         async with _client() as c:
-            r = await c.get(
+            cr = await c.get(
+                "https://openrouter.ai/api/v1/credits",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if cr.status_code in (401, 403):
+            return False
+        if cr.status_code == 429:
+            return True
+        if cr.status_code == 200:
+            try:
+                cdata = cr.json().get("data") or {}
+                tc = float(cdata.get("total_credits", 0) or 0)
+                tu = float(cdata.get("total_usage",   0) or 0)
+                # Negative balance / fully spent
+                if tu >= tc and tc > 0:
+                    return False
+                # Free tier with zero credits granted
+                if tc == 0 and tu == 0:
+                    # Could still be a fresh paid key — check auth endpoint
+                    pass
+            except Exception:
+                pass
+        # Secondary check via /auth/key
+        async with _client() as c:
+            ar = await c.get(
                 "https://openrouter.ai/api/v1/auth/key",
                 headers={"Authorization": f"Bearer {key}"},
             )
-        if r.status_code in (401, 403):
+        if ar.status_code in (401, 403):
             return False
-        if r.status_code == 429:
+        if ar.status_code == 429:
             return True
-        if r.status_code == 200:
+        if ar.status_code == 200:
             try:
-                data = r.json().get("data") or {}
-                if data.get("is_free_tier") is True:
+                adata = ar.json().get("data") or {}
+                if adata.get("is_free_tier") is True:
                     return False
-                limit = data.get("limit")
+                limit = adata.get("limit")
                 if limit is not None:
-                    usage = float(data.get("usage", 0) or 0)
+                    usage = float(adata.get("usage", 0) or 0)
                     if float(limit) <= usage:
                         return False
             except Exception:
@@ -1183,17 +1227,13 @@ VALIDATORS: dict[str, callable] = {
     "replicate":    validate_replicate,
     "fal":          validate_fal,
     "huggingface":  validate_huggingface,
-    "together":     validate_together,
     "perplexity":   validate_perplexity,
     "runway":       validate_runway,
     "kimi":         validate_kimi,
     "glm":          validate_glm,
     "kling":        validate_kling,
-    "groq":         validate_groq,
     "fireworks":    validate_fireworks,
     "openrouter":   validate_openrouter,
-    "mistral":      validate_mistral,
-    "cohere":       validate_cohere,
     "cerebras":     validate_cerebras,
     "aimlapi":      validate_aimlapi,
     "deepinfra":    validate_deepinfra,

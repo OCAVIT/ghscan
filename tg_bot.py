@@ -40,11 +40,7 @@ _PROV: dict[str, dict] = {
     "kimi":         {"e": "🌙", "n": "Kimi / Moonshot"},
     "glm":          {"e": "💜", "n": "Zhipu GLM"},
     "grok":         {"e": "✖️",  "n": "xAI Grok"},
-    "together":     {"e": "🤝", "n": "Together AI"},
     "perplexity":   {"e": "🔮", "n": "Perplexity"},
-    "mistral":      {"e": "🌬️", "n": "Mistral AI"},
-    "cohere":       {"e": "🌊", "n": "Cohere"},
-    "groq":         {"e": "⚡", "n": "Groq"},
     "openrouter":   {"e": "🔀", "n": "OpenRouter"},
     "huggingface":  {"e": "🤗", "n": "HuggingFace"},
     "ark":          {"e": "🔴", "n": "Seedance 2.0 Std"},
@@ -59,6 +55,11 @@ _PROV: dict[str, dict] = {
     "inworld":      {"e": "🗣️",  "n": "Inworld AI"},
     "suno":         {"e": "🎵", "n": "Suno Music"},
     "cerebras":     {"e": "🧠", "n": "Cerebras"},
+    # Aggregators (one key → Claude/Gemini/GPT/GPT Image/Nano Banana access)
+    "aimlapi":      {"e": "🌀", "n": "AIMLAPI"},
+    "deepinfra":    {"e": "🟦", "n": "DeepInfra"},
+    "hyperbolic":   {"e": "🌈", "n": "Hyperbolic"},
+    "novita":       {"e": "🎨", "n": "NovitaAI"},
 }
 
 # ── Category → provider mapping ───────────────────────────────────────────
@@ -70,12 +71,17 @@ _CATS: dict[str, dict] = {
     "text": {
         "e": "💬", "n": "AI Text",
         "p": ["openai", "anthropic", "google", "deepseek", "kimi", "glm", "grok",
-              "together", "perplexity", "mistral", "cohere", "groq", "openrouter",
-              "huggingface", "cerebras"],
+              "perplexity", "openrouter", "huggingface", "cerebras",
+              "aimlapi", "deepinfra", "hyperbolic"],
     },
     "image": {
         "e": "🖼️", "n": "AI Image",
-        "p": ["openai_image", "fal", "replicate", "fireworks"],
+        "p": ["openai_image", "fal", "replicate", "fireworks",
+              "aimlapi", "novita", "deepinfra"],
+    },
+    "aggregator": {
+        "e": "🌐", "n": "Aggregators (Claude/Gemini/GPT proxy)",
+        "p": ["openrouter", "aimlapi", "deepinfra", "hyperbolic", "novita"],
     },
     "voice": {
         "e": "🎙️", "n": "AI Voice",
