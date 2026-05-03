@@ -39,11 +39,36 @@ from notifier import notify_found, notify_dead_token
 
 log = logging.getLogger(__name__)
 
-_BASE = "https://api.postman.com"
+_BASE       = "https://api.postman.com"
+_WEB_SEARCH = "https://www.postman.com/_api/ws/proxy"  # web UI search proxy
 
-_REQUEST_SLEEP   = 1.2   # seconds between requests per token (free tier rate-limit cushion)
-_CONCURRENT      = 4     # parallel collection fetches per worker
-_MAX_WORKSPACES  = 200   # cap per cycle to stay within free-tier monthly budget
+_REQUEST_SLEEP   = 1.2
+_CONCURRENT      = 4
+_MAX_WORKSPACES  = 200
+
+# Search queries for public Postman workspaces (web UI search proxy)
+# These return workspaces, the most prolific source of leaked AI keys
+# (per Truffle Security: 16% of OpenAI Postman collection forks have live keys)
+_PUBLIC_SEARCH_QUERIES: list[str] = [
+    "openai",
+    "anthropic",
+    "claude",
+    "gemini",
+    "groq",
+    "openrouter",
+    "huggingface",
+    "deepseek",
+    "mistral",
+    "perplexity",
+    "elevenlabs",
+    "replicate",
+    "fal",
+    "ai api",
+    "llm api",
+    "chatgpt",
+    "api key",
+    "test environment",
+]
 
 _LIMITS = httpx.Limits(
     max_connections=20,
@@ -110,6 +135,50 @@ async def _list_public_workspaces(client: httpx.AsyncClient,
     except Exception as e:
         log.debug("postman list_workspaces err: %s", e)
         return []
+
+
+async def _search_public_via_web(client: httpx.AsyncClient,
+                                 query: str) -> list[dict]:
+    """Search ALL public Postman workspaces via web-UI search proxy.
+    This bypasses the API-key-scoped /workspaces endpoint and returns
+    workspaces visible to anyone (the global public catalog of ~30K).
+    No auth needed."""
+    out: list[dict] = []
+    try:
+        # The web UI uses this internal endpoint to power postman.com/explore
+        r = await client.post(
+            f"{_WEB_SEARCH}/search/v3/workspaces",
+            json={
+                "query":      query,
+                "size":       100,
+                "from":       0,
+                "visibility": ["public"],
+                "sortBy":     "RELEVANCE",
+            },
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Origin":       "https://www.postman.com",
+                "Referer":      "https://www.postman.com/explore",
+            },
+            timeout=20,
+        )
+        if r.status_code != 200:
+            log.debug("postman web search status=%d query=%r", r.status_code, query)
+            return out
+        data = r.json() or {}
+        # Response shape: {"data": [{"document": {"workspaceId": ..., "name": ...}}]}
+        results = data.get("data") or data.get("results") or []
+        for item in results:
+            doc = item.get("document") if isinstance(item, dict) else None
+            if not isinstance(doc, dict):
+                continue
+            ws_id = doc.get("workspaceId") or doc.get("id")
+            if ws_id:
+                out.append({"id": ws_id, "name": doc.get("name", ws_id)})
+    except Exception as e:
+        log.debug("postman web search err [%s]: %s", query, e)
+    return out
 
 
 async def _get_workspace_detail(client: httpx.AsyncClient,
@@ -253,10 +322,27 @@ async def _run_worker(client: httpx.AsyncClient, token: str, worker_id: int):
     log.info("[postman w%d token=%s...] fetching public workspaces",
              worker_id, token[:12])
 
-    workspaces = await _list_public_workspaces(client, token)
-    workspaces = workspaces[:_MAX_WORKSPACES]  # rate-limit cushion
-    log.info("[postman w%d] %d public workspaces to scan",
-             worker_id, len(workspaces))
+    # 1. API-key-scoped workspaces (limited to what this account sees)
+    api_workspaces = await _list_public_workspaces(client, token)
+
+    # 2. Global public catalog via web search proxy (no auth needed)
+    web_workspaces: list[dict] = []
+    seen: set[str] = set()
+    for q in _PUBLIC_SEARCH_QUERIES:
+        results = await _search_public_via_web(client, q)
+        for ws in results:
+            wid = ws.get("id")
+            if wid and wid not in seen:
+                seen.add(wid)
+                web_workspaces.append(ws)
+        await asyncio.sleep(_REQUEST_SLEEP)
+        if len(web_workspaces) >= _MAX_WORKSPACES:
+            break
+
+    workspaces = api_workspaces + web_workspaces
+    workspaces = workspaces[:_MAX_WORKSPACES]
+    log.info("[postman w%d] %d workspaces to scan (api=%d web=%d)",
+             worker_id, len(workspaces), len(api_workspaces), len(web_workspaces))
 
     sem = asyncio.Semaphore(_CONCURRENT)
 

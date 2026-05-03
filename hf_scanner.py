@@ -208,16 +208,70 @@ async def _scan_content(space_id: str, filepath: str, content: str):
                 )
 
 
+_INTERESTING_EXT = (
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs",
+    ".env", ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg",
+    ".ipynb", ".md", ".sh",
+)
+
+
+async def _list_space_tree(client: httpx.AsyncClient, space_id: str) -> list[str]:
+    """Get the full file list of a Space via /api/spaces/{id}/tree/main?recursive=true.
+    Returns paths only — much more efficient than probing 21 fixed filenames since
+    most Spaces have unique directory layouts."""
+    paths: list[str] = []
+    url = f"{_API_BASE}/spaces/{space_id}/tree/main"
+    next_url = url + "?recursive=true&expand=false"
+    for _ in range(5):  # cap pagination
+        try:
+            r = await client.get(next_url, headers=_headers(), timeout=15)
+            if r.status_code != 200:
+                return paths
+            data = r.json()
+            entries = data if isinstance(data, list) else data.get("siblings", [])
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                if e.get("type") != "file":
+                    continue
+                p = e.get("path", "")
+                if not p or len(p) > 200:
+                    continue
+                # Filter to interesting extensions/names
+                if p.endswith(_INTERESTING_EXT) or p.split("/")[-1] in {
+                    ".env", "Dockerfile", "Procfile", "Makefile",
+                    "requirements.txt", "package.json"
+                }:
+                    paths.append(p)
+            # Pagination: HF uses Link headers occasionally
+            link = r.headers.get("Link", "")
+            if 'rel="next"' in link:
+                import re as _re
+                m = _re.search(r'<([^>]+)>;\s*rel="next"', link)
+                if m:
+                    next_url = m.group(1)
+                    continue
+            break
+        except Exception as e:
+            log.debug("[hf] tree err %s: %s", space_id, e)
+            break
+    return paths
+
+
 async def _scan_space(client: httpx.AsyncClient,
                       space: dict, sem: asyncio.Semaphore):
-    """Fetch and scan all target files in a Space."""
+    """Fetch and scan all interesting files in a Space (via tree listing)."""
     space_id = space.get("id", "")
     if not space_id or "/" not in space_id:
         return
 
-    sdk = space.get("sdk", "")
-    # Prioritize gradio/streamlit — docker/static less likely to have hardcoded keys
-    # But don't skip docker — many docker Spaces have Python backends with keys
+    paths = await _list_space_tree(client, space_id)
+    if not paths:
+        # Fallback to fixed list when tree API fails
+        paths = _TARGET_FILES
+
+    # Cap paths to scan (very large Spaces could have hundreds of files)
+    paths = paths[:60]
 
     async def fetch_one(filepath: str):
         if is_skippable_path(filepath):
@@ -230,7 +284,7 @@ async def _scan_space(client: httpx.AsyncClient,
         if content:
             await _scan_content(space_id, filepath, content)
 
-    tasks = [asyncio.create_task(fetch_one(f)) for f in _TARGET_FILES]
+    tasks = [asyncio.create_task(fetch_one(f)) for f in paths]
     await asyncio.gather(*tasks, return_exceptions=True)
 
 

@@ -10,15 +10,19 @@ Why npm:
 
 Architecture:
   - Search npm registry for AI-related keywords (`/-/v1/search?text=...`)
-  - For each package, fetch specific config files via unpkg.com CDN
-    (way cheaper than downloading whole tarballs)
-  - Specifically targets the new Claude Code vector: .claude/settings.local.json
-  - Dedup via try_claim_file(sha256("npm:{package}@{version}:{path}"))
+  - Fetch package metadata via /{package} → get tarball URL
+  - Stream-download tarball directly (NOT unpkg — unpkg caches & misses dotfiles)
+  - Extract only target paths from tarball (.claude/, .env, config files)
+  - Dedup via try_claim_file(sha256("npm:{package}@{version}"))
 """
 
 import asyncio
+import gzip
 import hashlib
+import io
 import logging
+import re
+import tarfile
 
 import httpx
 
@@ -31,12 +35,12 @@ from notifier import notify_found
 log = logging.getLogger(__name__)
 
 _REGISTRY = "https://registry.npmjs.org"
-_UNPKG    = "https://unpkg.com"
 
 _SEARCH_SLEEP    = 0.5
-_FILE_SLEEP      = 0.1
-_CONCURRENT      = 8
-_FILE_SIZE_MAX   = 256_000        # 256 KB cap on file fetch
+_PKG_SLEEP       = 0.3
+_CONCURRENT      = 4
+_TARBALL_MAX     = 5_000_000      # 5MB cap — bigger packages skipped
+_FILE_SIZE_MAX   = 256_000        # 256 KB cap on per-file scan
 
 _LIMITS = httpx.Limits(
     max_connections=40,
@@ -143,21 +147,118 @@ async def _search_packages(client: httpx.AsyncClient, query: str) -> list[dict]:
         return []
 
 
-async def _fetch_unpkg(client: httpx.AsyncClient,
-                       pkg: str, version: str, path: str) -> str | None:
-    """Fetch a single file from a package via unpkg.com CDN."""
-    url = f"{_UNPKG}/{pkg}@{version}/{path}"
+_TARGET_FILE_RE = re.compile(
+    r"(?:^|/)("
+    r"\.claude/settings(?:\.local)?\.json"
+    r"|claude_desktop_config\.json"
+    r"|\.?mcp\.json"
+    r"|\.cursor/mcp\.json"
+    r"|\.continue/config\.(?:json|yaml)"
+    r"|\.aider\.conf\.yml"
+    r"|\.env(?:\.[a-zA-Z]+)?"
+    r"|config\.(?:json|js|ts|cjs|mjs|yaml|yml|toml)"
+    r"|settings\.(?:json|js|ts)"
+    r"|secrets\.(?:json|yaml|yml|js|ts)"
+    r"|credentials\.(?:json|yaml|yml)"
+    r"|api_keys?\.(?:json|js|ts)"
+    r"|README\.md"
+    r"|package\.json"
+    r"|litellm_config\.(?:yaml|json)"
+    r")$",
+    re.IGNORECASE,
+)
+_SKIP_DIR_RE = re.compile(
+    r"(?:^|/)(?:tests?|examples?|docs?|\.git|node_modules|"
+    r"build|dist/test|coverage|\.idea|\.vscode)/",
+    re.IGNORECASE,
+)
+
+
+async def _get_metadata(client: httpx.AsyncClient, package: str) -> dict | None:
+    """Fetch npm package metadata (gives latest version + tarball URL)."""
     try:
-        r = await client.get(url, timeout=12)
+        r = await client.get(f"{_REGISTRY}/{package}", timeout=15)
         if r.status_code != 200:
             return None
-        if len(r.content) > _FILE_SIZE_MAX:
-            return None
-        # unpkg returns text/plain or application/json for these
-        return r.text
+        return r.json()
     except Exception as e:
-        log.debug("unpkg fetch err [%s@%s/%s]: %s", pkg, version, path, e)
+        log.debug("npm metadata err [%s]: %s", package, e)
         return None
+
+
+def _pick_tarball(meta: dict) -> tuple[str, str] | None:
+    """Return (tarball_url, version) for the latest non-deprecated version."""
+    info = meta.get("dist-tags", {}) or {}
+    latest = info.get("latest", "")
+    if not latest:
+        return None
+    versions = meta.get("versions", {}) or {}
+    v = versions.get(latest)
+    if not v or not isinstance(v, dict):
+        return None
+    if v.get("deprecated"):
+        return None
+    dist = v.get("dist", {}) or {}
+    url = dist.get("tarball", "")
+    return (url, latest) if url else None
+
+
+async def _download_tarball(client: httpx.AsyncClient, url: str) -> bytes | None:
+    """Stream-download tarball with size cap."""
+    try:
+        async with client.stream("GET", url, timeout=30) as r:
+            if r.status_code != 200:
+                return None
+            cl = r.headers.get("content-length")
+            if cl and int(cl) > _TARBALL_MAX:
+                return None
+            buf = bytearray()
+            async for chunk in r.aiter_bytes():
+                buf.extend(chunk)
+                if len(buf) > _TARBALL_MAX:
+                    return None
+            return bytes(buf)
+    except Exception as e:
+        log.debug("npm tarball download err: %s", e)
+        return None
+
+
+def _extract_target_files(tarball: bytes) -> dict[str, str]:
+    """Extract only target config files from npm tarball."""
+    out: dict[str, str] = {}
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz")
+    except Exception as e:
+        log.debug("npm tar open err: %s", e)
+        return out
+
+    try:
+        for member in tf.getmembers():
+            if not member.isfile():
+                continue
+            if member.size > _FILE_SIZE_MAX:
+                continue
+            name = member.name
+            # npm tarballs prefix everything with "package/"
+            rel = name.split("/", 1)[1] if "/" in name else name
+            if _SKIP_DIR_RE.search(rel):
+                continue
+            if not _TARGET_FILE_RE.search(rel):
+                continue
+            try:
+                f = tf.extractfile(member)
+                if not f:
+                    continue
+                raw = f.read()
+                out[rel] = raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug("npm tar walk err: %s", e)
+    finally:
+        tf.close()
+
+    return out
 
 
 async def _scan_content(pkg: str, version: str, path: str, content: str):
@@ -189,22 +290,34 @@ async def _scan_content(pkg: str, version: str, path: str, content: str):
 async def _scan_package(client: httpx.AsyncClient, package: dict,
                         sem: asyncio.Semaphore):
     pkg = package.get("name", "")
-    version = package.get("version", "")
-    if not pkg or not version:
+    if not pkg:
         return
 
-    async def fetch_one(path: str):
-        ck = _claim_key(pkg, version, path)
-        if not db.try_claim_file(ck):
+    async with sem:
+        # Get metadata to find tarball URL + canonical version
+        meta = await _get_metadata(client, pkg)
+        if not meta:
             return
-        async with sem:
-            content = await _fetch_unpkg(client, pkg, version, path)
-        if content:
-            await _scan_content(pkg, version, path, content)
-        await asyncio.sleep(_FILE_SLEEP)
+        picked = _pick_tarball(meta)
+        if not picked:
+            return
+        url, version = picked
 
-    tasks = [asyncio.create_task(fetch_one(p)) for p in _TARGET_PATHS]
-    await asyncio.gather(*tasks, return_exceptions=True)
+        # Dedup at package@version level
+        if not db.try_claim_file(_claim_key(pkg, version, "_tarball")):
+            return
+
+        tarball = await _download_tarball(client, url)
+        if not tarball:
+            return
+        await asyncio.sleep(_PKG_SLEEP)
+
+    files = _extract_target_files(tarball)
+    if not files:
+        return
+
+    for path, content in files.items():
+        await _scan_content(pkg, version, path, content)
 
 
 async def run_npm_cycle():

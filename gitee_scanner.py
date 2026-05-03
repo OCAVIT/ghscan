@@ -287,21 +287,28 @@ async def _search_repos(client: httpx.AsyncClient,
                         query: str, token: str) -> list[dict]:
     """Search public repos by keyword via /search/repositories.
 
-    No auth required — if token returns 401/403, retries without Authorization
-    so search keeps working even when the token slot is dead.
+    Gitee API quirks (verified against real 400 responses):
+      - access_token must be query-param, not just Authorization header
+      - sort=stars is invalid for search (only sort=last_push_at supported)
+      - per_page max is 20 for search (100 for listing)
+      - Accept: application/json header required to avoid 400 in some cases
     """
     all_repos = []
-    use_auth = True  # flip to False on first auth failure
+    use_auth = True
 
     for page in range(1, _SEARCH_PAGES + 1):
-        hdrs = _headers(token) if use_auth else _ANON_UA
+        hdrs = (_headers(token) if use_auth else _ANON_UA) | {
+            "Accept": "application/json",
+        }
         params: dict = {
             "q":        query,
             "per_page": 20,
             "page":     page,
-            "order":    "desc",
-            "sort":     "stars",
         }
+        # Gitee search supports limited sort values; omit on retry attempts
+        if page == 1:
+            params["sort"] = "last_push_at"
+            params["order"] = "desc"
         if use_auth:
             params["access_token"] = token
         try:
@@ -316,15 +323,29 @@ async def _search_repos(client: httpx.AsyncClient,
                     _TOKEN_STATUS[token[:8]] = {"alive": False}
                     use_auth = False
                     log.debug("gitee search: token dead, retrying anon for '%s'", query)
-                    continue  # retry same page without auth
-                break  # anon also failed — give up
-            if r.status_code == 400:
-                log.debug("gitee search 400 query=%r resp=%s", query[:40], r.text[:120])
+                    continue
                 break
+            if r.status_code == 400:
+                # Retry once without sort/order params
+                if "sort" in params:
+                    params.pop("sort", None)
+                    params.pop("order", None)
+                    r2 = await client.get(
+                        f"{_BASE}/search/repositories",
+                        headers=hdrs, params=params, timeout=20,
+                    )
+                    if r2.status_code == 200:
+                        r = r2
+                    else:
+                        log.info("gitee search 400 (no-sort retry also failed) query=%r body=%s",
+                                 query[:40], r2.text[:200])
+                        break
+                else:
+                    log.info("gitee search 400 query=%r body=%s", query[:40], r.text[:200])
+                    break
             if r.status_code != 200:
                 break
             data = r.json()
-            # API returns {"total_count": N, "items": [...]} or bare list
             if isinstance(data, dict):
                 batch = data.get("items", [])
             elif isinstance(data, list):
@@ -334,7 +355,7 @@ async def _search_repos(client: httpx.AsyncClient,
             if not batch:
                 break
             all_repos.extend(batch)
-            if len(batch) < 100:
+            if len(batch) < 20:
                 break
             await asyncio.sleep(_PAGE_SLEEP)
         except Exception as e:
