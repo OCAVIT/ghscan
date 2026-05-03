@@ -765,6 +765,8 @@ async def admin_backfill_authors(
               AND repo NOT LIKE 'npm:%'
               AND repo NOT LIKE 'pypi:%'
               AND repo NOT LIKE 'cc:%'
+              AND repo NOT LIKE 'http%://%'  -- skip URL-style repo strings
+              AND repo NOT LIKE 'https:%'
               AND INSTR(repo, '/') > 0
             GROUP BY login, platform
         """)
