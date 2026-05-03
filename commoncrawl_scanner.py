@@ -131,51 +131,75 @@ async def _get_latest_crawl(client: httpx.AsyncClient) -> str | None:
 
 async def _search_cdx(client: httpx.AsyncClient,
                       crawl_id: str, url_pattern: str, cap: int):
-    """Query CDX index, yield raw records {url, filename, offset, length, digest}."""
+    """Query CDX index, yield raw records {url, filename, offset, length, digest}.
+
+    CDX endpoint is famously flaky — wildcard queries can take 60+ seconds
+    or return 504/502/503 under load. We retry with exponential backoff and
+    skip the pattern if all retries fail.
+    """
     base = f"{_CDX_BASE}/{crawl_id}-index"
     yielded = 0
     page = 0
+    consecutive_failures = 0
+
     while yielded < cap:
-        try:
-            r = await client.get(
-                base,
-                params={
-                    "url":      url_pattern,
-                    "output":   "json",
-                    "page":     page,
-                    "pageSize": 1,
-                },
-                timeout=30,
-            )
-            if r.status_code == 404:
-                # No matches for this pattern in this crawl
-                return
-            if r.status_code != 200:
-                log.debug("cc cdx status=%d pattern=%s page=%d",
-                          r.status_code, url_pattern, page)
-                return
-            text = r.text
-            if not text.strip():
-                return
-            page_records = 0
-            for line in text.split("\n"):
-                if not line.strip():
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                yield rec
-                yielded += 1
-                page_records += 1
-                if yielded >= cap:
+        params = {
+            "url":      url_pattern,
+            "output":   "json",
+            "page":     page,
+            "pageSize": 5,   # CDX default; smaller pages = faster timeout if pattern is rare
+        }
+        # Retry with backoff on 502/503/504 (gateway timeouts)
+        text = None
+        for attempt in range(3):
+            try:
+                r = await client.get(base, params=params, timeout=90)
+                if r.status_code == 404:
                     return
-            if page_records == 0:
-                return  # empty page → no more results
+                if r.status_code in (502, 503, 504):
+                    backoff = 5 * (attempt + 1) ** 2  # 5s, 20s, 45s
+                    log.info("cc cdx %d pattern=%s page=%d retry in %ds",
+                             r.status_code, url_pattern, page, backoff)
+                    await asyncio.sleep(backoff)
+                    continue
+                if r.status_code != 200:
+                    log.debug("cc cdx status=%d pattern=%s page=%d body=%s",
+                              r.status_code, url_pattern, page, r.text[:120])
+                    return
+                text = r.text
+                break
+            except Exception as e:
+                backoff = 5 * (attempt + 1)
+                log.debug("cc cdx err [%s p=%d a=%d]: %s — retry in %ds",
+                          url_pattern, page, attempt, e, backoff)
+                await asyncio.sleep(backoff)
+        if text is None:
+            consecutive_failures += 1
+            if consecutive_failures >= 2:
+                log.warning("cc cdx pattern '%s' failed twice — skipping", url_pattern)
+                return
             page += 1
-        except Exception as e:
-            log.debug("cc cdx err [%s p=%d]: %s", url_pattern, page, e)
+            continue
+        consecutive_failures = 0
+
+        if not text.strip():
             return
+        page_records = 0
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            yield rec
+            yielded += 1
+            page_records += 1
+            if yielded >= cap:
+                return
+        if page_records == 0:
+            return  # empty page → no more results
+        page += 1
 
 
 async def _fetch_warc_record(client: httpx.AsyncClient,
