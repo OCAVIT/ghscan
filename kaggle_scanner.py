@@ -31,6 +31,7 @@ import httpx
 import db
 from config import KAGGLE_TOKENS, KAGGLE_SCAN_INTERVAL
 from patterns import EXTRACTORS, AI_TRIGGER
+from deobfuscate import expand as _deobf_expand
 from validators import validate
 from notifier import notify_found
 
@@ -202,6 +203,7 @@ async def _fetch_kernel_source(token: str, ref: str) -> str | None:
 async def _scan_notebook(ref: str, content: str):
     """Run extractors on notebook content and persist findings."""
     text = _extract_notebook_text(content)
+    text = _deobf_expand(text)
     if not any(t in text for t in _AI_TRIGGER):
         return
 

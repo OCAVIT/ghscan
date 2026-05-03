@@ -34,6 +34,7 @@ import httpx
 import db
 from config import CC_ENABLED, CC_SCAN_INTERVAL, CC_PER_PATTERN_CAP
 from patterns import EXTRACTORS, AI_TRIGGER, INFRA_TRIGGER
+from deobfuscate import expand as _deobf_expand
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate
 from notifier import notify_found, notify_infra_found
@@ -255,6 +256,7 @@ def _extract_body(warc_gzip: bytes) -> str | None:
 
 async def _scan_content(url: str, content: str):
     """Run the standard AI + infra extractor pipeline on a CC page body."""
+    content   = _deobf_expand(content)
     has_ai    = any(t in content for t in AI_TRIGGER)
     has_infra = any(t in content for t in INFRA_TRIGGER)
     if not has_ai and not has_infra:

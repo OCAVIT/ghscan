@@ -32,6 +32,7 @@ from config import (
     CONCURRENT_ITEMS, MAX_PAGES,
 )
 from patterns import QUERIES, EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
+from deobfuscate import expand as _deobf_expand
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate, INFRA_VALIDATORS
 from notifier import notify_found, notify_cycle_done, notify_infra_found, notify_dead_token
@@ -312,6 +313,149 @@ async def _validate_infra_bg(infra_prov: str, cred: str, cred_hash: str):
         log.debug("infra validate bg err (%s): %s", infra_prov, e)
 
 
+# Repo tree-walk constants. ~30 fetched files/repo at default cap; caps API
+# burn at ~30K calls per 1000 first-key discoveries (1 tree + 30 blobs each).
+_TREEWALK_MAX_FILES = 100
+_TREEWALK_MAX_FILE_SIZE = 256 * 1024  # 256 KB
+_TREEWALK_INTERESTING_EXT = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".env", ".env.example", ".env.local", ".env.production", ".env.staging",
+    ".env.template", ".env.ready", ".env.bak", ".envrc",
+    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".ipynb", ".md", ".rst", ".sh", ".bash",
+    ".go", ".rs", ".rb", ".php", ".java", ".kt", ".cs", ".dart", ".swift",
+    ".sql", ".tf", ".tfvars", ".dockerfile", "dockerfile",
+)
+_TREEWALK_SKIP_DIRS = (
+    "node_modules/", "vendor/", "dist/", "build/", "out/", ".next/",
+    "coverage/", "__pycache__/", "test/", "tests/", "__tests__/",
+    "fixtures/", "cassettes/", ".git/",
+)
+
+
+def _is_interesting_blob(path: str, size: int) -> bool:
+    if size > _TREEWALK_MAX_FILE_SIZE or size <= 0:
+        return False
+    pl = path.lower()
+    if any(pl.startswith(d) or f"/{d}" in pl for d in _TREEWALK_SKIP_DIRS):
+        return False
+    return pl.endswith(_TREEWALK_INTERESTING_EXT) or pl.split("/")[-1] in (
+        ".env", "dockerfile", "wrangler.toml", "vercel.json", "netlify.toml",
+    )
+
+
+async def _scan_blob(client: httpx.AsyncClient, full_name: str, blob: dict,
+                     stars: int, created_at: str, token_headers: dict) -> int:
+    """Fetch a single blob via /git/blobs/{sha}, run extractors. Returns
+    number of NEW keys saved (for tree-walk stats). Reuses existing
+    save_key + notify pipeline so duplicates and dead are filtered."""
+    sha = blob.get("sha", "")
+    path = blob.get("path", "")
+    if not sha or not path:
+        return 0
+    if not db.try_claim_file(sha):
+        return 0  # already scanned in another cycle
+
+    blob_url = f"{_BASE}/repos/{full_name}/git/blobs/{sha}"
+    data = await _gh_get(client, blob_url, headers=token_headers)
+    if not data:
+        return 0
+    enc = data.get("encoding", "")
+    raw = data.get("content", "")
+    try:
+        content = base64.b64decode(raw).decode("utf-8", errors="replace") if enc == "base64" else (raw or "")
+    except Exception:
+        return 0
+    if not content:
+        return 0
+    content = _deobf_expand(content)
+
+    if not any(t in content for t in AI_TRIGGER):
+        return 0
+
+    file_url = f"https://github.com/{full_name}/blob/HEAD/{path}"
+    saved_count = 0
+    for ai_prov, ai_fn in EXTRACTORS.items():
+        for key in ai_fn(content):
+            if db.key_exists(key):
+                continue
+            is_valid = await validate(ai_prov, key)
+            saved = db.save_key(
+                ai_prov, key, full_name, path, file_url,
+                stars, created_at, "tree_walk", is_valid,
+            )
+            if saved:
+                saved_count += 1
+                await notify_found(
+                    ai_prov, key, full_name, path, file_url,
+                    stars, created_at, "tree_walk", is_valid,
+                )
+                log.info("[treewalk %s] %s from %s/%s",
+                         "VALID" if is_valid else "found", ai_prov, full_name, path)
+    return saved_count
+
+
+async def walk_repo_tree(client: httpx.AsyncClient, full_name: str,
+                         stars: int, created_at: str,
+                         token_headers: dict) -> None:
+    """Walk a repo's full tree once, scanning every interesting file.
+
+    Triggered when a key is found in a repo that hasn't been tree-walked yet
+    (atomic via db.try_claim_repo_tree). Bounded to _TREEWALK_MAX_FILES per
+    repo. Cost: 1 tree-list + ~30 blob fetches per qualifying repo.
+
+    Solves the problem where GitHub Code Search misses sibling files (recent
+    push not yet indexed, pagination cap reached, env-var name not in our
+    queries). Real-world example 2026-05: stenin15/mystic-whispers-us had
+    OpenAI + OpenRouter + Replicate keys in 3 different files; only one
+    surfaced via search.
+    """
+    if not db.try_claim_repo_tree(full_name):
+        return  # already walked
+
+    try:
+        # Get default branch SHA
+        meta = await _gh_get(client, f"{_BASE}/repos/{full_name}", headers=token_headers)
+        if not meta:
+            db.mark_repo_walked(full_name, 0, 0)
+            return
+        branch = meta.get("default_branch") or "main"
+        # Fetch the recursive tree
+        tree_url = f"{_BASE}/repos/{full_name}/git/trees/{branch}?recursive=1"
+        tree = await _gh_get(client, tree_url, headers=token_headers)
+        if not tree:
+            db.mark_repo_walked(full_name, 0, 0)
+            return
+
+        candidates = []
+        for blob in tree.get("tree", []):
+            if blob.get("type") != "blob":
+                continue
+            path = blob.get("path", "")
+            size = blob.get("size", 0)
+            if _is_interesting_blob(path, size):
+                candidates.append(blob)
+        # Cap to bound API cost
+        candidates = candidates[:_TREEWALK_MAX_FILES]
+
+        keys_found = 0
+        for blob in candidates:
+            try:
+                keys_found += await _scan_blob(
+                    client, full_name, blob, stars, created_at, token_headers
+                )
+            except Exception as e:
+                log.debug("treewalk blob err %s/%s: %s", full_name, blob.get("path"), e)
+
+        db.mark_repo_walked(full_name, len(candidates), keys_found)
+        if keys_found:
+            log.info("[treewalk] %s: %d files, %d new keys",
+                     full_name, len(candidates), keys_found)
+    except Exception as e:
+        log.debug("treewalk err %s: %s", full_name, e)
+        db.mark_repo_walked(full_name, 0, 0)
+
+
 async def _process_inner(client: httpx.AsyncClient, item: dict,
                          provider: str, file_type: str, token_headers: dict):
     repo_info   = item.get("repository", {})
@@ -359,6 +503,11 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
     if not content:
         return
 
+    # Deobfuscate: appends decoded variants for b64/hex/charcode/concat/reverse/
+    # SSR-hydration/k8s-Secret patterns. Cheap when no markers present (returns
+    # input unchanged). Catches keys hidden behind common obfuscation layers.
+    content = _deobf_expand(content)
+
     # Fast-path: skip heavy regex if no trigger strings present anywhere in content.
     # Saves CPU on large files that are clearly irrelevant (e.g. pure binary-as-text).
     has_ai_trigger    = any(t in content for t in AI_TRIGGER)
@@ -368,6 +517,7 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
 
     # ── AI key extractors — run ALL providers on every file ────────────────
     # (not just the query's "provider": a .env might have OpenAI + DeepSeek + ARK)
+    any_key_saved = False
     if has_ai_trigger:
         for ai_prov, ai_fn in EXTRACTORS.items():
             for key in ai_fn(content):
@@ -379,12 +529,26 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
                     stars, created_at, file_type, is_valid,
                 )
                 if saved:
+                    any_key_saved = True
                     await notify_found(
                         ai_prov, key, full_name, file_path, file_url,
                         stars, created_at, file_type, is_valid,
                     )
                     log.info("[%s] %s from %s",
                              "VALID" if is_valid else "found", ai_prov, full_name)
+
+    # Tree-walk: if any key was found, exhaustively scan the rest of this
+    # repo's interesting files. Atomic claim prevents re-walking the same
+    # repo across cycles. Runs as background task so it doesn't block the
+    # main scan loop. Captures sibling-file keys that GitHub Code Search
+    # missed due to indexing lag or pagination caps.
+    if any_key_saved:
+        t = asyncio.create_task(
+            walk_repo_tree(client, full_name, stars, created_at, token_headers),
+            name=f"treewalk_{full_name}",
+        )
+        _BG_TASKS.add(t)
+        t.add_done_callback(_BG_TASKS.discard)
 
     # ── Infra extractors — intersecting track ──────────────────────────────
     # Only files found via AI queries are scanned → infra creds come from AI repos.

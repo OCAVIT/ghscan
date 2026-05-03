@@ -34,6 +34,7 @@ import httpx
 import db
 from config import POSTMAN_TOKENS, POSTMAN_SCAN_INTERVAL
 from patterns import EXTRACTORS, AI_TRIGGER
+from deobfuscate import expand as _deobf_expand
 from validators import validate
 from notifier import notify_found, notify_dead_token
 
@@ -287,6 +288,7 @@ async def _get_environment(client: httpx.AsyncClient,
 async def _scan_content(uid: str, kind: str, content: str,
                         ws_name: str, item_name: str):
     """Run AI extractors on Postman JSON content."""
+    content = _deobf_expand(content)
     if not any(t in content for t in AI_TRIGGER):
         return
 

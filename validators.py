@@ -1091,6 +1091,141 @@ async def validate_novita(key: str) -> bool:
         return False
 
 
+async def validate_commonstack(key: str) -> bool:
+    """Commonstack — GET /v1/models. 200 = key auth OK; reveals model catalog
+    with per-token pricing. /chat/completions probe is authoritative for
+    billing-dead detection but costs ~$1e-7 per call."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.commonstack.ai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            if r.status_code == 200:
+                p = await c.post(
+                    "https://api.commonstack.ai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={
+                        "model":      "deepseek/deepseek-v4-flash",
+                        "messages":   [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                    },
+                )
+                if p.status_code == 200:
+                    return True
+                if p.status_code in (401, 402, 403):
+                    return False
+                return p.status_code == 429
+            if r.status_code in (401, 403):
+                return False
+            return r.status_code == 429
+    except Exception as e:
+        log.debug("commonstack validate err: %s", e)
+        return False
+
+
+async def validate_serper(key: str) -> bool:
+    """Serper.dev — POST /search with cheapest 1-result query.
+    Cost: 1 credit per call (free tier has 2500 credits)."""
+    try:
+        async with _client() as c:
+            r = await c.post(
+                "https://google.serper.dev/search",
+                headers={
+                    "X-API-KEY":    key,
+                    "Content-Type": "application/json",
+                },
+                json={"q": "ping", "num": 1},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        if r.status_code == 402:
+            return False  # out of credits
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("serper validate err: %s", e)
+        return False
+
+
+async def validate_stability(key: str) -> bool:
+    """Stability AI — GET /v1/user/account. 200 returns {credits: N}.
+    Could gate on credits>0 for stricter validation."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.stability.ai/v1/user/account",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("stability validate err: %s", e)
+        return False
+
+
+async def validate_luma(key: str) -> bool:
+    """Luma AI — GET /dream-machine/v1/generations?limit=1. 200 = alive."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.lumalabs.ai/dream-machine/v1/generations",
+                headers={"Authorization": f"Bearer {key}"},
+                params={"limit": 1},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("luma validate err: %s", e)
+        return False
+
+
+async def validate_pika(key: str) -> bool:
+    """Pika Labs — GET /v1/projects. Auth via X-API-Key header.
+    Pika public API is poorly documented — endpoint may need adjustment as
+    we observe live behavior. Currently best-effort."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.pika.art/v1/projects",
+                headers={"X-API-Key": key},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("pika validate err: %s", e)
+        return False
+
+
+async def validate_twelvelabs(key: str) -> bool:
+    """TwelveLabs — GET /v1.3/indexes. Auth via x-api-key (lowercase) header."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.twelvelabs.io/v1.3/indexes",
+                headers={"x-api-key": key},
+                params={"page_limit": 1},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("twelvelabs validate err: %s", e)
+        return False
+
+
 VALIDATORS: dict[str, callable] = {
     "openai":       validate_openai,
     "openai_image": validate_openai_image,
@@ -1118,6 +1253,12 @@ VALIDATORS: dict[str, callable] = {
     "deepinfra":    validate_deepinfra,
     "hyperbolic":   validate_hyperbolic,
     "novita":       validate_novita,
+    "commonstack":  validate_commonstack,
+    "serper":       validate_serper,
+    "stability":    validate_stability,
+    "luma":         validate_luma,
+    "pika":         validate_pika,
+    "twelvelabs":   validate_twelvelabs,
 }
 
 

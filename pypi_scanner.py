@@ -29,6 +29,7 @@ import httpx
 import db
 from config import PYPI_ENABLED, PYPI_SCAN_INTERVAL
 from patterns import EXTRACTORS, AI_TRIGGER
+from deobfuscate import expand as _deobf_expand
 from validators import validate
 from notifier import notify_found
 
@@ -237,6 +238,7 @@ def _extract_target_files(tarball: bytes) -> dict[str, str]:
 
 
 async def _scan_content(pkg: str, version: str, path: str, content: str):
+    content = _deobf_expand(content)
     if not any(t in content for t in AI_TRIGGER):
         return
 

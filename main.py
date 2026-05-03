@@ -668,3 +668,78 @@ async def admin_vacuum(authorization: str | None = Header(default=None)):
         "after_mb":  round(after  / 1024 / 1024, 2),
         "freed_mb":  round((before - after) / 1024 / 1024, 2),
     }
+
+
+@app.get("/admin/watched_authors")
+async def admin_watched_authors(
+    only_watched: bool = True,
+    limit: int = 100,
+    authorization: str | None = Header(default=None),
+):
+    """Top serial leakers (auto-promoted at >=3 leaks). Sorted by valid_count
+    desc, then leak_count desc. Set only_watched=false to also see authors
+    below the watch threshold."""
+    _check_admin(authorization)
+    rows = db.get_watched_authors(limit=limit, only_watched=only_watched)
+    return {
+        "count": len(rows),
+        "items": rows,
+    }
+
+
+@app.post("/admin/walk_author/{login}")
+async def admin_walk_author(
+    login: str,
+    platform: str = "github",
+    max_repos: int = 30,
+    authorization: str | None = Header(default=None),
+):
+    """Manually trigger repo tree-walk for one author's public repos.
+
+    Lists all the user's repos, runs walk_repo_tree on those that haven't
+    been walked yet. Capped at `max_repos` per call. Returns counts of
+    repos walked vs skipped (already-walked).
+    """
+    _check_admin(authorization)
+    if platform != "github":
+        return {"ok": False, "error": "only github supported"}
+
+    import sqlite3
+    import httpx
+    import scanner
+    from config import GITHUB_TOKENS
+    headers = {"Authorization": f"Bearer {GITHUB_TOKENS[0]}",
+               "Accept": "application/vnd.github+json"}
+    walked = 0
+    skipped = 0
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+        # Fetch user's public repos
+        r = await scanner._gh_get(
+            c, f"https://api.github.com/users/{login}/repos",
+            params={"per_page": max_repos, "type": "public", "sort": "pushed"},
+            headers=headers,
+        )
+        if not r:
+            return {"ok": False, "error": f"could not list repos for {login}"}
+        for repo in r:
+            full_name = repo.get("full_name", "")
+            if not full_name:
+                continue
+            stars = repo.get("stargazers_count", 0)
+            created = repo.get("created_at", "")
+            # Skip if already walked in a previous cycle.
+            if not db.try_claim_repo_tree(full_name):
+                skipped += 1
+                continue
+            # try_claim_repo_tree inserted a placeholder; remove it so the
+            # walker's own claim attempt succeeds.
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "DELETE FROM tree_walked_repos WHERE repo_full_name=?",
+                    (full_name,),
+                )
+            await scanner.walk_repo_tree(c, full_name, stars, created, headers)
+            walked += 1
+
+    db.mark_author_walked(login, platform)
+    return {"ok": True, "walked": walked, "skipped": skipped, "login": login}

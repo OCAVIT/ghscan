@@ -30,6 +30,7 @@ import httpx
 import db
 from config import GITEE_TOKENS, GITEE_SCAN_INTERVAL, evomi_proxy_url
 from patterns import EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
+from deobfuscate import expand as _deobf_expand
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate
 from notifier import notify_found, notify_infra_found, notify_dead_token
@@ -375,6 +376,7 @@ async def _get_file(client: httpx.AsyncClient,
 async def _scan_file(full_name: str, path: str, content: str,
                      stars: int, file_url: str):
     """Run extractors on content and persist/notify findings."""
+    content   = _deobf_expand(content)
     has_ai    = any(t in content for t in AI_TRIGGER)
     has_infra = any(t in content for t in INFRA_TRIGGER)
     if not has_ai and not has_infra:

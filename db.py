@@ -76,6 +76,38 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_infra_risk     ON infra_findings(risk_level, discovered_at DESC);
         CREATE INDEX IF NOT EXISTS idx_infra_dest     ON infra_findings(destination);
         CREATE INDEX IF NOT EXISTS idx_infra_at       ON infra_findings(discovered_at DESC);
+
+        -- Author tracking — serial leaker watchlist.
+        -- Auto-populated by track_leak() on every save_key insert. Promotes
+        -- to is_watched=1 once leak_count >= 3 (deliberate threshold —
+        -- 1-2 leaks is noise, 3+ is a habit). Watched authors get their
+        -- public repos walked periodically to capture future leaks within
+        -- hours rather than days.
+        CREATE TABLE IF NOT EXISTS watched_authors (
+            login            TEXT NOT NULL,
+            platform         TEXT NOT NULL DEFAULT 'github',
+            leak_count       INTEGER DEFAULT 0,
+            valid_count      INTEGER DEFAULT 0,
+            repos_with_leaks INTEGER DEFAULT 0,
+            first_leak_at    TEXT NOT NULL,
+            last_leak_at     TEXT NOT NULL,
+            last_walked_at   TEXT,
+            is_watched       INTEGER DEFAULT 0,
+            PRIMARY KEY(login, platform)
+        );
+        CREATE INDEX IF NOT EXISTS idx_authors_count   ON watched_authors(leak_count DESC);
+        CREATE INDEX IF NOT EXISTS idx_authors_watched ON watched_authors(is_watched, last_leak_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_authors_walk    ON watched_authors(is_watched, last_walked_at);
+
+        -- Tree-walk dedup — repos already exhaustively scanned.
+        -- Prevents re-walking when subsequent keys are found in the same repo.
+        CREATE TABLE IF NOT EXISTS tree_walked_repos (
+            repo_full_name TEXT PRIMARY KEY,
+            walked_at      TEXT NOT NULL,
+            files_scanned  INTEGER DEFAULT 0,
+            keys_found     INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_treewalk_at ON tree_walked_repos(walked_at DESC);
         """)
         # Migrations — add columns if they don't exist yet (idempotent)
         for col, defn in [
@@ -195,9 +227,174 @@ def save_key(provider: str, key: str, repo: str, file_path: str,
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             """, (h, provider, preview, key, repo, file_path, file_url,
                   repo_stars, repo_created, file_type, int(is_valid), _now()))
+        # Track author leak (best-effort — never raise on tracking failure)
+        try:
+            track_leak(repo, bool(is_valid))
+        except Exception:
+            pass
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+# ── Author tracking (serial leaker watchlist) ─────────────────────────────────
+
+# leak_count threshold above which an author is auto-promoted to is_watched=1.
+# Conservative: 1-2 leaks is noise (one-off accident), 3+ is a habit.
+_WATCHLIST_THRESHOLD = 3
+
+
+def _parse_repo(repo: str) -> tuple[str, str]:
+    """Parse `owner/name` from various scanner repo formats.
+
+    Handles plain GitHub `owner/name`, gitee/codeberg/bitbucket which all use
+    the same format, plus prefixed variants like `postman:ws_name` or
+    `kaggle:owner/slug`. Returns (platform, login). Empty login = skip.
+    """
+    if not repo:
+        return ("github", "")
+    # Stripped prefixes for non-github platforms
+    for pfx, plat in (
+        ("postman:",  "postman"),
+        ("kaggle:",   "kaggle"),
+        ("hf:",       "huggingface"),
+        ("npm:",      "npm"),
+        ("pypi:",     "pypi"),
+        ("cc:",       "commoncrawl"),
+    ):
+        if repo.startswith(pfx):
+            rest = repo[len(pfx):]
+            login = rest.split("/", 1)[0] if "/" in rest else rest
+            return (plat, login.strip())
+    # Default: assume `owner/name` GitHub-shape (also valid for gitee/codeberg)
+    parts = repo.split("/", 1)
+    if len(parts) == 2 and parts[0]:
+        return ("github", parts[0])
+    return ("github", "")
+
+
+def track_leak(repo: str, is_valid: bool):
+    """Auto-populate watched_authors on every save_key. UPSERT pattern:
+    increment counters and bump timestamps for the leak's author.
+    Promotes to is_watched=1 once leak_count >= threshold."""
+    platform, login = _parse_repo(repo)
+    if not login:
+        return
+    now = _now()
+    with _conn() as c:
+        # First check if owner already had a leak in this exact repo
+        # (so repos_with_leaks counts unique repos, not unique keys).
+        prior = c.execute(
+            "SELECT 1 FROM found_keys WHERE repo=? LIMIT 1",
+            (repo,),
+        ).fetchone()
+        # `prior` reflects the just-inserted row too, so compare counts:
+        # if there's exactly 1 row for this repo, this leak introduces a
+        # new repo; otherwise the repo already counted previously.
+        prior_count = c.execute(
+            "SELECT COUNT(*) FROM found_keys WHERE repo=?",
+            (repo,),
+        ).fetchone()[0]
+        first_in_repo = (prior_count == 1)
+
+        c.execute("""
+            INSERT INTO watched_authors
+                (login, platform, leak_count, valid_count, repos_with_leaks,
+                 first_leak_at, last_leak_at, is_watched)
+            VALUES (?, ?, 1, ?, 1, ?, ?, 0)
+            ON CONFLICT(login, platform) DO UPDATE SET
+                leak_count       = leak_count + 1,
+                valid_count      = valid_count + ?,
+                repos_with_leaks = repos_with_leaks + ?,
+                last_leak_at     = excluded.last_leak_at,
+                is_watched       = CASE WHEN leak_count + 1 >= ?
+                                        THEN 1 ELSE is_watched END
+        """, (
+            login, platform,
+            1 if is_valid else 0,
+            now, now,
+            1 if is_valid else 0,
+            1 if first_in_repo else 0,
+            _WATCHLIST_THRESHOLD,
+        ))
+
+
+def get_watched_authors(limit: int = 100, only_watched: bool = True) -> list[dict]:
+    """Top leakers ranked by leak_count (or valid_count if available)."""
+    where = "WHERE is_watched=1" if only_watched else ""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            f"""SELECT login, platform, leak_count, valid_count,
+                       repos_with_leaks, first_leak_at, last_leak_at,
+                       last_walked_at, is_watched
+                FROM watched_authors
+                {where}
+                ORDER BY valid_count DESC, leak_count DESC
+                LIMIT ?""",
+            (limit,),
+        ).fetchall()]
+
+
+def get_authors_to_walk(limit: int = 20, max_age_hours: int = 24) -> list[dict]:
+    """Watched authors whose last_walked_at is older than max_age_hours.
+    NULLs (never walked) come first."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT login, platform, leak_count, last_walked_at
+               FROM watched_authors
+               WHERE is_watched=1
+                 AND (last_walked_at IS NULL OR last_walked_at < ?)
+               ORDER BY
+                 CASE WHEN last_walked_at IS NULL THEN 0 ELSE 1 END,
+                 leak_count DESC,
+                 last_walked_at ASC
+               LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()]
+
+
+def mark_author_walked(login: str, platform: str = "github"):
+    """Stamp last_walked_at after a successful repo enumeration."""
+    with _conn() as c:
+        c.execute(
+            "UPDATE watched_authors SET last_walked_at=? WHERE login=? AND platform=?",
+            (_now(), login, platform),
+        )
+
+
+# ── Tree-walk dedup ────────────────────────────────────────────────────────────
+
+def try_claim_repo_tree(repo_full_name: str) -> bool:
+    """Atomic claim: True if this repo hasn't been tree-walked yet.
+
+    Inserting a placeholder row first prevents two concurrent workers from
+    both walking the same repo. The `walked_at` is overwritten by
+    mark_repo_walked on completion.
+    """
+    if not repo_full_name:
+        return False
+    try:
+        with _conn() as c:
+            c.execute(
+                "INSERT INTO tree_walked_repos (repo_full_name, walked_at) VALUES(?, ?)",
+                (repo_full_name, _now()),
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def mark_repo_walked(repo_full_name: str, files_scanned: int, keys_found: int):
+    """Update stats on a tree-walked repo (placeholder row already exists
+    via try_claim_repo_tree)."""
+    with _conn() as c:
+        c.execute(
+            """UPDATE tree_walked_repos
+               SET walked_at=?, files_scanned=?, keys_found=?
+               WHERE repo_full_name=?""",
+            (_now(), files_scanned, keys_found, repo_full_name),
+        )
 
 
 def update_key_validity(key_hash: str, is_valid: bool):

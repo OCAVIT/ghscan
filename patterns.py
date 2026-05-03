@@ -47,14 +47,6 @@ def is_skippable_path(path: str) -> bool:
     return bool(_SKIP_PATH.search(path)) or bool(_TEST_PATH.search(path))
 
 
-def is_server_path(path: str) -> bool:
-    return bool(_SERVER_PATH.search(path)) or path.endswith((
-        '.py', '.go', '.rs', '.rb', '.php', '.env', '.yaml', '.yml',
-        '.json', '.ipynb', '.java', '.kt', '.cs', '.dart', '.swift',
-        '.ts', '.tsx', '.toml', '.ini', '.cfg',
-    ))
-
-
 # ── OpenAI ──────────────────────────────────────────────────────────────────
 # Current 2026 key formats:
 #   sk-proj-{156 chars}   — project keys (now default for new accounts)
@@ -74,11 +66,16 @@ def extract_openai(content: str) -> list[str]:
     for pat in _OAI_PATTERNS:
         for m in pat.finditer(content):
             key = m.group(0)
-            ctx = content[max(0, m.start() - 80): m.end() + 40]
+            ctx = content[max(0, m.start() - 200): m.end() + 200]
             if _FAKE.search(ctx):
                 continue
             # Exclude keys that have deepseek context nearby (provider overlap)
             if re.search(r'deepseek', ctx, re.IGNORECASE):
+                continue
+            # Stability AI uses `sk-[A-Za-z0-9]{48}` — exact same shape as legacy
+            # OpenAI keys. Disambiguate via context: skip if stability hints around.
+            if re.search(r'stability(?:\.ai|_api)?|STABILITY_API_KEY|api\.stability\.ai',
+                         ctx, re.IGNORECASE):
                 continue
             found.append(key)
     return list(dict.fromkeys(found))
@@ -310,16 +307,20 @@ def extract_perplexity(content: str) -> list[str]:
 
 
 # ── Runway ML ─────────────────────────────────────────────────────────────────
-# Keys stored as RUNWAYML_API_SECRET — no unique prefix, context-only.
+# Keys have "key_" prefix + 64-200 hex chars (real keys 128 chars observed in
+# iafactory leak 2026-05). Previous regex had {32,120} WITHOUT the `key_` prefix
+# → captured only trailing 32 chars of a 128-char key, validator rejected it.
+_RUNWAY_PREFIXED = re.compile(r'(?<![A-Za-z0-9_\-])(key_[a-fA-F0-9]{60,200})(?![A-Za-z0-9])')
 _RUNWAY_DIRECT = re.compile(
-    r'RUNWAYML_API_SECRET\s*[=:]\s*["\']?([A-Za-z0-9_\-]{32,120})',
+    r'(?:RUNWAYML_API_SECRET|RUNWAY_API_KEY|RUNWAY_API_SECRET|RUNWAY_TOKEN)'
+    r'\s*[=:]\s*["\']?(key_[a-fA-F0-9]{60,200})',
     re.IGNORECASE,
 )
 _RUNWAY_CTX = re.compile(
     r'(?:RUNWAYML_API_SECRET|RUNWAY_API_KEY|RUNWAY_API_SECRET|RUNWAY_TOKEN'
     r'|api\.dev\.runwayml\.com|api\.runwayml\.com)'
     r'[\s\S]{0,200}'
-    r'([A-Za-z0-9_\-]{32,120})',
+    r'(key_[a-fA-F0-9]{60,200})',
     re.IGNORECASE,
 )
 
@@ -334,7 +335,11 @@ def extract_runway(content: str) -> list[str]:
             found.append(key)
     for m in _RUNWAY_CTX.finditer(content):
         key = m.group(1)
-        if len(key) >= 32 and key not in found and not _FAKE.search(key):
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    for m in _RUNWAY_PREFIXED.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
             found.append(key)
     return list(dict.fromkeys(found))
 
@@ -362,12 +367,13 @@ def extract_happyhorse(content: str) -> list[str]:
 
 
 # ── Replicate ────────────────────────────────────────────────────────────────
-# Keys have a unique "r8_" prefix + ~40 alphanumeric chars.
-_REPLICATE_RE = re.compile(r'(?<![A-Za-z0-9_\-])(r8_[A-Za-z0-9]{38,55})(?![A-Za-z0-9])')
+# Keys have a unique "r8_" prefix + 35-55 alnum chars (varies — observed 37 chars
+# in iafactory leak 2026-05). Lower bound was 38 (too tight) → widened to 35.
+_REPLICATE_RE = re.compile(r'(?<![A-Za-z0-9_\-])(r8_[A-Za-z0-9]{35,55})(?![A-Za-z0-9])')
 _REPLICATE_CTX = re.compile(
     r'(?:REPLICATE_API_TOKEN|REPLICATE_API_KEY|REPLICATE_TOKEN|replicate\.com)'
     r'[\s\S]{0,200}'
-    r'(r8_[A-Za-z0-9]{38,55})',
+    r'(r8_[A-Za-z0-9]{35,55})',
     re.IGNORECASE,
 )
 
@@ -760,6 +766,143 @@ def extract_novita(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ── Stability AI (image gen — SD/SDXL/SD3) ────────────────────────────────────
+# Format: `sk-[A-Za-z0-9]{48}` — IDENTICAL shape to legacy OpenAI account keys.
+# Disambiguation: REQUIRE stability context anywhere in the file. The OpenAI
+# extractor was patched to skip matches whose 200-char context contains
+# stability hints, so there's no double-counting.
+_STABILITY_CTX = re.compile(
+    r'(?:STABILITY_API_KEY|STABILITY_KEY|api\.stability\.ai|stability\.ai|stabilityai)'
+    r'[\s\S]{0,300}'
+    r'(sk-[A-Za-z0-9]{48})',
+    re.IGNORECASE,
+)
+
+
+def extract_stability(content: str) -> list[str]:
+    if not re.search(r'(?i)stability', content):
+        return []
+    found = []
+    for m in _STABILITY_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Commonstack (Claude/GPT/DeepSeek/Kimi/GLM aggregator) ─────────────────────
+# Format: `ak-[a-f0-9]{64}` — `ak-` prefix is also used by Alibaba LTAI for some
+# services, so REQUIRE commonstack context for the standalone hits.
+_COMMONSTACK_RE = re.compile(
+    r'(?<![A-Za-z0-9_\-])(ak-[a-f0-9]{64})(?![A-Za-z0-9])',
+    re.IGNORECASE,
+)
+_COMMONSTACK_CTX = re.compile(
+    r'(?:COMMONSTACK_API_KEY|api\.commonstack\.ai|commonstack\.ai|commonstack)'
+    r'[\s\S]{0,300}'
+    r'(ak-[a-f0-9]{64})',
+    re.IGNORECASE,
+)
+
+
+def extract_commonstack(content: str) -> list[str]:
+    if not re.search(r'(?i)commonstack', content):
+        return []
+    found = []
+    for m in _COMMONSTACK_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _COMMONSTACK_RE.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Serper.dev (Google Search API for agent stacks) ────────────────────────────
+# Format: 40 lowercase hex chars (one segment, no prefix). Standalone shape is
+# too generic (= any SHA-1) — REQUIRE serper context anywhere in the file.
+_SERPER_CTX = re.compile(
+    r'(?:SERPER_API_KEY|SERPER_KEY|google\.serper\.dev|serper\.dev|api\.serper)'
+    r'[\s\S]{0,300}'
+    r'\b([a-f0-9]{40})\b',
+    re.IGNORECASE,
+)
+
+
+def extract_serper(content: str) -> list[str]:
+    if not re.search(r'(?i)serper', content):
+        return []
+    found = []
+    for m in _SERPER_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Luma AI (Dream Machine video gen) ──────────────────────────────────────────
+# Format: `luma-{8-4-4-4-12}-{8-4-4-4-12}` — `luma-` prefix + double UUID.
+# Unique enough for standalone matching (no context required).
+_LUMA_RE = re.compile(
+    r'(?<![A-Za-z0-9_\-])(luma-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-'
+    r'[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-'
+    r'[0-9a-f]{4}-[0-9a-f]{12})(?![A-Za-z0-9])',
+    re.IGNORECASE,
+)
+
+
+def extract_luma(content: str) -> list[str]:
+    found = []
+    for m in _LUMA_RE.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Pika Labs (short-form video gen) ──────────────────────────────────────────
+# Format: `<UUID-with-dashes>:<hex32>`. Fal extractor uses `[hex8-16]:[hex40-80]`
+# WITHOUT dashes, so they don't actually conflict in practice — UUID dashes
+# break Fal's regex. We still gate on pika context to be safe.
+_PIKA_CTX = re.compile(
+    r'(?:PIKA_API_KEY|PIKA_KEY|api\.pika\.art|pika\.art|pikalabs)'
+    r'[\s\S]{0,300}'
+    r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    r':[0-9a-f]{32})',
+    re.IGNORECASE,
+)
+
+
+def extract_pika(content: str) -> list[str]:
+    if not re.search(r'(?i)pika', content):
+        return []
+    found = []
+    for m in _PIKA_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── TwelveLabs (video understanding API — Marengo/Pegasus) ────────────────────
+# Format: `tlk_[A-Za-z0-9]{20,40}`. Prefix is unique enough for standalone.
+_TWELVELABS_RE = re.compile(
+    r'(?<![A-Za-z0-9_\-])(tlk_[A-Za-z0-9]{20,40})(?![A-Za-z0-9])',
+)
+
+
+def extract_twelvelabs(content: str) -> list[str]:
+    found = []
+    for m in _TWELVELABS_RE.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 80): m.end() + 40]
+        if not _FAKE.search(ctx):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
     "openai":        extract_openai,
@@ -789,6 +932,16 @@ EXTRACTORS: dict[str, callable] = {
     "deepinfra":     extract_deepinfra,
     "hyperbolic":    extract_hyperbolic,
     "novita":        extract_novita,
+    "commonstack":   extract_commonstack,    # Claude/GPT/DeepSeek/Kimi/GLM aggregator
+    # Search/tools
+    "serper":        extract_serper,         # Google Search API for agent stacks
+    # AI Image
+    "stability":     extract_stability,      # SD/SDXL/SD3 (sk-*48 — disambiguated against OpenAI)
+    # AI Video
+    "luma":          extract_luma,           # Dream Machine
+    "pika":          extract_pika,           # Pika Labs
+    # AI Video understanding
+    "twelvelabs":    extract_twelvelabs,
 }
 
 
@@ -906,6 +1059,28 @@ AI_TRIGGER: tuple[str, ...] = (
     "api.deepinfra.com",
     "HYPERBOLIC", "hyperbolic", "HYPERBOLIC_API_KEY", "api.hyperbolic.xyz",
     "NOVITA_API_KEY", "NOVITA_AI", "novita.ai", "api.novita.ai",
+
+    # ── Commonstack (Claude/GPT/DeepSeek/Kimi/GLM aggregator) ───────────
+    "COMMONSTACK_API_KEY", "commonstack", "COMMONSTACK", "api.commonstack.ai",
+    "commonstack.ai",
+
+    # ── Serper.dev (Google Search) ──────────────────────────────────────
+    "SERPER_API_KEY", "SERPER_KEY", "serper", "google.serper.dev",
+    "serper.dev",
+
+    # ── Stability AI (image gen) ────────────────────────────────────────
+    "STABILITY_API_KEY", "STABILITY_KEY", "stability.ai", "api.stability.ai",
+    "stabilityai",
+
+    # ── Luma AI (Dream Machine video gen) ───────────────────────────────
+    "LUMA_API_KEY", "LUMA_KEY", "lumalabs.ai", "api.lumalabs",
+    "dream-machine", "luma-",
+
+    # ── Pika Labs (video gen) ───────────────────────────────────────────
+    "PIKA_API_KEY", "PIKA_KEY", "pika.art", "api.pika", "pikalabs",
+
+    # ── TwelveLabs (video understanding) ────────────────────────────────
+    "tlk_", "TWELVELABS_API_KEY", "twelvelabs", "api.twelvelabs.io",
 )
 
 # Same role for infra extractors (DB URLs, AWS keys, private keys).
@@ -2507,6 +2682,242 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"ANTHROPIC_API_KEY" path:.crewai',	"anthropic",	"crewai"),
     ('"OPENAI_API_KEY" filename:autogen_config.json',	"openai",	"autogen"),
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Bootcamp / course / hackathon templates (proven yield 2026-05-03:
+    # 2/2 hits in 10academy template-fork audit; both students leaked
+    # GEMINI + AIMLAPI in identical .env.example structure).
+    # ─────────────────────────────────────────────────────────────────────
+    ('"AIMLAPI_KEY" "KLINGAI_API_KEY" filename:.env.example',	"aimlapi",	"10academy_template"),
+    ('"AIMLAPI_KEY" "GEMINI_API_KEY" filename:.env.example',	"aimlapi",	"bootcamp_template"),
+    ('"AIMLAPI_KEY" "GEMINI_API_KEY" filename:.env',	"aimlapi",	"bootcamp_env"),
+    ('"AIMLAPI_KEY" filename:.env.example',	"aimlapi",	"env_example"),
+    ('"AIMLAPI_KEY" filename:.env.template',	"aimlapi",	"env_template"),
+    ('"GEMINI_API_KEY" filename:.env.example',	"google",	"env_example"),
+    ('"GEMINI_API_KEY" filename:.env.template',	"google",	"env_template"),
+    ('"OPENAI_API_KEY" "AIMLAPI_KEY" filename:.env',	"openai",	"multi_provider_template"),
+    ('"OPENAI_API_KEY" "GEMINI_API_KEY" filename:.env.example',	"openai",	"bootcamp_multi"),
+    ('"week0" "OPENAI_API_KEY" filename:.env',	"openai",	"course_week0"),
+    ('"week_0" "OPENAI_API_KEY" filename:.env',	"openai",	"course_week0"),
+    ('"week0" "GEMINI_API_KEY" filename:.env',	"google",	"course_week0"),
+    ('"bootcamp" "OPENAI_API_KEY" filename:.env',	"openai",	"bootcamp_env"),
+    ('"hackathon" "OPENAI_API_KEY" filename:.env',	"openai",	"hackathon"),
+    ('"capstone" "OPENAI_API_KEY" filename:.env',	"openai",	"capstone"),
+    ('"submission" "OPENAI_API_KEY" filename:.env',	"openai",	"course_submission"),
+
+    # ─────────────────────────────────────────────────────────────────────
+    # LLM aggregator / proxy / multi-provider chat UI projects (highest
+    # density of keys per repo; one repo can yield 50+ keys).
+    # ─────────────────────────────────────────────────────────────────────
+    ('"model_list:" filename:litellm_config.yaml',	"openai",	"litellm_proxy"),
+    ('"model_list:" filename:litellm_config.yaml',	"anthropic",	"litellm_proxy"),
+    ('"model_list:" filename:litellm_config.yaml',	"google",	"litellm_proxy"),
+    ('"OPENAI_API_KEYS" filename:.env',	"openai",	"key_pool"),
+    ('"ANTHROPIC_API_KEYS" filename:.env',	"anthropic",	"key_pool"),
+    ('"NEXT_PUBLIC_OPENAI_API_KEY" filename:.env',	"openai",	"nextchat"),
+    ('"OPENAI_API_KEY" "ANTHROPIC_API_KEY" "GOOGLE_API_KEY" filename:.env',	"openai",	"multi_provider_chat"),
+    ('"OPENAI_API_KEY" "ANTHROPIC_API_KEY" "GROQ_API_KEY" filename:.env',	"openai",	"multi_provider_chat"),
+    ('"lobe-chat" filename:.env',	"openai",	"lobechat"),
+    ('"open-webui" filename:.env',	"openai",	"openwebui"),
+    ('"anythingllm" filename:.env',	"openai",	"anythingllm"),
+    ('"librechat" filename:.env',	"openai",	"librechat"),
+    ('"big-AGI" filename:.env',	"openai",	"bigagi"),
+    ('"chatgpt-next-web" filename:.env',	"openai",	"chatgpt_next_web"),
+    ('"helicone" filename:.env',	"openai",	"helicone"),
+    ('"portkey" filename:.env',	"openai",	"portkey"),
+    # Agent frameworks (each = many tool keys at once)
+    ('"langchain" "TAVILY_API_KEY" "OPENAI_API_KEY" filename:.env',	"openai",	"langchain_agent"),
+    ('"crewai" "OPENAI_API_KEY" filename:.env',	"openai",	"crewai_env"),
+    ('"langgraph" "OPENAI_API_KEY" filename:.env',	"openai",	"langgraph"),
+    ('"smolagents" "OPENAI_API_KEY" filename:.env',	"openai",	"smolagents"),
+    # RAG / vector DB starter kits
+    ('"PINECONE_API_KEY" "OPENAI_API_KEY" filename:.env',	"openai",	"rag_pinecone"),
+    ('"WEAVIATE_API_KEY" "OPENAI_API_KEY" filename:.env',	"openai",	"rag_weaviate"),
+    ('"QDRANT_API_KEY" "OPENAI_API_KEY" filename:.env',	"openai",	"rag_qdrant"),
+    # Discord/TG/Slack AI bots (BOT_TOKEN + LLM key)
+    ('"DISCORD_TOKEN" "OPENAI_API_KEY" filename:.env',	"openai",	"discord_bot"),
+    ('"TELEGRAM_BOT_TOKEN" "OPENAI_API_KEY" filename:.env',	"openai",	"telegram_bot"),
+    ('"SLACK_BOT_TOKEN" "OPENAI_API_KEY" filename:.env',	"openai",	"slack_bot"),
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Markdown coverage (~12% of leaks live in .md files — internal docs,
+    # CONFIG_REPORT.md, migration_*.md, memory/*.md). Currently 0 of our
+    # queries use extension:md. Adding targeted top-yield providers.
+    # ─────────────────────────────────────────────────────────────────────
+    ('"OPENAI_API_KEY" extension:md',	"openai",	"markdown"),
+    ('"sk-proj-" extension:md',	"openai",	"markdown"),
+    ('"ANTHROPIC_API_KEY" extension:md',	"anthropic",	"markdown"),
+    ('"sk-ant-api03-" extension:md',	"anthropic",	"markdown"),
+    ('"GOOGLE_API_KEY" extension:md',	"google",	"markdown"),
+    ('"GEMINI_API_KEY" extension:md',	"google",	"markdown"),
+    ('"OPENROUTER_API_KEY" extension:md',	"openrouter",	"markdown"),
+    ('"sk-or-v1-" extension:md',	"openrouter",	"markdown"),
+    ('"DEEPSEEK_API_KEY" extension:md',	"deepseek",	"markdown"),
+    ('"MOONSHOT_API_KEY" extension:md',	"kimi",	"markdown"),
+    ('"KIMI_API_KEY" extension:md',	"kimi",	"markdown"),
+    ('"ZHIPUAI_API_KEY" extension:md',	"glm",	"markdown"),
+    ('"REPLICATE_API_TOKEN" extension:md',	"replicate",	"markdown"),
+    ('"FAL_KEY" extension:md',	"fal",	"markdown"),
+    ('"HF_TOKEN" extension:md',	"huggingface",	"markdown"),
+    ('"AIMLAPI_KEY" extension:md',	"aimlapi",	"markdown"),
+    # Filename-targeted high-density doc files
+    ('"sk-proj-" filename:CONFIG_REPORT.md',	"openai",	"config_report_md"),
+    ('"OPENAI_API_KEY" filename:CONFIG_REPORT.md',	"openai",	"config_report_md"),
+    ('"OPENAI_API_KEY" filename:SETUP.md',	"openai",	"setup_md"),
+    ('"OPENAI_API_KEY" filename:INSTALL.md',	"openai",	"install_md"),
+    ('"OPENAI_API_KEY" filename:migration.md',	"openai",	"migration_md"),
+    ('"ANTHROPIC_API_KEY" filename:CONFIG_REPORT.md',	"anthropic",	"config_report_md"),
+    ('"GEMINI_API_KEY" filename:SETUP.md',	"google",	"setup_md"),
+    ('"OPENAI_API_KEY" path:docs',	"openai",	"docs_dir"),
+    ('"OPENAI_API_KEY" path:memory',	"openai",	"memory_dir"),
+
+    # ─────────────────────────────────────────────────────────────────────
+    # New providers (2026-05): Commonstack / Serper / Stability / Luma /
+    # Pika / TwelveLabs. Each ships ~10 targeted queries by env var name,
+    # domain, key prefix, file location.
+    # ─────────────────────────────────────────────────────────────────────
+    # Commonstack — Claude/GPT/DeepSeek/Kimi/GLM aggregator
+    ('"COMMONSTACK_API_KEY" filename:.env',	"commonstack",	"env"),
+    ('"COMMONSTACK_API_KEY" language:python',	"commonstack",	"code"),
+    ('"COMMONSTACK_API_KEY" language:javascript',	"commonstack",	"code"),
+    ('"COMMONSTACK_API_KEY" language:typescript',	"commonstack",	"code"),
+    ('"api.commonstack.ai" language:python',	"commonstack",	"code"),
+    ('"api.commonstack.ai" language:javascript',	"commonstack",	"code"),
+    ('"COMMONSTACK_API_KEY" extension:ipynb',	"commonstack",	"notebook"),
+    ('"api.commonstack.ai" extension:ipynb',	"commonstack",	"notebook"),
+    ('"COMMONSTACK_API_KEY" filename:litellm_config.yaml',	"commonstack",	"litellm"),
+    ('"COMMONSTACK_API_KEY" filename:.cursor/mcp.json',	"commonstack",	"cursor_mcp"),
+    ('"commonstack" filename:.env.example',	"commonstack",	"env_example"),
+    ('"COMMONSTACK_API_KEY" extension:md',	"commonstack",	"markdown"),
+    # Serper.dev
+    ('"SERPER_API_KEY" filename:.env',	"serper",	"env"),
+    ('"SERPER_API_KEY" language:python',	"serper",	"code"),
+    ('"SERPER_API_KEY" language:javascript',	"serper",	"code"),
+    ('"SERPER_API_KEY" language:typescript',	"serper",	"code"),
+    ('"google.serper.dev" language:python',	"serper",	"code"),
+    ('"google.serper.dev" language:javascript',	"serper",	"code"),
+    ('"SERPER_API_KEY" extension:ipynb',	"serper",	"notebook"),
+    ('"google.serper.dev" extension:ipynb',	"serper",	"notebook"),
+    ('"SERPER_API_KEY" filename:litellm_config.yaml',	"serper",	"litellm"),
+    ('"SERPER_API_KEY" filename:.cursor/mcp.json',	"serper",	"cursor_mcp"),
+    ('"SERPER_API_KEY" extension:md',	"serper",	"markdown"),
+    # Stability AI
+    ('"STABILITY_API_KEY" filename:.env',	"stability",	"env"),
+    ('"STABILITY_API_KEY" language:python',	"stability",	"code"),
+    ('"STABILITY_API_KEY" language:javascript',	"stability",	"code"),
+    ('"STABILITY_API_KEY" language:typescript',	"stability",	"code"),
+    ('"api.stability.ai" language:python',	"stability",	"code"),
+    ('"api.stability.ai" language:javascript',	"stability",	"code"),
+    ('"STABILITY_API_KEY" extension:ipynb',	"stability",	"notebook"),
+    ('"stability.ai" extension:ipynb',	"stability",	"notebook"),
+    ('"STABILITY_API_KEY" filename:litellm_config.yaml',	"stability",	"litellm"),
+    ('"STABILITY_API_KEY" extension:md',	"stability",	"markdown"),
+    # Luma AI
+    ('"LUMA_API_KEY" filename:.env',	"luma",	"env"),
+    ('"LUMA_API_KEY" language:python',	"luma",	"code"),
+    ('"LUMA_API_KEY" language:javascript',	"luma",	"code"),
+    ('"LUMA_API_KEY" language:typescript',	"luma",	"code"),
+    ('"lumalabs.ai" language:python',	"luma",	"code"),
+    ('"api.lumalabs.ai" language:javascript',	"luma",	"code"),
+    ('"LUMA_API_KEY" extension:ipynb',	"luma",	"notebook"),
+    ('"luma-" filename:.env',	"luma",	"env"),
+    ('"dream-machine" language:python',	"luma",	"code"),
+    ('"LUMA_API_KEY" extension:md',	"luma",	"markdown"),
+    # Pika Labs
+    ('"PIKA_API_KEY" filename:.env',	"pika",	"env"),
+    ('"PIKA_API_KEY" language:python',	"pika",	"code"),
+    ('"PIKA_API_KEY" language:javascript',	"pika",	"code"),
+    ('"PIKA_API_KEY" language:typescript',	"pika",	"code"),
+    ('"api.pika.art" language:python',	"pika",	"code"),
+    ('"api.pika.art" language:javascript',	"pika",	"code"),
+    ('"PIKA_API_KEY" extension:ipynb',	"pika",	"notebook"),
+    ('"PIKA_API_KEY" extension:md',	"pika",	"markdown"),
+    # TwelveLabs
+    ('"TWELVELABS_API_KEY" filename:.env',	"twelvelabs",	"env"),
+    ('"TWELVELABS_API_KEY" language:python',	"twelvelabs",	"code"),
+    ('"TWELVELABS_API_KEY" language:javascript',	"twelvelabs",	"code"),
+    ('"TWELVELABS_API_KEY" language:typescript',	"twelvelabs",	"code"),
+    ('"api.twelvelabs.io" language:python',	"twelvelabs",	"code"),
+    ('"twelvelabs" language:python',	"twelvelabs",	"code"),
+    ('"tlk_" language:python',	"twelvelabs",	"code"),
+    ('"tlk_" filename:.env',	"twelvelabs",	"env"),
+    ('"TWELVELABS_API_KEY" extension:ipynb',	"twelvelabs",	"notebook"),
+    ('"TWELVELABS_API_KEY" extension:md',	"twelvelabs",	"markdown"),
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Archetype queries B (multi-provider chat UIs), C (agent frameworks),
+    # E (Discord/TG/Slack bots), F (RAG kits), G (image/video frontend),
+    # H (coding assistants), I (prompt playgrounds), J (browser ext),
+    # K (SaaS clones). ~50 queries total.
+    # ─────────────────────────────────────────────────────────────────────
+    # B. Multi-provider chat UIs (already partially covered, expand)
+    ('"BIG_AGI" filename:.env',	"openai",	"bigagi"),
+    ('"OPENAI_API_KEY" "OLLAMA_BASE_URL" filename:.env',	"openai",	"webui_combo"),
+    ('"OPENAI_API_KEY" "PROXY_URL" filename:.env',	"openai",	"chat_ui_proxy"),
+    # C. Agent frameworks expansion
+    ('"haystack" "OPENAI_API_KEY" filename:.env',	"openai",	"haystack"),
+    ('"autogen" "config_list" extension:json',	"openai",	"autogen_config"),
+    ('"semantic-kernel" "OPENAI_API_KEY" filename:.env',	"openai",	"sk_agent"),
+    ('"agno" "OPENAI_API_KEY" filename:.env',	"openai",	"agno"),
+    ('"phidata" "OPENAI_API_KEY" filename:.env',	"openai",	"phidata"),
+    ('"swarm" "OPENAI_API_KEY" filename:.env',	"openai",	"swarm"),
+    ('"LANGSMITH_API_KEY" "OPENAI_API_KEY" filename:.env',	"openai",	"langsmith"),
+    # E. Discord / TG / Slack bots — expand
+    ('"discord.py" "OPENAI_API_KEY" extension:py',	"openai",	"discord_py"),
+    ('"discord.js" "OPENAI_API_KEY" extension:js',	"openai",	"discord_js"),
+    ('"aiogram" "OPENAI_API_KEY" extension:py',	"openai",	"aiogram"),
+    ('"telegraf" "OPENAI_API_KEY" extension:js',	"openai",	"telegraf"),
+    ('"python-telegram-bot" "OPENAI_API_KEY" extension:py',	"openai",	"ptb"),
+    ('"slack-bolt" "OPENAI_API_KEY" extension:py',	"openai",	"slack_bolt"),
+    ('"DISCORD_TOKEN" "ANTHROPIC_API_KEY" filename:.env',	"anthropic",	"discord_bot"),
+    ('"TELEGRAM_BOT_TOKEN" "ANTHROPIC_API_KEY" filename:.env',	"anthropic",	"tg_bot"),
+    # F. RAG / vector DB kits
+    ('"PINECONE_API_KEY" "ANTHROPIC_API_KEY" filename:.env',	"anthropic",	"rag_pinecone"),
+    ('"WEAVIATE_API_KEY" "ANTHROPIC_API_KEY" filename:.env',	"anthropic",	"rag_weaviate"),
+    ('"CHROMA_SERVER_AUTHN_CREDENTIALS" filename:.env',	"openai",	"chroma"),
+    ('"llamaindex" "OPENAI_API_KEY" filename:.env',	"openai",	"llamaindex"),
+    ('"llama-index" "OPENAI_API_KEY" filename:.env',	"openai",	"llamaindex"),
+    ('"upstash" "OPENAI_API_KEY" filename:.env',	"openai",	"upstash_rag"),
+    ('"MILVUS_HOST" "OPENAI_API_KEY" filename:.env',	"openai",	"milvus"),
+    # G. AI image/video gen frontend (Vite/Next/CRA leaks)
+    ('"VITE_FAL_KEY" filename:.env',	"fal",	"vite_frontend"),
+    ('"VITE_FAL_API_KEY" filename:.env',	"fal",	"vite_frontend"),
+    ('"VITE_REPLICATE_API_TOKEN" filename:.env',	"replicate",	"vite_frontend"),
+    ('"VITE_AIMLAPI_API_KEY" filename:.env',	"aimlapi",	"vite_frontend"),
+    ('"VITE_AIMLAPI_KEY" filename:.env',	"aimlapi",	"vite_frontend"),
+    ('"VITE_OPENAI_API_KEY" filename:.env',	"openai",	"vite_frontend"),
+    ('"VITE_ELEVENLABS_API_KEY" filename:.env',	"elevenlabs",	"vite_frontend"),
+    ('"VITE_PINATA_API_KEY" filename:.env',	"openai",	"vite_pinata"),
+    ('"NEXT_PUBLIC_FAL_KEY" filename:.env',	"fal",	"next_frontend"),
+    ('"NEXT_PUBLIC_REPLICATE_API_TOKEN" filename:.env',	"replicate",	"next_frontend"),
+    ('"NEXT_PUBLIC_AIMLAPI_KEY" filename:.env',	"aimlapi",	"next_frontend"),
+    ('"NEXT_PUBLIC_ELEVENLABS_API_KEY" filename:.env',	"elevenlabs",	"next_frontend"),
+    ('"REACT_APP_FAL_KEY" filename:.env',	"fal",	"cra_frontend"),
+    ('"REACT_APP_REPLICATE_API_TOKEN" filename:.env',	"replicate",	"cra_frontend"),
+    ('"REACT_APP_OPENAI_API_KEY" filename:.env',	"openai",	"cra_frontend"),
+    # H. AI coding assistants
+    ('"continue.dev" filename:config.json',	"openai",	"continue_dev"),
+    ('"continue" filename:config.yaml',	"openai",	"continue_yaml"),
+    ('"aider" filename:.env',	"openai",	"aider"),
+    ('"AIDER_OPENAI_API_KEY" filename:.env',	"openai",	"aider_specific"),
+    ('"cline" filename:settings.json',	"openai",	"cline"),
+    ('"roo-cline" filename:settings.json',	"openai",	"roo_cline"),
+    ('"zed" "openai" extension:json',	"openai",	"zed_editor"),
+    # I. Prompt engineering playgrounds
+    ('"promptfoo" filename:.env',	"openai",	"promptfoo"),
+    ('"langfuse" filename:.env',	"openai",	"langfuse"),
+    ('"phoenix" "OPENAI_API_KEY" filename:.env',	"openai",	"arize_phoenix"),
+    ('"mlflow" "OPENAI_API_KEY" filename:.env',	"openai",	"mlflow"),
+    ('"helicone" "OPENAI_API_KEY" filename:.env',	"openai",	"helicone_env"),
+    # J. Browser extensions
+    ('"manifest_version" "OPENAI_API_KEY" extension:json',	"openai",	"browser_ext"),
+    ('"chrome.runtime" "OPENAI_API_KEY" extension:js',	"openai",	"chrome_ext"),
+    ('"chrome.runtime" "ANTHROPIC_API_KEY" extension:js',	"anthropic",	"chrome_ext"),
+    # K. SaaS clones
+    ('"chatgpt-clone" filename:.env',	"openai",	"chatgpt_clone"),
+    ('"midjourney-clone" filename:.env',	"openai",	"mj_clone"),
+    ('"clerk" "OPENAI_API_KEY" filename:.env',	"openai",	"clerk_saas"),
+    ('"stripe" "OPENAI_API_KEY" filename:.env',	"openai",	"stripe_ai_saas"),
+    ('"supabase" "OPENAI_API_KEY" filename:.env',	"openai",	"supabase_ai_saas"),
 ]
 
 

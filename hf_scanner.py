@@ -28,6 +28,7 @@ import httpx
 import db
 from config import HF_TOKEN, HF_SCAN_INTERVAL
 from patterns import EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
+from deobfuscate import expand as _deobf_expand
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate
 from notifier import notify_found, notify_infra_found
@@ -159,6 +160,7 @@ async def _fetch_file(client: httpx.AsyncClient,
 
 async def _scan_content(space_id: str, filepath: str, content: str):
     """Run extractors on Space file content."""
+    content   = _deobf_expand(content)
     has_ai    = any(t in content for t in _AI_TRIGGER)
     has_infra = any(t in content for t in _INFRA_TRIGGER)
     if not has_ai and not has_infra:

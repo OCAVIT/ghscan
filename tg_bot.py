@@ -59,28 +59,39 @@ _PROV: dict[str, dict] = {
     "deepinfra":    {"e": "🟦", "n": "DeepInfra"},
     "hyperbolic":   {"e": "🌈", "n": "Hyperbolic"},
     "novita":       {"e": "🎨", "n": "NovitaAI"},
+    "commonstack":  {"e": "🪙", "n": "Commonstack"},
+    # Search / agent tools
+    "serper":       {"e": "🔍", "n": "Serper.dev"},
+    # Image gen
+    "stability":    {"e": "🎨", "n": "Stability AI"},
+    # Video gen
+    "luma":         {"e": "🌙", "n": "Luma Dream Machine"},
+    "pika":         {"e": "🎬", "n": "Pika Labs"},
+    # Video understanding
+    "twelvelabs":   {"e": "📹", "n": "TwelveLabs"},
 }
 
 # ── Category → provider mapping ───────────────────────────────────────────
 _CATS: dict[str, dict] = {
     "video": {
         "e": "🎬", "n": "AI Video",
-        "p": ["ark", "ark_fast", "happyhorse", "kling", "runway", "fal", "replicate", "fireworks"],
+        "p": ["ark", "ark_fast", "happyhorse", "kling", "runway", "fal", "replicate", "fireworks",
+              "luma", "pika", "twelvelabs"],
     },
     "text": {
         "e": "💬", "n": "AI Text",
         "p": ["openai", "anthropic", "google", "deepseek", "kimi", "glm", "grok",
               "perplexity", "openrouter", "huggingface",
-              "aimlapi", "deepinfra", "hyperbolic"],
+              "aimlapi", "deepinfra", "hyperbolic", "commonstack"],
     },
     "image": {
         "e": "🖼️", "n": "AI Image",
-        "p": ["openai_image", "fal", "replicate", "fireworks",
+        "p": ["openai_image", "fal", "replicate", "fireworks", "stability",
               "aimlapi", "novita", "deepinfra"],
     },
     "aggregator": {
         "e": "🌐", "n": "Aggregators (Claude/Gemini/GPT proxy)",
-        "p": ["openrouter", "aimlapi", "deepinfra", "hyperbolic", "novita"],
+        "p": ["openrouter", "aimlapi", "deepinfra", "hyperbolic", "novita", "commonstack"],
     },
     "voice": {
         "e": "🎙️", "n": "AI Voice",
@@ -89,6 +100,10 @@ _CATS: dict[str, dict] = {
     "music": {
         "e": "🎵", "n": "AI Music",
         "p": ["suno"],
+    },
+    "tools": {
+        "e": "🛠️", "n": "Search / Agent Tools",
+        "p": ["serper"],
     },
     "all": {
         "e": "🔌", "n": "All Providers",
@@ -135,7 +150,7 @@ def _main_text() -> str:
 
 def _main_keyboard(counts: dict[str, int]) -> dict:
     rows = []
-    for cid in ("video", "text", "image", "voice", "music", "all"):
+    for cid in ("video", "text", "image", "voice", "music", "tools", "all"):
         cat   = _CATS[cid]
         total = sum(counts.get(p, 0) for p in cat["p"])
         rows.append([{"text": f"{cat['e']} {cat['n']}  ({total})", "callback_data": f"c:{cid}"}])
@@ -333,7 +348,9 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
                 f"<b>{vs+vf} valid</b>  (Std {vs} / Fast {vf})"
             )
         for row in sorted(by_prov.values(), key=lambda r: -r["total"]):
-            meta = _PROV.get(row["provider"], {"e": "🔑", "n": row["provider"]})
+            if row["provider"] not in _PROV:
+                continue
+            meta = _PROV[row["provider"]]
             v    = row["valid"]
             t    = row["total"]
             mark = "✅" if v > 0 else "  "
