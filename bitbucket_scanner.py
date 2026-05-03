@@ -133,12 +133,17 @@ def _token_id(token: str) -> str:
 
 
 async def _check_token(client: httpx.AsyncClient, email: str, token: str) -> bool:
-    """Verify token by hitting /user. Returns False only on hard auth failure.
-    Logs response body on auth failure to surface scope/format issues."""
+    """Verify token by hitting /repositories (1 result). This endpoint works
+    with read:repository:bitbucket scope (the minimum we actually need).
+    /user requires read:account which users may not have selected.
+    Returns False only on hard auth failure."""
     tid = _token_id(token)
     for attempt in range(2):
         try:
-            r = await client.get(f"{_BASE}/user", headers=_headers(email, token), timeout=12)
+            r = await client.get(
+                f"{_BASE}/repositories?pagelen=1&fields=values.full_name",
+                headers=_headers(email, token), timeout=12,
+            )
             if r.status_code == 200:
                 _TOKEN_STATUS[tid] = {"alive": True}
                 return True

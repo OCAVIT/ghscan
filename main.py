@@ -403,7 +403,7 @@ async def check_tokens():
             email, _, tok = entry.partition(":")
             label = f"{email}:{tok[:8]}..."
             tasks[f"bb:{email[:12]}"] = _check(c, label,
-                "https://api.bitbucket.org/2.0/user",
+                "https://api.bitbucket.org/2.0/repositories?pagelen=1",
                 headers={"Authorization": "Basic " + __import__("base64").b64encode(
                     f"{email}:{tok}".encode()).decode()})
 
