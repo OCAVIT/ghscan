@@ -771,6 +771,131 @@ def extract_cerebras(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Aggregator providers (one key → access to Claude, Gemini, GPT, GPT Image…)
+# Critical for finding LIVE keys to closed providers since their direct keys
+# get auto-revoked by GitHub Secret Scanning Partner Program.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# AIMLAPI — direct OpenRouter competitor, 400+ models including Claude/Gemini/GPT
+# Key format: typically 32-char lowercase hex or UUID-like. Always context-bound.
+# Boundary class before key prevents greedy match swallowing prefix bytes.
+_AIMLAPI_CTX = re.compile(
+    r'(?:AIMLAPI_(?:API_)?KEY|AIML_API_KEY|aimlapi\.com|api\.aimlapi)'
+    r'[\s\S]{0,150}?'
+    r'[=:\s"\'`,>]'
+    r'([A-Za-z0-9]{32,80})'
+    r'(?![A-Za-z0-9])',
+    re.IGNORECASE,
+)
+
+
+def extract_aimlapi(content: str) -> list[str]:
+    if not re.search(r'(?i)aimlapi|aiml_api', content):
+        return []
+    found = []
+    for m in _AIMLAPI_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) < 32 or _FAKE.search(key):
+            continue
+        # Filter out obvious non-keys (must contain digit + letter mix)
+        if not re.search(r'[0-9]', key) or not re.search(r'[a-zA-Z]', key):
+            continue
+        found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# DeepInfra — corporate prox to many models. Two key formats: standard hex
+# and scoped JWT (eyJ...).
+_DEEPINFRA_CTX = re.compile(
+    r'(?:DEEPINFRA_(?:API_)?(?:KEY|TOKEN)|deepinfra\.com|api\.deepinfra)'
+    r'[\s\S]{0,150}?'
+    r'[=:\s"\'`,>]'
+    r'([A-Za-z0-9_\-]{40,120})'
+    r'(?![A-Za-z0-9_\-])',
+    re.IGNORECASE,
+)
+_DEEPINFRA_JWT_CTX = re.compile(
+    r'(?:DEEPINFRA_(?:API_)?(?:KEY|TOKEN)|deepinfra\.com|api\.deepinfra)'
+    r'[\s\S]{0,150}?'
+    r'(eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,})',
+    re.IGNORECASE,
+)
+
+
+def extract_deepinfra(content: str) -> list[str]:
+    if not re.search(r'(?i)deepinfra', content):
+        return []
+    found = []
+    # JWT format first (more specific)
+    for m in _DEEPINFRA_JWT_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    # Standard token format
+    for m in _DEEPINFRA_CTX.finditer(content):
+        key = m.group(1)
+        if key in found:
+            continue
+        # Skip JWT-shaped strings (already matched above) and obvious junk
+        if key.startswith("eyJ") or _FAKE.search(key):
+            continue
+        if not re.search(r'[0-9]', key) or not re.search(r'[a-zA-Z]', key):
+            continue
+        found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# Hyperbolic — JWT-format keys (eyJhbGciOi...).
+_HYPERBOLIC_CTX = re.compile(
+    r'(?:HYPERBOLIC_(?:API_)?KEY|api\.hyperbolic\.xyz|hyperbolic\.ai|hyperbolic\.xyz)'
+    r'[\s\S]{0,200}?'
+    r'(eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,})',
+    re.IGNORECASE,
+)
+
+
+def extract_hyperbolic(content: str) -> list[str]:
+    if not re.search(r'(?i)hyperbolic', content):
+        return []
+    found = []
+    for m in _HYPERBOLIC_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# NovitaAI — Chinese aggregator with image gen (GPT Image, Nano Banana, FLUX).
+# Key prefix: sk_ followed by 40+ alnum chars (note underscore, not dash like OpenAI).
+_NOVITA_STANDALONE = re.compile(
+    r'(?<![A-Za-z0-9_])(sk_[A-Za-z0-9]{40,80})(?![A-Za-z0-9])',
+)
+_NOVITA_CTX = re.compile(
+    r'(?:NOVITA_(?:AI_)?(?:API_)?KEY|novita\.ai|api\.novita)'
+    r'[\s\S]{0,200}'
+    r'(sk_[A-Za-z0-9]{40,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_novita(content: str) -> list[str]:
+    found = []
+    # Context-bound first (lower false-positive)
+    for m in _NOVITA_CTX.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    # Standalone — only if "novita" string appears somewhere in content
+    # (avoids matching unrelated sk_-prefixed strings in random files)
+    if re.search(r'(?i)novita', content):
+        for m in _NOVITA_STANDALONE.finditer(content):
+            key = m.group(1)
+            if key not in found and not _FAKE.search(key):
+                found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
     "openai":        extract_openai,
@@ -800,6 +925,11 @@ EXTRACTORS: dict[str, callable] = {
     "mistral":       extract_mistral,
     "cohere":        extract_cohere,
     "cerebras":      extract_cerebras,
+    # Aggregators — single key gives access to multiple closed providers
+    "aimlapi":       extract_aimlapi,
+    "deepinfra":     extract_deepinfra,
+    "hyperbolic":    extract_hyperbolic,
+    "novita":        extract_novita,
 }
 
 
@@ -929,6 +1059,13 @@ AI_TRIGGER: tuple[str, ...] = (
 
     # ── Cerebras ────────────────────────────────────────────────────────
     "CEREBRAS_API_KEY", "CEREBRAS_KEY", "cerebras", "api.cerebras.ai",
+
+    # ── Aggregators (Claude/Gemini/GPT/GPT Image proxy) ─────────────────
+    "AIMLAPI", "aimlapi", "AIML_API_KEY", "api.aimlapi.com",
+    "DEEPINFRA", "deepinfra", "DEEPINFRA_API_KEY", "DEEPINFRA_TOKEN",
+    "api.deepinfra.com",
+    "HYPERBOLIC", "hyperbolic", "HYPERBOLIC_API_KEY", "api.hyperbolic.xyz",
+    "NOVITA_API_KEY", "NOVITA_AI", "novita.ai", "api.novita.ai",
 )
 
 # Same role for infra extractors (DB URLs, AWS keys, private keys).
@@ -1915,6 +2052,69 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"ZHIPUAI_API_KEY" language:Shell',                    "glm",         "code"),
     ('"pplx-" language:Shell',                              "perplexity",  "code"),
     ('"PERPLEXITY_API_KEY" language:Shell',                 "perplexity",  "code"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # AIMLAPI — aggregator (Claude / Gemini / GPT / GPT Image / Nano Banana)
+    # ═══════════════════════════════════════════════════════════════════════
+    ('"AIMLAPI_API_KEY" language:python',                   "aimlapi",     "code"),
+    ('"AIML_API_KEY" language:python',                      "aimlapi",     "code"),
+    ('"AIMLAPI_KEY" language:python',                       "aimlapi",     "code"),
+    ('"api.aimlapi.com" language:python',                   "aimlapi",     "code"),
+    ('"AIMLAPI_API_KEY" language:javascript',               "aimlapi",     "code"),
+    ('"AIML_API_KEY" language:javascript',                  "aimlapi",     "code"),
+    ('"api.aimlapi.com" language:javascript',               "aimlapi",     "code"),
+    ('"AIMLAPI_API_KEY" language:typescript',               "aimlapi",     "code"),
+    ('"AIMLAPI_API_KEY" filename:.env',                     "aimlapi",     "env"),
+    ('"AIML_API_KEY" filename:.env',                        "aimlapi",     "env"),
+    ('"aimlapi" filename:.env.example',                     "aimlapi",     "env"),
+    ('"AIMLAPI_API_KEY" extension:ipynb',                   "aimlapi",     "notebook"),
+    ('"aimlapi.com" extension:ipynb',                       "aimlapi",     "notebook"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DeepInfra — aggregator (Claude / Gemini / Llama / GPT proxy)
+    # ═══════════════════════════════════════════════════════════════════════
+    ('"DEEPINFRA_API_KEY" language:python',                 "deepinfra",   "code"),
+    ('"DEEPINFRA_TOKEN" language:python',                   "deepinfra",   "code"),
+    ('"api.deepinfra.com" language:python',                 "deepinfra",   "code"),
+    ('"DEEPINFRA_API_KEY" language:javascript',             "deepinfra",   "code"),
+    ('"DEEPINFRA_TOKEN" language:javascript',               "deepinfra",   "code"),
+    ('"api.deepinfra.com" language:javascript',             "deepinfra",   "code"),
+    ('"DEEPINFRA_API_KEY" language:typescript',             "deepinfra",   "code"),
+    ('"DEEPINFRA_API_KEY" filename:.env',                   "deepinfra",   "env"),
+    ('"DEEPINFRA_TOKEN" filename:.env',                     "deepinfra",   "env"),
+    ('"deepinfra" filename:.env.example',                   "deepinfra",   "env"),
+    ('"DEEPINFRA_API_KEY" extension:ipynb',                 "deepinfra",   "notebook"),
+    ('"deepinfra" extension:ipynb',                         "deepinfra",   "notebook"),
+    ('"DEEPINFRA_API_KEY" filename:docker-compose.yml',     "deepinfra",   "code"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Hyperbolic — JWT-format keys, hot 2025-2026 startup
+    # ═══════════════════════════════════════════════════════════════════════
+    ('"HYPERBOLIC_API_KEY" language:python',                "hyperbolic",  "code"),
+    ('"api.hyperbolic.xyz" language:python',                "hyperbolic",  "code"),
+    ('"HYPERBOLIC_API_KEY" language:javascript',            "hyperbolic",  "code"),
+    ('"api.hyperbolic.xyz" language:javascript',            "hyperbolic",  "code"),
+    ('"HYPERBOLIC_API_KEY" language:typescript',            "hyperbolic",  "code"),
+    ('"HYPERBOLIC_API_KEY" filename:.env',                  "hyperbolic",  "env"),
+    ('"hyperbolic.xyz" filename:.env',                      "hyperbolic",  "env"),
+    ('"hyperbolic" filename:.env.example',                  "hyperbolic",  "env"),
+    ('"HYPERBOLIC_API_KEY" extension:ipynb',                "hyperbolic",  "notebook"),
+    ('"api.hyperbolic.xyz" extension:ipynb',                "hyperbolic",  "notebook"),
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # NovitaAI — Chinese aggregator (Stable Diffusion + GPT Image + Nano Banana)
+    # ═══════════════════════════════════════════════════════════════════════
+    ('"NOVITA_API_KEY" language:python',                    "novita",      "code"),
+    ('"NOVITA_AI_API_KEY" language:python',                 "novita",      "code"),
+    ('"api.novita.ai" language:python',                     "novita",      "code"),
+    ('"NOVITA_API_KEY" language:javascript',                "novita",      "code"),
+    ('"api.novita.ai" language:javascript',                 "novita",      "code"),
+    ('"NOVITA_API_KEY" language:typescript',                "novita",      "code"),
+    ('"NOVITA_API_KEY" filename:.env',                      "novita",      "env"),
+    ('"NOVITA_AI_API_KEY" filename:.env',                   "novita",      "env"),
+    ('"novita.ai" filename:.env.example',                   "novita",      "env"),
+    ('"NOVITA_API_KEY" extension:ipynb',                    "novita",      "notebook"),
+    ('"novita.ai" extension:ipynb',                         "novita",      "notebook"),
 ]
 
 

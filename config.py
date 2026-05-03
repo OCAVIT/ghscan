@@ -129,18 +129,9 @@ else:
 
 CODEBERG_SCAN_INTERVAL = int(os.environ.get("CODEBERG_SCAN_INTERVAL", "3600"))  # 1h default
 
-# ── Bitbucket Cloud token pool ────────────────────────────────────────────
-# BITBUCKET_TOKENS=email1:apitoken1,email2:apitoken2
-# Atlassian API tokens (NOT legacy app passwords) — auth via Basic base64(email:token).
-# Required scopes: read:repository:bitbucket, read:account.
-# Rate limit: 1000 req/h per account.
-_bb_multi = os.environ.get("BITBUCKET_TOKENS", "")
-if _bb_multi:
-    BITBUCKET_TOKENS = [t.strip() for t in _bb_multi.split(",") if t.strip() and ":" in t]
-else:
-    BITBUCKET_TOKENS = []
-
-BITBUCKET_SCAN_INTERVAL = int(os.environ.get("BITBUCKET_SCAN_INTERVAL", "10800"))  # 3h default
+# Bitbucket scanner removed: Atlassian CHANGE-2770 deleted cross-workspace
+# REST API endpoints (/2.0/repositories, /2.0/user) on 2026-04-14. Without
+# random-fresh-public-repo discovery the scanner couldn't find leaks.
 
 # ── Postman API key pool ──────────────────────────────────────────────────
 # POSTMAN_TOKENS=PMAK-xxx,PMAK-yyy — Postman API keys, auth via X-Api-Key header.

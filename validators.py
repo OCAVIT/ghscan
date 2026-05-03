@@ -1081,6 +1081,92 @@ async def validate_cerebras(key: str) -> bool:
         return False
 
 
+async def validate_aimlapi(key: str) -> bool:
+    """AIMLAPI — GET /v1/models returns model list. 401 = dead, 200 = alive."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.aimlapi.com/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("aimlapi validate err: %s", e)
+        return False
+
+
+async def validate_deepinfra(key: str) -> bool:
+    """DeepInfra — GET /v1/openai/models. Token may be plain or scoped JWT."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.deepinfra.com/v1/openai/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("deepinfra validate err: %s", e)
+        return False
+
+
+async def validate_hyperbolic(key: str) -> bool:
+    """Hyperbolic — POST /v1/chat/completions with cheap probe (1 token)."""
+    try:
+        async with _client() as c:
+            r = await c.post(
+                "https://api.hyperbolic.xyz/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model":      "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                    "messages":   [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        if r.status_code == 429:
+            return True
+        try:
+            body = r.json()
+            msg = _err_field(body, "error", "message").lower()
+            if "invalid" in msg and ("key" in msg or "token" in msg):
+                return False
+        except Exception:
+            pass
+        return r.status_code in (500, 502, 503)
+    except Exception as e:
+        log.debug("hyperbolic validate err: %s", e)
+        return False
+
+
+async def validate_novita(key: str) -> bool:
+    """Novita AI — GET /v3/openai/models lists available models."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.novita.ai/v3/openai/models",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code in (401, 403):
+            return False
+        return r.status_code == 429
+    except Exception as e:
+        log.debug("novita validate err: %s", e)
+        return False
+
+
 VALIDATORS: dict[str, callable] = {
     "openai":       validate_openai,
     "openai_image": validate_openai_image,
@@ -1109,6 +1195,10 @@ VALIDATORS: dict[str, callable] = {
     "mistral":      validate_mistral,
     "cohere":       validate_cohere,
     "cerebras":     validate_cerebras,
+    "aimlapi":      validate_aimlapi,
+    "deepinfra":    validate_deepinfra,
+    "hyperbolic":   validate_hyperbolic,
+    "novita":       validate_novita,
 }
 
 
