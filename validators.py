@@ -793,7 +793,7 @@ async def validate_kling(key: str) -> bool:
                     "Content-Type":  "application/json",
                 },
                 json={
-                    "model_name":   "kling-v3",
+                    "model_name":   "kling-v3.0",
                     "mode":         "standard",
                     "prompt":       "test",
                     "duration":     "5",
