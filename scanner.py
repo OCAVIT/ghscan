@@ -31,7 +31,7 @@ from config import (
     GITHUB_TOKENS, YOUNG_REPO_DAYS, BIG_SERVICE_STARS,
     CONCURRENT_ITEMS, MAX_PAGES,
 )
-from patterns import QUERIES, EXTRACTORS, is_skippable_path
+from patterns import QUERIES, EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate, INFRA_VALIDATORS
 from notifier import notify_found, notify_cycle_done, notify_infra_found, notify_dead_token
@@ -361,33 +361,8 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
 
     # Fast-path: skip heavy regex if no trigger strings present anywhere in content.
     # Saves CPU on large files that are clearly irrelevant (e.g. pure binary-as-text).
-    # Keep in sync with gitee_scanner._AI_TRIGGER and events_scanner._AI_TRIGGER.
-    _AI_TRIGGER    = (
-        "sk-", "AIzaSy", "eyJ",           # OpenAI / Google / JWT
-        "hf_",                             # HuggingFace
-        "pplx-",                           # Perplexity
-        "xai-",                            # xAI / Grok
-        "r8_",                             # Replicate
-        "ZHIPUAI", "zhipuai",             # GLM
-        "moonshot", "MOONSHOT",            # Kimi
-        "klingai", "KLINGAI", "KLING_",   # Kling
-        "DEEPSEEK", "deepseek",           # DeepSeek
-        "ARK_API", "ark_api",             # Volcengine ARK
-        "DOUBAO", "doubao",               # Doubao
-        "VOLCSTACK", "VOLCENGINE_API",    # Volcengine alt names
-        "VOLC_ACCESSKEY",                 # Volcengine alt names
-        "gsk_",                           # Groq AI
-        "fw_",                            # Fireworks AI
-        "sk-or-v1",                       # OpenRouter
-        "FIREWORKS", "fireworks",         # Fireworks context
-        "OPENROUTER", "openrouter",       # OpenRouter context
-        "MISTRAL", "mistral",             # Mistral AI
-        "COHERE", "cohere",               # Cohere
-    )
-    _INFRA_TRIGGER = ("://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
-                      "AKIA", "AIPA", "AIDA", "AROA", "ASIA")
-    has_ai_trigger    = any(t in content for t in _AI_TRIGGER)
-    has_infra_trigger = any(t in content for t in _INFRA_TRIGGER)
+    has_ai_trigger    = any(t in content for t in AI_TRIGGER)
+    has_infra_trigger = any(t in content for t in INFRA_TRIGGER)
     if not has_ai_trigger and not has_infra_trigger:
         return
 

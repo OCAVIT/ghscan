@@ -27,7 +27,7 @@ import httpx
 
 import db
 from config import HF_TOKEN, HF_SCAN_INTERVAL
-from patterns import EXTRACTORS, is_skippable_path
+from patterns import EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate
 from notifier import notify_found, notify_infra_found
@@ -73,25 +73,11 @@ _TARGET_FILES: list[str] = [
     "gradio_app.py",
 ]
 
-_AI_TRIGGER = (
-    "sk-", "AIzaSy", "eyJ",
-    "hf_", "pplx-", "xai-", "r8_",
-    "gsk_", "fw_", "sk-or-v1", "csk-",
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
-    "GROQ_API_KEY", "CEREBRAS_API_KEY", "REPLICATE_API_TOKEN",
-    "FIREWORKS_API_KEY", "MISTRAL_API_KEY", "COHERE_API_KEY",
-    "DEEPSEEK", "deepseek", "ARK_API", "ark_api", "DOUBAO", "doubao",
-    "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
-    "klingai", "KLINGAI", "KLING_",
-    "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
-    "FIREWORKS", "fireworks", "OPENROUTER", "openrouter",
-    "MISTRAL", "mistral", "COHERE", "cohere",
-    "os.environ[", "os.getenv(",
-)
-_INFRA_TRIGGER = (
-    "://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
-    "AKIA", "AIPA", "AIDA", "AROA", "ASIA",
-)
+# HF Spaces extra heuristics: catch generic os.environ[...] / os.getenv(...) refs
+# to a key. Narrower than bare "os.environ" (which is in 90% of Python files).
+_HF_EXTRA_TRIGGERS = ("os.environ[", "os.getenv(")
+_AI_TRIGGER = AI_TRIGGER + _HF_EXTRA_TRIGGERS
+_INFRA_TRIGGER = INFRA_TRIGGER
 
 
 def _headers() -> dict:

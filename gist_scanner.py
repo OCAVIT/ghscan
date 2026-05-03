@@ -29,7 +29,7 @@ import httpx
 
 import db
 from config import GITHUB_TOKENS
-from patterns import EXTRACTORS, is_skippable_path
+from patterns import EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate
 from notifier import notify_found, notify_infra_found
@@ -69,26 +69,8 @@ _WATCH_NAMES: frozenset[str] = frozenset({
     "test.py", "test.js", "example.py", "example.js", "demo.py",
 })
 
-_AI_TRIGGER = (
-    "sk-", "AIzaSy", "eyJ",
-    "hf_", "pplx-", "xai-", "r8_",
-    "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
-    "klingai", "KLINGAI", "KLING_",
-    "DEEPSEEK", "deepseek",
-    "ARK_API", "ark_api", "DOUBAO", "doubao",
-    "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
-    "gsk_",                     # Groq AI
-    "fw_",                      # Fireworks AI
-    "sk-or-v1",                 # OpenRouter
-    "FIREWORKS", "fireworks",   # Fireworks context
-    "OPENROUTER", "openrouter", # OpenRouter context
-    "MISTRAL", "mistral",       # Mistral AI
-    "COHERE", "cohere",         # Cohere
-)
-_INFRA_TRIGGER = (
-    "://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
-    "AKIA", "AIPA", "AIDA", "AROA", "ASIA",
-)
+_AI_TRIGGER = AI_TRIGGER
+_INFRA_TRIGGER = INFRA_TRIGGER
 
 
 def _headers(token: str) -> dict:

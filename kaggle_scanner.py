@@ -30,7 +30,7 @@ import httpx
 
 import db
 from config import KAGGLE_TOKENS, KAGGLE_SCAN_INTERVAL
-from patterns import EXTRACTORS
+from patterns import EXTRACTORS, AI_TRIGGER
 from validators import validate
 from notifier import notify_found
 
@@ -85,21 +85,7 @@ _QUERIES: list[str] = [
 ]
 
 # AI trigger strings for fast pre-scan (avoids running full regex on irrelevant cells)
-_AI_TRIGGER = (
-    "sk-", "AIzaSy", "eyJ",
-    "hf_", "pplx-", "xai-", "r8_",
-    "gsk_", "fw_", "sk-or-v1", "csk-",
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
-    "GROQ_API_KEY", "CEREBRAS_API_KEY", "REPLICATE_API_TOKEN",
-    "FIREWORKS_API_KEY", "MISTRAL_API_KEY", "COHERE_API_KEY",
-    "HF_TOKEN", "huggingface_hub",
-    "DEEPSEEK", "deepseek", "ARK_API", "ark_api", "DOUBAO", "doubao",
-    "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
-    "klingai", "KLINGAI", "KLING_",
-    "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
-    "FIREWORKS", "fireworks", "OPENROUTER", "openrouter",
-    "MISTRAL", "mistral", "COHERE", "cohere",
-)
+_AI_TRIGGER = AI_TRIGGER
 
 
 def _headers(token: str) -> dict:

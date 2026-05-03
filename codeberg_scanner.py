@@ -24,7 +24,7 @@ import httpx
 
 import db
 from config import CODEBERG_TOKENS, CODEBERG_SCAN_INTERVAL
-from patterns import EXTRACTORS, is_skippable_path
+from patterns import EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
 from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate
 from notifier import notify_found, notify_infra_found, notify_dead_token
@@ -135,24 +135,8 @@ _SEARCH_QUERIES: list[str] = [
     "llm-projekt",
 ]
 
-_AI_TRIGGER = (
-    "sk-", "AIzaSy", "eyJ",
-    "hf_", "pplx-", "xai-", "r8_",
-    "gsk_", "fw_", "sk-or-v1", "csk-",
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
-    "GROQ_API_KEY", "CEREBRAS_API_KEY",
-    "DEEPSEEK", "deepseek",
-    "ARK_API", "ark_api", "DOUBAO", "doubao",
-    "ZHIPUAI", "zhipuai", "moonshot", "MOONSHOT",
-    "klingai", "KLINGAI", "KLING_",
-    "VOLCSTACK", "VOLCENGINE_API", "VOLC_ACCESSKEY",
-    "FIREWORKS", "fireworks", "OPENROUTER", "openrouter",
-    "MISTRAL", "mistral", "COHERE", "cohere",
-)
-_INFRA_TRIGGER = (
-    "://", "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",
-    "AKIA", "AIPA", "AIDA", "AROA", "ASIA",
-)
+_AI_TRIGGER = AI_TRIGGER
+_INFRA_TRIGGER = INFRA_TRIGGER
 
 
 def _headers(token: str) -> dict:

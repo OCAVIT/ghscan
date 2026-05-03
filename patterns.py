@@ -803,6 +803,142 @@ EXTRACTORS: dict[str, callable] = {
 }
 
 
+# ── Fast-path content triggers ───────────────────────────────────────────────
+# Single source of truth for "does this file contain anything worth running
+# regex on?" — imported by every scanner (scanner.py, gitee_scanner.py,
+# events_scanner.py, gist_scanner.py, kaggle_scanner.py, hf_scanner.py,
+# codeberg_scanner.py). When adding a new provider to EXTRACTORS, also add
+# its key prefix + env var names here.
+#
+# Includes:
+#   - All key prefixes (sk-, AIzaSy, eyJ, hf_, pplx-, xai-, r8_, gsk_, fw_,
+#     sk-or-v1, csk-)
+#   - Both UPPER and lowercase env-var spellings (catch URL-style refs like
+#     "api.openrouter.ai" lowercase as well as "OPENROUTER_API_KEY" upper)
+#   - Provider domains (api.openai.com, api.deepseek.com, openrouter.ai…)
+AI_TRIGGER: tuple[str, ...] = (
+    # ── Key prefixes ────────────────────────────────────────────────────
+    "sk-",          # OpenAI / Anthropic / DeepSeek / Mistral / many others
+    "AIzaSy",       # Google
+    "eyJ",          # JWT — Inworld base64, Google SA, generic
+    "hf_",          # HuggingFace
+    "pplx-",        # Perplexity
+    "xai-",         # xAI / Grok
+    "r8_",          # Replicate
+    "gsk_",         # Groq
+    "fw_",          # Fireworks
+    "sk-or-v1",     # OpenRouter
+    "csk-",         # Cerebras
+
+    # ── OpenAI / OpenAI Image ───────────────────────────────────────────
+    "OPENAI_API_KEY", "openai", "api.openai.com",
+    "OPENAI_IMAGE_API_KEY", "GPT_IMAGE_API_KEY", "gpt-image",
+
+    # ── Anthropic ───────────────────────────────────────────────────────
+    "ANTHROPIC_API_KEY", "anthropic", "api.anthropic.com",
+
+    # ── Google / Gemini ─────────────────────────────────────────────────
+    "GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI",
+    "generativelanguage", "googleapis.com",
+
+    # ── DeepSeek ────────────────────────────────────────────────────────
+    "DEEPSEEK_API_KEY", "DEEPSEEK", "deepseek", "api.deepseek.com",
+
+    # ── ElevenLabs ──────────────────────────────────────────────────────
+    "ELEVENLABS_API_KEY", "ELEVEN_API_KEY", "XI_API_KEY",
+    "ELEVENLABS", "elevenlabs",
+
+    # ── Volcengine / ARK / Doubao / Seedance ────────────────────────────
+    "ARK_API_KEY", "ARK_API", "ark_api",
+    "DOUBAO_API_KEY", "DOUBAO", "doubao",
+    "VOLCENGINE_API", "VOLC_API_KEY", "VOLCSTACK", "VOLC_ACCESSKEY",
+    "seedance",
+
+    # ── HuggingFace ─────────────────────────────────────────────────────
+    "HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN",
+    "HF_API_KEY", "HF_API_TOKEN", "huggingface_hub", "huggingface.co",
+
+    # ── Together AI ─────────────────────────────────────────────────────
+    "TOGETHER_API_KEY", "TOGETHER_AI_API_KEY",
+    "together.ai", "together.xyz", "api.together",
+
+    # ── Perplexity ──────────────────────────────────────────────────────
+    "PERPLEXITY_API_KEY", "PPLX_API_KEY", "PPLX_KEY",
+    "perplexity", "api.perplexity.ai",
+
+    # ── Runway ──────────────────────────────────────────────────────────
+    "RUNWAYML_API_SECRET", "RUNWAY_API_KEY", "RUNWAY_TOKEN",
+    "runway", "runwayml",
+
+    # ── Happyhorse / RunHappyHorse ──────────────────────────────────────
+    "HAPPY_HORSE_API_KEY", "HAPPYHORSE_API_KEY", "RUNHAPPYHORSE_API_KEY",
+    "happyhorse", "runhappyhorse",
+
+    # ── Replicate ───────────────────────────────────────────────────────
+    "REPLICATE_API_TOKEN", "REPLICATE_API_KEY", "REPLICATE_TOKEN",
+    "replicate.com",
+
+    # ── Fal.ai ──────────────────────────────────────────────────────────
+    "FAL_API_KEY", "FAL_KEY", "FAL_SECRET_KEY",
+    "fal.ai", "fal.run", "api.fal.ai",
+
+    # ── xAI / Grok ──────────────────────────────────────────────────────
+    "XAI_API_KEY", "GROK_API_KEY", "xAI_KEY",
+    "api.x.ai", "grok-2", "grok-3", "grok_api",
+
+    # ── Suno ────────────────────────────────────────────────────────────
+    "SUNO_API_KEY", "SUNO_SECRET", "SUNO_TOKEN",
+    "suno.ai", "sunoapi.org", "api.suno.com",
+
+    # ── Inworld ─────────────────────────────────────────────────────────
+    "INWORLD_BASE64", "INWORLD_AUTH", "INWORLD_KEY_SECRET",
+    "INWORLD_KEY", "inworld.ai",
+
+    # ── Moonshot / Kimi ─────────────────────────────────────────────────
+    "MOONSHOT_API_KEY", "KIMI_API_KEY", "KIMI_KEY",
+    "moonshot", "MOONSHOT", "api.moonshot.cn", "api.moonshot.ai",
+
+    # ── Zhipu / GLM / ChatGLM ───────────────────────────────────────────
+    "ZHIPUAI_API_KEY", "ZHIPU_API_KEY", "GLM_API_KEY", "BIGMODEL_API_KEY",
+    "ZHIPUAI", "zhipuai", "chatglm", "open.bigmodel.cn",
+
+    # ── Kling / Kuaishou ────────────────────────────────────────────────
+    "KLING_ACCESS_KEY", "KLING_AK", "KUAISHOU_ACCESS_KEY",
+    "KLING_SECRET_KEY", "KLING_SK", "KUAISHOU_SECRET_KEY",
+    "KLING_ACCESS", "KLING_SECRET", "KLING_",
+    "klingai", "KLINGAI", "kuaishou", "api.klingai.com",
+
+    # ── Groq ────────────────────────────────────────────────────────────
+    "GROQ_API_KEY", "GROQ_KEY", "api.groq.com",
+
+    # ── Fireworks ───────────────────────────────────────────────────────
+    "FIREWORKS_API_KEY", "FIREWORKS_AI_API_KEY",
+    "FIREWORKS", "fireworks", "api.fireworks.ai",
+
+    # ── OpenRouter ──────────────────────────────────────────────────────
+    "OPENROUTER_API_KEY", "OR_API_KEY", "OPENROUTER_KEY",
+    "OPENROUTER", "openrouter", "openrouter.ai",
+
+    # ── Mistral ─────────────────────────────────────────────────────────
+    "MISTRAL_API_KEY", "MISTRAL_KEY", "MISTRAL_TOKEN",
+    "MISTRAL", "mistral", "api.mistral.ai",
+
+    # ── Cohere ──────────────────────────────────────────────────────────
+    "COHERE_API_KEY", "CO_API_KEY", "COHERE_TOKEN",
+    "COHERE", "cohere", "api.cohere.ai", "api.cohere.com",
+
+    # ── Cerebras ────────────────────────────────────────────────────────
+    "CEREBRAS_API_KEY", "CEREBRAS_KEY", "cerebras", "api.cerebras.ai",
+)
+
+# Same role for infra extractors (DB URLs, AWS keys, private keys).
+INFRA_TRIGGER: tuple[str, ...] = (
+    "://",                                              # any URL-style cred
+    "BEGIN PRIVATE KEY", "BEGIN RSA", "BEGIN OPENSSH",  # PEM blocks
+    "AKIA", "AIPA", "AIDA", "AROA", "ASIA",             # AWS access-key prefixes
+)
+
+
 # ── GitHub code search queries ────────────────────────────────────────────────
 # Format: (search_terms, provider, file_type_tag)
 # search_terms: raw query string passed as ?q= value (no q= prefix, no sort= suffix)
