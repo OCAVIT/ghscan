@@ -338,7 +338,11 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
             t    = row["total"]
             mark = "✅" if v > 0 else "  "
             lines.append(f"{mark} {meta['e']} {meta['n']}: {t} found, <b>{v} valid</b>")
+        # Append timestamp so re-clicking Refresh always changes content
+        # (Telegram silently fails editMessageText when content is identical)
+        lines.append(f"\n<i>Updated: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}</i>")
         back_kb = {"inline_keyboard": [
+            [{"text": "🔄 Refresh Stats",                "callback_data": "s"}],
             [{"text": "🗑️ Reset SHA dedup (force rescan)", "callback_data": "xsha"}],
             [{"text": "◀ Назад", "callback_data": "m"}],
         ]}
