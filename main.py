@@ -722,6 +722,71 @@ async def admin_run_author_cycle(
     return {"ok": True, **(await run_author_cycle())}
 
 
+@app.post("/admin/backfill_authors")
+async def admin_backfill_authors(
+    authorization: str | None = Header(default=None),
+):
+    """One-time backfill: populate watched_authors from existing found_keys.
+
+    track_leak() only auto-fires on NEW save_key() inserts. Pre-existing
+    rows from before that hook was added have no entry in watched_authors.
+    This endpoint scans found_keys and aggregates per-author counters,
+    auto-promoting any author with leak_count >= 3 to is_watched=1.
+
+    Idempotent: re-running overwrites the rebuilt aggregate.
+    """
+    _check_admin(authorization)
+    import sqlite3
+    with sqlite3.connect(DB_PATH) as conn:
+        # Clear existing aggregates so re-running is idempotent.
+        conn.execute("DELETE FROM watched_authors")
+        # Aggregate from found_keys. Skip non-github platform prefixes
+        # (postman:/kaggle:/etc) — those have separate `<platform>:<owner>`
+        # repo formats and need different parsing logic.
+        conn.execute("""
+            INSERT INTO watched_authors
+                (login, platform, leak_count, valid_count, repos_with_leaks,
+                 first_leak_at, last_leak_at, is_watched)
+            SELECT
+                SUBSTR(repo, 1, INSTR(repo, '/') - 1)         AS login,
+                'github'                                      AS platform,
+                COUNT(*)                                      AS leak_count,
+                COALESCE(SUM(is_valid), 0)                    AS valid_count,
+                COUNT(DISTINCT repo)                          AS repos_with_leaks,
+                MIN(discovered_at)                            AS first_leak_at,
+                MAX(discovered_at)                            AS last_leak_at,
+                CASE WHEN COUNT(*) >= 3 THEN 1 ELSE 0 END     AS is_watched
+            FROM found_keys
+            WHERE repo LIKE '%/%'
+              AND repo NOT LIKE 'postman:%'
+              AND repo NOT LIKE 'kaggle:%'
+              AND repo NOT LIKE 'hf:%'
+              AND repo NOT LIKE 'npm:%'
+              AND repo NOT LIKE 'pypi:%'
+              AND repo NOT LIKE 'cc:%'
+              AND INSTR(repo, '/') > 0
+            GROUP BY login, platform
+        """)
+        # Counts after backfill
+        total = conn.execute("SELECT COUNT(*) FROM watched_authors").fetchone()[0]
+        watched = conn.execute(
+            "SELECT COUNT(*) FROM watched_authors WHERE is_watched=1"
+        ).fetchone()[0]
+        top = [dict(r) for r in conn.execute("""
+            SELECT login, leak_count, valid_count, repos_with_leaks
+            FROM watched_authors
+            WHERE is_watched=1
+            ORDER BY valid_count DESC, leak_count DESC
+            LIMIT 10
+        """).fetchall() ]
+    return {
+        "ok": True,
+        "total_authors":  total,
+        "watched_count":  watched,
+        "top_10_watched": top,
+    }
+
+
 @app.post("/admin/backfill_stability")
 async def admin_backfill_stability(
     only_dead: bool = True,
