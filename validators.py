@@ -206,10 +206,12 @@ async def validate_google(key: str) -> bool:
     """
     if key.startswith("sa:"):
         return False  # service-account JSON requires OAuth, not API-key flow
+    # gemini-2.0-flash-lite shuts down 2026-06-01; switched to 2.5-flash-lite
+    # (GA, smallest+cheapest in 2.5 family). Source: developers.googleblog.com.
     try:
         async with _client() as c:
             r = await c.post(
-                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
                 params={"key": key},
                 json={
                     "contents":         [{"parts": [{"text": "hi"}]}],
@@ -1089,7 +1091,9 @@ async def validate_cohere(key: str) -> bool:
 
 async def validate_cerebras(key: str) -> bool:
     """
-    Cerebras Cloud — POST /v1/chat/completions with llama3.1-8b, max_tokens=1.
+    Cerebras Cloud — POST /v1/chat/completions with gpt-oss-120b.
+    Switched from llama3.1-8b which deprecates 2026-05-27. gpt-oss-120b is
+    current free-tier-accessible production model.
     csk- prefix. NOT in GitHub secret scanning → very high validity rate.
     401/403 = dead. 429 = rate-limited (alive). 200 = active with quota.
     """
@@ -1099,7 +1103,7 @@ async def validate_cerebras(key: str) -> bool:
                 "https://api.cerebras.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={
-                    "model":      "llama3.1-8b",
+                    "model":      "gpt-oss-120b",
                     "messages":   [{"role": "user", "content": "hi"}],
                     "max_tokens": 1,
                 },
