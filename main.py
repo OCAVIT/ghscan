@@ -760,6 +760,54 @@ async def admin_refilter_infra(authorization: str | None = Header(default=None))
     return {"ok": True, **result}
 
 
+@app.post("/admin/cleanup_axes")
+async def admin_cleanup_axes(authorization: str | None = Header(default=None)):
+    """One-time cleanup — reapply the current vocab_expander filter to
+    existing axis_extensions rows. Drops entries that would NOT survive
+    the post-2026-05-04 filter:
+      - env_names ending in _MODEL / _URL / _ENDPOINT / _BASE / _VERSION /
+        _REGION / _PROJECT / _ORG / _NAMESPACE / _DEPLOYMENT / _TIMEOUT etc
+        (config vars, not secret-bearing)
+      - generic noise filenames (api-key.js, main.py, app.py, etc)
+      - generic context_words (key, secret, auth, model, ...)
+    Run after deploying the filter tightening to scrub historic pollution.
+    """
+    _check_admin(authorization)
+    from vocab_expander import _filter_new
+
+    def _do() -> dict:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT id, provider, axis, value FROM axis_extensions"
+            ).fetchall()
+            to_delete: list[int] = []
+            for r in rows:
+                # _filter_new returns [] if value would be rejected. We pass
+                # a single-element list with empty `current` set so the only
+                # rejection is the shape filter.
+                kept = _filter_new(r["provider"], r["axis"], [r["value"]], set())
+                if not kept:
+                    to_delete.append(r["id"])
+            for i in range(0, len(to_delete), 500):
+                chunk = to_delete[i:i + 500]
+                ph = ",".join("?" * len(chunk))
+                conn.execute(
+                    f"DELETE FROM axis_extensions WHERE id IN ({ph})", chunk
+                )
+            conn.commit()
+            return {"total": len(rows), "deleted": len(to_delete)}
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(_do)
+    log.info("admin cleanup_axes: removed %d/%d polluted rows",
+             result["deleted"], result["total"])
+    return {"ok": True, **result}
+
+
 @app.post("/admin/reset_file_claims")
 async def admin_reset_file_claims(authorization: str | None = Header(default=None)):
     """

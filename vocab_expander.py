@@ -121,25 +121,44 @@ def _build_prompt(provider: str, current_axes: dict[str, list[str]],
     env_candidates, file_candidates}."""
     sys_msg = (
         "You analyze leaked .env / config / source files to discover NEW "
-        "naming conventions for AI-provider API keys. Your job is to extract:\n"
-        "  • env_names — env-var spellings developers use for THIS provider's key\n"
-        "  • filenames — config/env files where keys appear (basename only)\n"
-        "  • context_words — distinctive function/SDK call strings near the key\n"
-        "    (e.g. 'openai.AsyncOpenAI', 'gpt-image-2')\n"
-        "Return ONLY items that are NOT already in the current vocabulary list. "
-        "Reject obvious garbage, generic names (API_KEY, SECRET, TOKEN), or "
-        "names belonging to other providers (e.g. STRIPE_KEY in an OpenAI file)."
+        "naming conventions for AI-provider API keys. Extract these axes:\n\n"
+        "  • env_names — UPPERCASE_SNAKE env-var names whose VALUE IS A SECRET "
+        "(API key / token / secret). Examples for OpenAI: OPENAI_API_KEY, "
+        "OPENAI_PROJECT_KEY, GPT_IMAGE_API_KEY.\n"
+        "    REJECT non-secret-bearing names whose values are model IDs / URLs "
+        "/ regions / versions / org IDs / endpoints (e.g. OPENAI_MODEL, "
+        "OPENAI_API_BASE, DEEPSEEK_API_URL, OPENAI_ORG_ID, _PROJECT_ID, "
+        "_REGION, _NAMESPACE, _DEPLOYMENT, _TIMEOUT — these are configuration, "
+        "NOT keys). Such names appear in .env files but searching for them "
+        "produces noise instead of leading to credentials.\n\n"
+        "  • model_names — model IDs / API model-version strings (e.g. "
+        "'gpt-4o', 'claude-opus-4', 'doubao-seedance-2-0', 'deepseek-v4-pro', "
+        "'gemini-2.5-pro'). Devs hardcode these next to keys — searching for "
+        "model IDs leads to repos containing keys.\n\n"
+        "  • filenames — provider-DISTINCTIVE config/env file basenames where "
+        "keys live. Skip generic noise filenames like 'api-key.js', "
+        "'main.py', 'index.js', 'app.py', 'config.py' — those exist in every "
+        "repo and don't anchor on this provider.\n\n"
+        "  • context_words — distinctive SDK / function call / domain strings "
+        "(e.g. 'openai.AsyncOpenAI', 'from anthropic import', "
+        "'api.openai.com/v1/embeddings'). Used as content anchors. Do NOT put "
+        "model IDs here — those go to model_names. Do NOT put bare common "
+        "words ('key', 'secret', 'auth').\n\n"
+        "Return ONLY NEW items not in current vocabulary. Empty list if "
+        "nothing new found for an axis."
     )
 
     current_envs   = current_axes.get("env_names", [])
     current_files  = current_axes.get("filenames", [])    # may be empty (global axis)
     current_ctx    = current_axes.get("context_words", [])
+    current_models = current_axes.get("model_names", [])
 
     user_parts = [
         f"PROVIDER: {provider}",
         "",
         f"CURRENT VOCABULARY (do NOT repeat these):",
         f"  env_names:     {sorted(current_envs)[:60]}",
+        f"  model_names:   {sorted(current_models)[:60] if current_models else '(none yet)'}",
         f"  filenames:     {sorted(current_files)[:60] if current_files else '(none — using global FILENAMES list)'}",
         f"  context_words: {sorted(current_ctx)[:60] if current_ctx else '(none yet)'}",
         "",
@@ -164,11 +183,13 @@ def _build_prompt(provider: str, current_axes: dict[str, list[str]],
     user_parts.extend([
         "",
         "Respond ONLY with this JSON shape (no prose, no markdown fences):",
-        '{"env_names": [...], "filenames": [...], "context_words": [...]}',
+        '{"env_names": [...], "model_names": [...], "filenames": [...], "context_words": [...]}',
         "",
         "Each list contains 0-15 NEW items. Empty list if nothing new found.",
         "Filenames must be plain basenames (e.g. '.env.docker', 'wrangler.toml'), "
         "no path prefixes.",
+        "REMINDER: env_names = SECRET-bearing vars only (no _MODEL/_URL/_REGION/_BASE).",
+        "REMINDER: Model IDs go in model_names, NOT context_words.",
     ])
 
     return [
@@ -199,7 +220,7 @@ def _parse_response(text: str | None) -> dict[str, list[str]]:
         except json.JSONDecodeError:
             return {}
     out: dict[str, list[str]] = {}
-    for axis in ("env_names", "filenames", "context_words"):
+    for axis in ("env_names", "model_names", "filenames", "context_words"):
         v = data.get(axis, [])
         if isinstance(v, list):
             out[axis] = [str(x).strip() for x in v if isinstance(x, (str, int))]
@@ -209,7 +230,10 @@ def _parse_response(text: str | None) -> dict[str, list[str]]:
 def _filter_new(provider: str, axis: str, values: list[str],
                 current: set[str]) -> list[str]:
     """Final guard — drop anything that's already in current vocab + axis
-    extensions, plus shape-based junk."""
+    extensions, plus shape-based junk. Critical for env_names: we MUST
+    reject non-secret-bearing vars (model IDs, URLs, regions, versions)
+    that DeepSeek otherwise eagerly classifies as 'env_names' since they
+    LOOK like UPPERCASE_SNAKE."""
     seen = set()
     out = []
     for v in values:
@@ -219,14 +243,71 @@ def _filter_new(provider: str, axis: str, values: list[str],
         # Reject junk: too short, all-numeric, contains spaces
         if len(v) < 3 or len(v) > 80 or " " in v:
             continue
-        # For env_names: enforce ALL_CAPS_WITH_UNDERSCORES shape
+
         if axis == "env_names":
+            # Enforce ALL_CAPS_WITH_UNDERSCORES shape
             if not re.match(r'^[A-Z][A-Z0-9_]+$', v):
                 continue
             # Block obvious non-provider-specific names
             if v in ("API_KEY", "SECRET_KEY", "TOKEN", "ACCESS_TOKEN",
                      "AUTH_TOKEN", "SECRET", "PASSWORD", "USER", "USERNAME"):
                 continue
+            # Reject NON-secret-bearing var classes (model IDs, URLs,
+            # endpoints, versions, regions). These names appear in .env
+            # files but their VALUES are not secrets — devs put
+            # OPENAI_MODEL=gpt-4o, DEEPSEEK_API_URL=https://..., not keys.
+            # Searching for them just produces noise.
+            _NON_SECRET_SUFFIXES = (
+                "_MODEL", "_MODELS", "_URL", "_URI", "_ENDPOINT", "_HOST",
+                "_PORT", "_PATH", "_BASE", "_BASE_URL", "_API_URL",
+                "_API_BASE", "_API_VERSION", "_VERSION", "_REGION",
+                "_PROJECT", "_PROJECT_ID", "_ORG", "_ORG_ID", "_ORGANIZATION",
+                "_NAMESPACE", "_DEPLOYMENT", "_RESOURCE", "_INSTANCE",
+                "_TIMEOUT", "_RETRY", "_MAX_TOKENS", "_TEMPERATURE",
+                "_USER_AGENT", "_PROXY",
+            )
+            if any(v.endswith(suf) for suf in _NON_SECRET_SUFFIXES):
+                continue
+            # *_NAME (gpt-4 → OPENAI_MODEL_NAME) — same logic
+            if v.endswith("_NAME") and "_KEY" not in v and "_TOKEN" not in v:
+                continue
+
+        if axis == "filenames":
+            # Reject filenames so generic they'd produce noise across all
+            # providers (e.g. api-key.js, key.txt, secrets.txt).
+            # We want PROVIDER-distinctive files.
+            v_low = v.lower()
+            if v_low in (
+                "api-key.js", "api-key.ts", "api-key.py",
+                "apikey.js", "apikey.ts", "apikey.py",
+                "key.js", "key.ts", "key.py", "key.txt",
+                "secret.js", "secret.ts", "secret.py", "secret.txt",
+                "secrets.txt", "keys.txt", "tokens.txt",
+                "main.py", "index.js", "index.ts", "app.py", "app.js",
+                "server.js", "server.ts",
+            ):
+                continue
+            # Reject paths longer than 60 chars (likely full repo paths
+            # rather than basenames the model was supposed to extract)
+            if len(v) > 60:
+                continue
+            # Reject obvious non-config extensions
+            if v_low.endswith((".md", ".rst", ".txt")):
+                continue
+
+        if axis == "context_words":
+            # Reject overly generic context words — must be at least
+            # somewhat distinctive. Bare common tokens like "key", "auth"
+            # would trigger the regex pipeline on millions of unrelated files.
+            v_low = v.lower()
+            _GENERIC_CONTEXT = {
+                "key", "secret", "token", "auth", "api", "client",
+                "config", "env", "model", "models", "request", "response",
+                "data", "result", "error", "user", "list", "create",
+            }
+            if v_low in _GENERIC_CONTEXT:
+                continue
+
         seen.add(v)
         out.append(v)
     return out[:15]   # hard cap regardless of model output
@@ -267,7 +348,7 @@ async def expand_provider(provider: str, gh_token: str,
     current_axes: dict[str, list[str]] = {
         axis: list(PROVIDER_AXES[provider].get(axis, []))
               + existing_ext.get(axis, [])
-        for axis in ("env_names", "filenames", "context_words")
+        for axis in ("env_names", "model_names", "filenames", "context_words")
     }
 
     messages = _build_prompt(provider, current_axes, bundles)
@@ -288,7 +369,7 @@ async def expand_provider(provider: str, gh_token: str,
         return {}
 
     inserted: dict[str, int] = {}
-    for axis in ("env_names", "filenames", "context_words"):
+    for axis in ("env_names", "model_names", "filenames", "context_words"):
         proposed = parsed.get(axis, [])
         if not proposed:
             continue

@@ -78,10 +78,11 @@ def _build_one(provider: str, axes: dict[str, list[str]],
 
     Returns None if the chosen axes are empty for this theme (e.g. provider
     has no key_prefixes — happens for shape-only providers like ark/fal)."""
-    env_names    = axes.get("env_names", [])
-    key_prefixes = axes.get("key_prefixes", [])
-    domains      = axes.get("domains", [])
-    model_names  = axes.get("model_names", [])
+    env_names     = axes.get("env_names", [])
+    key_prefixes  = axes.get("key_prefixes", [])
+    domains       = axes.get("domains", [])
+    model_names   = axes.get("model_names", [])
+    context_words = axes.get("context_words", [])     # AI-discovered, vocab_expander
 
     if theme == "env_file":
         if not env_names:
@@ -155,6 +156,33 @@ def _build_one(provider: str, axes: dict[str, list[str]],
         f = rnd.choice(FILENAMES)
         return f'{_quote(e1)} {_quote(e2)} filename:{f}', file_type_for(f)
 
+    if theme == "ctx_file":
+        # AI-discovered context word + filename — catches files that don't
+        # declare a standard env-name but do reference distinctive SDK calls
+        # (e.g. "openai.AsyncOpenAI" filename:.env).
+        if not context_words:
+            return None
+        c = rnd.choice(context_words)
+        f = rnd.choice(FILENAMES)
+        return f'{_quote(c)} filename:{f}', file_type_for(f)
+
+    if theme == "ctx_lang":
+        if not context_words:
+            return None
+        c = rnd.choice(context_words)
+        l = rnd.choice(LANGUAGES)
+        return f'{_quote(c)} language:{l}', "code"
+
+    if theme == "ctx_env":
+        # Context word + env_name — anchors a real SDK reference next to a
+        # variable name. Highest precision combo.
+        if not context_words or not env_names:
+            return None
+        c = rnd.choice(context_words)
+        e = rnd.choice(env_names)
+        f = rnd.choice(FILENAMES)
+        return f'{_quote(c)} {_quote(e)} filename:{f}', file_type_for(f)
+
     return None
 
 
@@ -164,6 +192,8 @@ _THEMES = [
     "env_file", "env_lang", "prefix_file", "prefix_lang",
     "domain_lang", "domain_file", "model_file", "model_lang",
     "env_path", "env_combo",
+    # AI-vocab-driven (context_words from vocab_expander)
+    "ctx_file", "ctx_lang", "ctx_env",
 ]
 
 
