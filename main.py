@@ -909,6 +909,65 @@ async def admin_reclassify_infra(authorization: str | None = Header(default=None
     return {"ok": True, "message": "reclassification started — poll /admin/reclassify_status"}
 
 
+@app.get("/admin/probe_state")
+async def admin_probe_state(authorization: str | None = Header(default=None)):
+    """Comprehensive breakdown of jackpot probe state, grouped by cred_type
+    AND validation/probe outcome. Cuts through endpoint limit issues.
+    Returns counts only — no creds in response."""
+    _check_admin(authorization)
+    import sqlite3, json as _json
+    from collections import Counter
+    with sqlite3.connect(DB_PATH) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT cred_type, is_validated, jackpot_data, jackpot_score "
+            "FROM infra_findings"
+        ).fetchall()
+    out: dict = {
+        "total_rows": len(rows),
+        "by_cred_type": {},
+        "validated_breakdown": {},
+        "probe_errors_top": Counter(),
+        "probe_types_top": Counter(),
+    }
+    for r in rows:
+        ct = r["cred_type"]
+        bucket = out["by_cred_type"].setdefault(ct, {
+            "total": 0, "validated": 0, "probed_ok": 0,
+            "errored": 0, "skipped": 0, "no_jackpot_data": 0,
+            "with_keys": 0, "with_validated_keys": 0,
+        })
+        bucket["total"] += 1
+        if r["is_validated"] != 1:
+            continue
+        bucket["validated"] += 1
+        jd_raw = r["jackpot_data"]
+        if not jd_raw:
+            bucket["no_jackpot_data"] += 1
+            continue
+        try:
+            jd = _json.loads(jd_raw)
+        except Exception:
+            bucket["no_jackpot_data"] += 1
+            continue
+        if jd.get("error"):
+            bucket["errored"] += 1
+            out["probe_errors_top"][jd["error"]] += 1
+            continue
+        if jd.get("skipped"):
+            bucket["skipped"] += 1
+            continue
+        bucket["probed_ok"] += 1
+        out["probe_types_top"][jd.get("probe_type","?")] += 1
+        if jd.get("ai_keys_total", 0) > 0:
+            bucket["with_keys"] += 1
+        if jd.get("ai_keys_total_valid", 0) > 0:
+            bucket["with_validated_keys"] += 1
+    out["probe_errors_top"] = dict(out["probe_errors_top"].most_common(20))
+    out["probe_types_top"] = dict(out["probe_types_top"].most_common())
+    return out
+
+
 @app.get("/admin/reclassify_status")
 async def admin_reclassify_status(authorization: str | None = Header(default=None)):
     _check_admin(authorization)
