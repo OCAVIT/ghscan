@@ -132,7 +132,102 @@ def extract_database(content: str) -> list[str]:
             continue
         found.append(val)
 
+    # SPLIT-FORM RECONSTRUCTION
+    # Devs often store DB creds as separate env vars in .env files:
+    #   DB_HOST=prod.db.com
+    #   DB_PORT=5432
+    #   DB_USER=admin
+    #   DB_PASSWORD=secret123
+    #   DB_NAME=mydb
+    # Our normal regex misses this entirely. Reconstruct DSN if all 3 of
+    # (host, user, password) are present in the same file/block. Excluded
+    # if any of them looks templated (${VAR}/{{var}}) or fake.
+    fragments = _extract_db_fragments(content)
+    if fragments.get("host") and fragments.get("password") and fragments.get("user"):
+        scheme = fragments.get("scheme") or "postgres"
+        host = fragments["host"]
+        user = fragments["user"]
+        pwd = fragments["password"]
+        port = fragments.get("port") or "5432"
+        dbname = fragments.get("name") or ""
+        # Skip docker-internal hostnames (mock)
+        if host.lower() in ("db", "postgres", "mongo", "redis", "mysql",
+                             "mariadb", "localhost", "127.0.0.1", "0.0.0.0"):
+            pass
+        elif _is_fake(host) or _is_fake(pwd) or _is_fake(user):
+            pass
+        elif "${" in host or "${" in pwd or "{{" in host or "{{" in pwd:
+            pass
+        else:
+            dsn = f"{scheme}://{user}:{pwd}@{host}:{port}/{dbname}"
+            found.append(dsn)
+
     return list(dict.fromkeys(found))
+
+
+_DB_FRAG_HOST = re.compile(
+    r'(?m)^(?:export\s+)?'
+    r'(?:DB_HOST|DATABASE_HOST|PGHOST|MYSQL_HOST|MONGO_HOST|REDIS_HOST'
+    r'|POSTGRES_HOST|POSTGRESQL_HOST|MSSQL_HOST|MARIADB_HOST|HOST)'
+    r'\s*[=:]\s*["\']?([A-Za-z0-9._\-]{4,80})["\']?\s*$'
+)
+_DB_FRAG_PORT = re.compile(
+    r'(?m)^(?:export\s+)?'
+    r'(?:DB_PORT|DATABASE_PORT|PGPORT|MYSQL_PORT|MONGO_PORT|REDIS_PORT'
+    r'|POSTGRES_PORT|POSTGRESQL_PORT|PORT)'
+    r'\s*[=:]\s*["\']?(\d{2,5})["\']?\s*$'
+)
+_DB_FRAG_USER = re.compile(
+    r'(?m)^(?:export\s+)?'
+    r'(?:DB_USER|DATABASE_USER|PGUSER|MYSQL_USER|MONGO_USER|REDIS_USER'
+    r'|POSTGRES_USER|POSTGRESQL_USER|DB_USERNAME|DATABASE_USERNAME)'
+    r'\s*[=:]\s*["\']?([A-Za-z0-9._\-]{2,40})["\']?\s*$'
+)
+_DB_FRAG_PASS = re.compile(
+    r'(?m)^(?:export\s+)?'
+    r'(?:DB_PASSWORD|DATABASE_PASSWORD|PGPASSWORD|MYSQL_PASSWORD|MONGO_PASSWORD'
+    r'|REDIS_PASSWORD|POSTGRES_PASSWORD|POSTGRESQL_PASSWORD|DB_PASS|DATABASE_PASS|MYSQL_PASS)'
+    r'\s*[=:]\s*["\']?([^\s"\']{6,80})["\']?\s*$'
+)
+_DB_FRAG_NAME = re.compile(
+    r'(?m)^(?:export\s+)?'
+    r'(?:DB_NAME|DATABASE_NAME|PGDATABASE|MYSQL_DATABASE|MONGO_DATABASE'
+    r'|REDIS_DATABASE|POSTGRES_DB|POSTGRESQL_DB)'
+    r'\s*[=:]\s*["\']?([A-Za-z0-9._\-]{1,40})["\']?\s*$'
+)
+# DB type hint — pick scheme based on what env vars are dominant
+_DB_FRAG_TYPE_HINTS = [
+    (re.compile(r'\bPG(?:HOST|PORT|USER|PASSWORD|DATABASE)\b'),  "postgres"),
+    (re.compile(r'\bPOSTGRES(?:QL)?_(?:HOST|USER|PASSWORD|DB)\b'), "postgres"),
+    (re.compile(r'\bMYSQL_(?:HOST|USER|PASSWORD|DATABASE)\b'),    "mysql"),
+    (re.compile(r'\bMARIADB_(?:HOST|USER|PASSWORD)\b'),           "mysql"),
+    (re.compile(r'\bMONGO_?(?:HOST|USER|PASSWORD|DATABASE)\b'),  "mongodb"),
+    (re.compile(r'\bREDIS_(?:HOST|PASSWORD|PORT)\b'),             "redis"),
+    (re.compile(r'\bMSSQL_'),                                     "mssql"),
+]
+
+
+def _extract_db_fragments(content: str) -> dict:
+    """Pull split-form DB creds (DB_HOST/DB_PASSWORD/etc) from same content
+    block. Returns dict with as many of {host, port, user, password, name,
+    scheme} as can be found."""
+    out: dict = {}
+    if (m := _DB_FRAG_HOST.search(content)):
+        out["host"] = m.group(1).strip()
+    if (m := _DB_FRAG_PORT.search(content)):
+        out["port"] = m.group(1).strip()
+    if (m := _DB_FRAG_USER.search(content)):
+        out["user"] = m.group(1).strip()
+    if (m := _DB_FRAG_PASS.search(content)):
+        out["password"] = m.group(1).strip()
+    if (m := _DB_FRAG_NAME.search(content)):
+        out["name"] = m.group(1).strip()
+    # Pick scheme from dominant env-prefix
+    for pat, scheme in _DB_FRAG_TYPE_HINTS:
+        if pat.search(content):
+            out["scheme"] = scheme
+            break
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,14 +308,43 @@ def extract_aws(content: str) -> list[str]:
 # ALIBABA CLOUD / ALIYUN
 # ══════════════════════════════════════════════════════════════════════════════
 
-_ALIYUN_KEY_ID = re.compile(r'\b(LTAI[A-Za-z0-9]{16,24})\b')
+# LTAI-prefix is the standard Alibaba access key shape (2017+).
+# LTAI4G/5G are 2020+ versions. STS tokens are 'STS.NV...' for short-lived sessions.
+_ALIYUN_KEY_ID = re.compile(r'\b(LTAI[A-Za-z0-9]{16,32}|STS\.[A-Za-z0-9]{20,160})\b')
 _ALIYUN_SECRET  = re.compile(
-    r'(?:ALIBABA_CLOUD_ACCESS_KEY_SECRET|ALICLOUD_ACCESS_KEY_SECRET'
-    r'|ALIYUN_ACCESS_KEY_SECRET|access_key_secret)\s*[=:]\s*["\']?([A-Za-z0-9]{30,})["\']?',
+    r'(?:'
+    r'ALIBABA_CLOUD_ACCESS_KEY_SECRET|ALICLOUD_ACCESS_KEY_SECRET'
+    r'|ALIYUN_ACCESS_KEY_SECRET|ALIYUN_AK_SECRET|ALI_ACCESS_KEY_SECRET'
+    r'|ACCESS_KEY_SECRET|access_key_secret|accessKeySecret'
+    r'|secretAccessKey|aliyunAccessKeySecret'
+    # Chinese-language env naming patterns observed on Gitee
+    r'|阿里云密钥|访问密钥SECRET|AccessKeySecret'
+    r')'
+    r'\s*[=:]\s*["\']?([A-Za-z0-9+/=_\-]{20,80})["\']?',
     re.IGNORECASE,
 )
+# Region values only — env-name anchors removed from this regex so we don't
+# accidentally capture the variable name instead of the actual region string.
 _ALIYUN_REGION = re.compile(
-    r'(?:ALIBABA_CLOUD_REGION|ALICLOUD_REGION|cn-[a-z]+-\d|ap-[a-z]+-\d)',
+    r'\b('
+    r'cn-(?:hangzhou|shanghai|beijing|shenzhen|qingdao|zhangjiakou'
+    r'|huhehaote|chengdu|wulanchabu|guangzhou|hongkong)'
+    r'|ap-(?:southeast-[1-6]|northeast-[12]|south-1)'
+    r'|us-(?:east-1|west-1)'
+    r'|eu-(?:central-1|west-1)'
+    r'|me-east-1)\b',
+    re.IGNORECASE,
+)
+# Chinese context words that strengthen confidence — used to RAISE score
+# when a key-shape match has Chinese context near it.
+_ALIYUN_CN_CONTEXT = re.compile(
+    r'阿里云|访问密钥|密钥|接口密钥|AccessKey|aliyun|aliyuncs|oss-cn-|MaxCompute',
+    re.IGNORECASE,
+)
+# Direct "aliyun://" or "oss://" URL-style creds (rare but real)
+_ALIYUN_URL_DSN = re.compile(
+    r'(?:aliyun|oss)://([A-Za-z0-9]+):([A-Za-z0-9+/=_\-]{20,80})@'
+    r'([a-z0-9\-\.]+)',
     re.IGNORECASE,
 )
 
@@ -229,21 +353,48 @@ def extract_alibaba(content: str) -> list[str]:
     found   = []
     secrets = [(m.start(), m.group(1)) for m in _ALIYUN_SECRET.finditer(content)]
     regions = [(m.start(), m.group(0)) for m in _ALIYUN_REGION.finditer(content)]
+    has_cn_ctx = bool(_ALIYUN_CN_CONTEXT.search(content))
 
     def _nearest(pos: int, items: list[tuple]) -> str | None:
         return min(items, key=lambda t: abs(t[0] - pos))[1] if items else None
 
+    # Standard LTAI/STS keys
     for kid_m in _ALIYUN_KEY_ID.finditer(content):
         kid = kid_m.group(1)
         if _is_fake(kid):
             continue
+        # Skip raw kids in noisy contexts (logs, comments) unless CN context present
+        ctx = content[max(0, kid_m.start()-100): kid_m.end()+100]
+        if not has_cn_ctx and not _ALIYUN_CN_CONTEXT.search(ctx):
+            # No alibaba/aliyun context within 200 chars — likely false positive
+            # (LTAI in random base64). Require closer secret match.
+            if not secrets or abs(_nearest_pos(kid_m.start(), secrets)) > 1000:
+                continue
         secret = _nearest(kid_m.start(), secrets) if secrets else None
         region = _nearest(kid_m.start(), regions) if regions else "cn-unknown"
         if secret:
             found.append(f"{kid}:{secret}@{region}")
         else:
             found.append(f"{kid}:secret_unknown@{region}")
+
+    # URL-style DSNs (direct creds, no need for nearest-secret lookup)
+    for m in _ALIYUN_URL_DSN.finditer(content):
+        kid, secret, host = m.group(1), m.group(2), m.group(3)
+        if _is_fake(kid) or _is_fake(secret):
+            continue
+        # Guess region from host
+        rm = re.search(r'(cn-[a-z]+|ap-[a-z]+-\d|us-[a-z]+-\d|eu-[a-z]+-\d)', host, re.I)
+        region = rm.group(1) if rm else "cn-unknown"
+        found.append(f"{kid}:{secret}@{region}")
+
     return list(dict.fromkeys(found))
+
+
+def _nearest_pos(pos: int, items: list[tuple]) -> int:
+    """Distance to nearest item position. Empty = inf-ish."""
+    if not items:
+        return 10**9
+    return min(abs(t[0] - pos) for t in items)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -265,6 +416,26 @@ _AZURE_CLIENT_SECRET = re.compile(
     r'(?:AZURE_CLIENT_SECRET|ARM_CLIENT_SECRET)\s*[=:]\s*["\']?([A-Za-z0-9_\-~.]{30,})["\']?',
     re.IGNORECASE,
 )
+# Azure EventHub / Service Bus connection strings — high-value, often have
+# unique keys with full namespace access.
+_AZURE_EVENTHUB = re.compile(
+    r'Endpoint=sb://[^;\s"\']+;SharedAccessKeyName=[^;\s"\']+;'
+    r'SharedAccessKey=[A-Za-z0-9+/=]{30,}',
+    re.IGNORECASE,
+)
+# Azure SQL connection string
+_AZURE_SQL = re.compile(
+    r'(?:Server|Data Source)=tcp:[^;,\s"\']+\.database\.windows\.net'
+    r'[^"\']{20,}Password=[^;\s"\']+',
+    re.IGNORECASE,
+)
+# Cosmos DB connection string. Real strings: "...azure.com:443/;AccountKey=..."
+# (only 7 chars between azure.com and AccountKey).
+_AZURE_COSMOS = re.compile(
+    r'AccountEndpoint=https://[^;\s"\']+\.documents\.azure\.com'
+    r'[^"\']*?AccountKey=[A-Za-z0-9+/=]{40,}',
+    re.IGNORECASE,
+)
 
 
 def extract_azure(content: str) -> list[str]:
@@ -272,15 +443,30 @@ def extract_azure(content: str) -> list[str]:
     for m in _AZURE_CONN.finditer(content):
         val = m.group(0)
         if not _is_fake(val) and "AccountKey=" in val:
-            found.append(val[:120])
+            found.append(val[:200])
     for m in _AZURE_SAS.finditer(content):
         val = m.group(0)
         if not _is_fake(val):
-            found.append(val[:120])
+            found.append(val[:200])
     for m in _AZURE_CLIENT_SECRET.finditer(content):
         val = m.group(1)
         if not _is_fake(val):
             found.append(f"client_secret:{val}")
+    # EventHub / ServiceBus — both use SharedAccessKey
+    for m in _AZURE_EVENTHUB.finditer(content):
+        val = m.group(0)
+        if not _is_fake(val):
+            found.append(val[:300])
+    # Azure SQL connection strings
+    for m in _AZURE_SQL.finditer(content):
+        val = m.group(0)
+        if not _is_fake(val):
+            found.append(val[:300])
+    # Cosmos DB
+    for m in _AZURE_COSMOS.finditer(content):
+        val = m.group(0)
+        if not _is_fake(val):
+            found.append(val[:300])
     return list(dict.fromkeys(found))
 
 

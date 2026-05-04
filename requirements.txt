@@ -13,3 +13,4 @@ motor==3.6.0
 redis[hiredis]==5.2.1
 aiomysql==0.2.0
 python-socks[asyncio]==2.5.3
+azure-storage-blob==12.24.0

