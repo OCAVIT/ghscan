@@ -905,6 +905,43 @@ def get_axis_extensions(provider: str, axis: str | None = None) -> dict[str, lis
     return out
 
 
+def get_top_yielding_repos(days: int = 30, min_valid_keys: int = 3,
+                             limit: int = 10) -> list[dict]:
+    """Repos that leaked the most VALID keys in the last N days.
+
+    Used by archetype_miner to identify "what kind of repos are gold mines"
+    so DeepSeek can pattern-match and produce queries finding similar ones.
+    Excludes URL-style/non-github repo strings (URL-shaped) and
+    multi-platform prefixes (postman:/kaggle:/hf:/npm:/pypi:/cc:).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT repo,
+                      COUNT(*)                  as total_keys,
+                      SUM(is_valid)             as valid_keys,
+                      GROUP_CONCAT(DISTINCT provider) as providers,
+                      MAX(discovered_at)        as last_seen
+               FROM found_keys
+               WHERE discovered_at > ?
+                 AND is_valid = 1
+                 AND repo LIKE '%/%'
+                 AND repo NOT LIKE 'http%://%'
+                 AND repo NOT LIKE 'postman:%'
+                 AND repo NOT LIKE 'kaggle:%'
+                 AND repo NOT LIKE 'hf:%'
+                 AND repo NOT LIKE 'npm:%'
+                 AND repo NOT LIKE 'pypi:%'
+                 AND repo NOT LIKE 'cc:%'
+                 AND repo NOT LIKE 'infra_jackpot%'
+               GROUP BY repo
+               HAVING valid_keys >= ?
+               ORDER BY valid_keys DESC, total_keys DESC
+               LIMIT ?""",
+            (cutoff, min_valid_keys, limit),
+        ).fetchall()]
+
+
 def get_recent_valid_files(provider: str, limit: int = 20) -> list[dict]:
     """Pull recent VALID-key file metadata for the AI vocab prompt — gives
     DeepSeek real-world examples to extract new var-names/filenames from.

@@ -43,6 +43,7 @@ from tg_bot import bot_loop
 from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
 from query_themer import generate_themed_batch
 from vocab_expander import run_expansion_cycle
+from archetype_miner import run_archetype_cycle
 
 logging.basicConfig(
     level=logging.INFO,
@@ -196,6 +197,46 @@ async def _auto_jackpot_loop():
         await asyncio.sleep(3600)   # 1h
 
 
+async def _archetype_miner_loop():
+    """Archetype miner — every 24h, pattern-mine top-yield repos and ask
+    DeepSeek for similar-repo queries. Inserts into dynamic_queries with
+    theme='archetype:NAME' so yield is tracked per archetype."""
+    # Wait 6h after boot — give the scanner time to accumulate fresh
+    # validated keys for the miner to learn from
+    await asyncio.sleep(6 * 3600)
+    while True:
+        try:
+            from notifier import _send
+            result = await run_archetype_cycle()
+            if "error" in result:
+                log.warning("archetype_miner: %s", result)
+            else:
+                log.info("archetype_miner cycle: %s", {
+                    k: result[k] for k in
+                    ("archetype_count", "queries_proposed", "queries_inserted")
+                })
+                # Telegram digest
+                try:
+                    arch_lines = [
+                        f"  • {a['name']} ({a['queries_proposed']} queries)"
+                        for a in result.get("archetypes", [])[:6]
+                    ]
+                    msg = (
+                        "🧬 <b>Archetype miner cycle done</b>\n"
+                        f"Архетипов идентифицировано: {result['archetype_count']}\n"
+                        f"Сгенерировано queries: {result['queries_proposed']}\n"
+                        f"Добавлено в pool (после dedup): "
+                        f"<b>{result['queries_inserted']}</b>\n\n"
+                        + "Архетипы:\n" + "\n".join(arch_lines)
+                    )
+                    await _send(msg)
+                except Exception as e:
+                    log.error("archetype TG digest err: %s", e)
+        except Exception as e:
+            log.error("archetype_miner loop crashed: %s", e)
+        await asyncio.sleep(24 * 3600)
+
+
 async def _vocab_expander_loop():
     """
     AI vocabulary expander (Layer 2) — runs every 24h.
@@ -264,6 +305,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
         asyncio.create_task(_themer_loop(),         name="query_themer"),
         asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
+        asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
         asyncio.create_task(_auto_jackpot_loop(),   name="auto_jackpot"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
@@ -1413,6 +1455,40 @@ async def admin_purge_providers(authorization: str | None = Header(default=None)
     result = await asyncio.to_thread(_do)
     log.info("admin purge_providers: %s", result)
     return {"ok": True, "providers": list(targets), "deleted": result}
+
+
+@app.post("/admin/run_archetype_miner")
+async def admin_run_archetype_miner(authorization: str | None = Header(default=None)):
+    """Manually trigger one archetype-mining cycle (skips the 24h wait)."""
+    _check_admin(authorization)
+
+    async def _bg():
+        try:
+            from notifier import _send
+            result = await run_archetype_cycle()
+            log.info("manual archetype miner: %s", result)
+            try:
+                if "error" in result:
+                    await _send(f"🧬 archetype miner: {result.get('error')}")
+                else:
+                    arch_lines = [
+                        f"  • {a['name']} ({a['queries_proposed']} queries)"
+                        for a in result.get("archetypes", [])[:6]
+                    ]
+                    await _send(
+                        "🧬 <b>Manual archetype miner done</b>\n"
+                        f"Архетипов: {result['archetype_count']}\n"
+                        f"Queries proposed: {result['queries_proposed']}\n"
+                        f"Inserted: <b>{result['queries_inserted']}</b>\n\n"
+                        + "\n".join(arch_lines)
+                    )
+            except Exception as e:
+                log.error("archetype manual TG err: %s", e)
+        except Exception as e:
+            log.error("manual archetype miner crashed: %s", e)
+
+    asyncio.create_task(_bg(), name="manual_archetype_miner")
+    return {"ok": True, "message": "archetype miner started in background"}
 
 
 @app.post("/admin/cleanup_axes")
