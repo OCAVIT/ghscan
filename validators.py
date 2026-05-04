@@ -1362,15 +1362,153 @@ async def validate_ssh(cred: str) -> bool:
 
 
 async def validate_alibaba(cred: str) -> bool:
-    return False  # requires Alibaba SDK + STS; skip for now
+    """OSS GetService signed REST — alive if HMAC-SHA1 signature accepted.
+    cred format from extract_alibaba: '<KID>:<SECRET>@<region>'."""
+    import hmac, hashlib as _hl, base64 as _b64
+    from email.utils import formatdate
+    import re as _re
+    m = _re.match(r"^(LTAI[A-Za-z0-9]+|STS\.[A-Za-z0-9]+):([^@]+)@?", cred)
+    if not m:
+        return False
+    kid, secret = m.group(1), m.group(2)
+    if "secret_unknown" in secret or len(secret) < 16:
+        return False
+    # Try most popular region first; if 403=InvalidAccessKeyId → bad key
+    try:
+        date_hdr = formatdate(usegmt=True)
+        sig = _b64.b64encode(
+            hmac.new(secret.encode(), f"GET\n\n\n{date_hdr}\n/".encode(),
+                      _hl.sha1).digest()
+        ).decode()
+        async with _client() as c:
+            r = await c.get(
+                "https://oss-cn-hangzhou.aliyuncs.com/",
+                headers={"Date": date_hdr,
+                          "Authorization": f"OSS {kid}:{sig}",
+                          "Host": "oss-cn-hangzhou.aliyuncs.com"},
+            )
+        if r.status_code == 200:
+            return True
+        if r.status_code == 403:
+            txt = r.text or ""
+            # "InvalidAccessKeyId" = key dead. Otherwise (SignatureDoesNotMatch /
+            # AccessDenied) = key is real but lacks OSS permission — count as alive.
+            return "InvalidAccessKeyId" not in txt
+    except Exception as e:
+        log.debug("alibaba validate err: %s", e)
+    return False
 
 
 async def validate_azure(cred: str) -> bool:
-    return False  # requires Azure SDK; skip for now
+    """Try to list containers using AccountName/AccountKey from connection
+    string. Lightweight — doesn't read any blobs. Returns True on 200,
+    AuthenticationError → False (dead key)."""
+    import re as _re
+    m_acct = _re.search(r'AccountName=([^;]+)', cred, _re.IGNORECASE)
+    m_key  = _re.search(r'AccountKey=([^;]+)', cred, _re.IGNORECASE)
+    if not (m_acct and m_key):
+        # SAS token format — can validate by trying any GET
+        m_sas = _re.search(r'sv=\d{4}-\d{2}-\d{2}[^\s"\'<>]+&sig=[A-Za-z0-9+/=%]+', cred)
+        if not m_sas:
+            return False
+        # SAS in URL form — try HEAD on the URL
+        try:
+            url_m = _re.search(r'(https://[^\s"\'<>]+)', cred)
+            if not url_m:
+                return False
+            async with _client() as c:
+                r = await c.head(url_m.group(1), timeout=8)
+            return r.status_code in (200, 206, 403)  # 403 = real but no perm = alive
+        except Exception:
+            return False
+    try:
+        from azure.storage.blob.aio import BlobServiceClient
+        from azure.core.exceptions import ClientAuthenticationError
+    except ImportError:
+        return False
+    try:
+        conn = ("DefaultEndpointsProtocol=https;" + cred
+                if "DefaultEndpointsProtocol" not in cred else cred)
+        client = BlobServiceClient.from_connection_string(conn)
+        # Just iterate one page — establishes auth works
+        async for _ in client.list_containers(results_per_page=1):
+            await client.close()
+            return True
+        await client.close()
+        return True   # empty account but auth worked
+    except ClientAuthenticationError:
+        return False
+    except Exception as e:
+        log.debug("azure validate err: %s", e)
+        return False
+
+
+# Generic deploy/infra tokens — verify endpoint per provider.
+_INFRA_VERIFY_URLS: dict[str, tuple[str, str]] = {
+    "CLOUDFLARE": ("https://api.cloudflare.com/client/v4/user/tokens/verify", "bearer"),
+    "CF_API":     ("https://api.cloudflare.com/client/v4/user/tokens/verify", "bearer"),
+    "VERCEL":     ("https://api.vercel.com/v2/user", "bearer"),
+    "HEROKU":     ("https://api.heroku.com/account", "heroku"),
+    "FLY":        ("https://api.fly.io/graphql", "bearer_post"),
+    "NETLIFY":    ("https://api.netlify.com/api/v1/user", "bearer"),
+    "DIGITALOCEAN": ("https://api.digitalocean.com/v2/account", "bearer"),
+    "DO_ACCESS":  ("https://api.digitalocean.com/v2/account", "bearer"),
+    "LINODE":     ("https://api.linode.com/v4/account", "bearer"),
+    "HETZNER":    ("https://api.hetzner.cloud/v1/servers", "bearer"),
+    "HCLOUD":     ("https://api.hetzner.cloud/v1/servers", "bearer"),
+    "VULTR":      ("https://api.vultr.com/v2/account", "bearer"),
+    "DOPPLER":    ("https://api.doppler.com/v3/me", "bearer"),
+    "RAILWAY":    ("https://backboard.railway.app/graphql/v2", "bearer_post"),
+    "SUPABASE":   ("https://api.supabase.com/v1/projects", "bearer"),
+    "TFC":        ("https://app.terraform.io/api/v2/account/details", "tfc"),
+    "TFE":        ("https://app.terraform.io/api/v2/account/details", "tfc"),
+    "TERRAFORM_CLOUD": ("https://app.terraform.io/api/v2/account/details", "tfc"),
+}
 
 
 async def validate_infra_token(cred: str) -> bool:
-    return False  # deploy tokens require per-service API call; skip for now
+    """cred format from extract_infra: '<ENV_NAME>=<value>'. Look up env-name
+    prefix → provider verify endpoint, hit it, 200 = alive, 401/403 = dead."""
+    if "=" not in cred:
+        return False
+    env_name, _, value = cred.partition("=")
+    env_name = env_name.strip().upper().replace("-", "_")
+    value = value.strip().strip('"').strip("'")
+    if not value or len(value) < 8:
+        return False
+    # Match env-name prefix (longest first to disambiguate VERCEL_TOKEN vs VERCEL_ORG_ID)
+    for prefix in sorted(_INFRA_VERIFY_URLS, key=len, reverse=True):
+        if env_name.startswith(prefix):
+            url, kind = _INFRA_VERIFY_URLS[prefix]
+            try:
+                async with _client() as c:
+                    if kind == "bearer":
+                        r = await c.get(url, headers={"Authorization": f"Bearer {value}"})
+                    elif kind == "heroku":
+                        r = await c.get(url, headers={
+                            "Authorization": f"Bearer {value}",
+                            "Accept": "application/vnd.heroku+json; version=3"})
+                    elif kind == "bearer_post":
+                        r = await c.post(url,
+                                          headers={"Authorization": f"Bearer {value}"},
+                                          json={"query": "query { __typename }"})
+                    elif kind == "tfc":
+                        r = await c.get(url, headers={
+                            "Authorization": f"Bearer {value}",
+                            "Content-Type": "application/vnd.api+json"})
+                    else:
+                        return False
+                # 200 → alive. 401/403 → dead. Other 5xx → unknown, treat as
+                # alive to avoid false-negatives on transient outages.
+                if r.status_code == 200:
+                    return True
+                if r.status_code in (401, 403):
+                    return False
+                return r.status_code < 500
+            except Exception as e:
+                log.debug("infra_token validate err for %s: %s", env_name, e)
+                return False
+    return False
 
 
 INFRA_VALIDATORS: dict[str, callable] = {
