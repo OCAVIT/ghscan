@@ -30,6 +30,7 @@ import db
 from config import (
     GITHUB_TOKENS, YOUNG_REPO_DAYS, BIG_SERVICE_STARS,
     CONCURRENT_ITEMS, MAX_PAGES,
+    SCAN_MAX_QUERIES_PER_CYCLE, SCAN_LONG_TAIL_SAMPLE, SCAN_PAGE_SLEEP_SEC,
 )
 from patterns import QUERIES, EXTRACTORS, is_skippable_path, AI_TRIGGER, INFRA_TRIGGER
 from deobfuscate import expand as _deobf_expand
@@ -63,6 +64,97 @@ def get_active_queries() -> list[tuple]:
     except Exception as e:
         log.error("get_active_queries: failed to load dynamic queries: %s", e)
     return out
+
+
+def select_queries_for_cycle(max_queries: int = SCAN_MAX_QUERIES_PER_CYCLE,
+                              long_tail_sample: float = SCAN_LONG_TAIL_SAMPLE
+                              ) -> list[tuple]:
+    """Yield-priority sampling for one cycle's dispatch.
+
+    Always include (mandatory portion):
+      • All 1562 static QUERIES (proven baseline, never sample)
+      • Dynamic queries with valid_keys_found > 0 (proven yielders)
+      • Dynamic queries with times_used < 3 (newcomers — give them a chance
+        before yield-tracker decides their fate)
+
+    From the remainder (dynamic, times_used >= 3, valid_keys_found = 0,
+    keys_found may or may not be 0), randomly sample `long_tail_sample`
+    fraction. Across ~4 cycles each long-tail query gets at least one turn;
+    if 5+ uses still produce 0 keys, auto_blacklist_dead_queries pulls them
+    out for 30 days.
+
+    Total cap: max_queries (0 = disabled, fall back to full list).
+
+    Returns 4-tuples (query_str, provider, file_type, query_hash) shuffled
+    so workers don't all hammer the same provider in lockstep.
+    """
+    static_part: list[tuple] = [
+        (q[0], q[1], q[2], None) for q in QUERIES
+    ]
+
+    try:
+        dyn_rows = db.get_active_dynamic_queries(max_age_days=15)
+    except Exception as e:
+        log.error("select_queries_for_cycle: dyn fetch failed: %s — running static only", e)
+        return static_part
+
+    yielders:  list[dict] = []
+    newcomers: list[dict] = []
+    long_tail: list[dict] = []
+    for r in dyn_rows:
+        if r["valid_keys_found"] > 0:
+            yielders.append(r)
+        elif r["times_used"] < 3:
+            newcomers.append(r)
+        else:
+            long_tail.append(r)
+
+    # Mandatory dynamic portion
+    mandatory_dyn = yielders + newcomers
+    # Sample from long-tail
+    sample_n = int(len(long_tail) * max(0.0, min(1.0, long_tail_sample)))
+    sampled = random.sample(long_tail, sample_n) if sample_n else []
+
+    dyn_part: list[tuple] = [
+        (r["query_str"], r["provider"], r["file_type"], r["query_hash"])
+        for r in mandatory_dyn + sampled
+    ]
+
+    combined = static_part + dyn_part
+
+    if max_queries and len(combined) > max_queries:
+        # Over budget: keep ALL static (baseline), fit as many yielders
+        # as possible, then newcomers, then sampled long-tail. Cut the
+        # rest. Static portion is sacrosanct — the existing 196 valid/24h
+        # baseline is built on it.
+        budget = max_queries - len(static_part)
+        if budget <= 0:
+            log.warning(
+                "select_queries: static (%d) exceeds cap (%d) — running static only",
+                len(static_part), max_queries,
+            )
+            return static_part
+        ranked: list[tuple] = (
+            [(r["query_str"], r["provider"], r["file_type"], r["query_hash"])
+             for r in yielders]
+            + [(r["query_str"], r["provider"], r["file_type"], r["query_hash"])
+               for r in newcomers]
+            + [(r["query_str"], r["provider"], r["file_type"], r["query_hash"])
+               for r in sampled]
+        )[:budget]
+        combined = static_part + ranked
+
+    log.info(
+        "select_queries: %d total = %d static + %d dyn "
+        "(%d yielders + %d newcomers + %d sampled from %d long-tail; cap=%d)",
+        len(combined), len(static_part), len(combined) - len(static_part),
+        len(yielders), len(newcomers), len(sampled), len(long_tail),
+        max_queries,
+    )
+
+    # Shuffle so chunks don't cluster all of one provider on one worker
+    random.shuffle(combined)
+    return combined
 
 
 # ── Token health tracking ──────────────────────────────────────────────────────
@@ -712,7 +804,7 @@ async def _run_chunk(client: httpx.AsyncClient,
             if len(items) < 100:
                 break
 
-            await asyncio.sleep(2)  # between pages — secondary rate-limit buffer
+            await asyncio.sleep(SCAN_PAGE_SLEEP_SEC)  # between pages — secondary rate-limit buffer
 
         # Yield-tracking: only for dynamic queries (those with a hash).
         # Δ-based attribution is approximate (other workers may insert keys
@@ -748,9 +840,10 @@ async def _run_chunk(client: httpx.AsyncClient,
 
 async def run_cycle():
     n = len(GITHUB_TOKENS)
-    # Resolve the active query list FRESH each cycle so freshly-generated
-    # dynamic queries from the 8h rotation/themer loops show up immediately.
-    all_queries = get_active_queries()
+    # Yield-priority selection — caps the cycle at SCAN_MAX_QUERIES_PER_CYCLE
+    # so we don't drown in secondary 429s. Always includes all static QUERIES
+    # + dynamic yielders + newcomers; samples long-tail.
+    all_queries = select_queries_for_cycle()
     static_n  = sum(1 for q in all_queries if len(q) == 4 and q[3] is None)
     dynamic_n = len(all_queries) - static_n
     chunks: list[list] = [[] for _ in range(n)]

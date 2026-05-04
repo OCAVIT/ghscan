@@ -39,6 +39,25 @@ CONCURRENT_ITEMS  = int(os.environ.get("CONCURRENT_ITEMS",  "20"))    # parallel
 MAX_PAGES         = int(os.environ.get("MAX_PAGES",          "5"))     # pages per query (100 results each)
 HOURLY_ALERT      = os.environ.get("HOURLY_ALERT", "1") == "1"
 
+# Cap on how many queries one cycle is allowed to dispatch. With dynamic
+# pool growing to ~6300 + 1562 static, running everything every cycle on
+# 9 PATs × MAX_PAGES results in 4-hour cycles + heavy secondary 429.
+# yield-priority selection (scanner.select_queries_for_cycle) honors this
+# cap, always including the static baseline + proven yielders + newcomers,
+# and sampling the long-tail. Set to 0 to disable cap (run everything).
+SCAN_MAX_QUERIES_PER_CYCLE = int(os.environ.get("SCAN_MAX_QUERIES_PER_CYCLE", "3000"))
+
+# Sample fraction of low-yield long-tail dynamic queries each cycle (after
+# the mandatory portion). 0.25 = pick 1 in 4. Across ~4 cycles each long-tail
+# query gets a turn; if it stays at 0 yield it falls into auto_blacklist
+# territory (5+ uses, 0 keys → 30d cooldown).
+SCAN_LONG_TAIL_SAMPLE = float(os.environ.get("SCAN_LONG_TAIL_SAMPLE", "0.25"))
+
+# Between-page sleep inside _run_chunk. 2s was tuned for 1562 static queries;
+# now we have 4x the load. Bump default to 3s — drops secondary 429 burst
+# rate without meaningfully extending elapsed cycle time.
+SCAN_PAGE_SLEEP_SEC = float(os.environ.get("SCAN_PAGE_SLEEP_SEC", "3"))
+
 # ── DB maintenance ─────────────────────────────────────────────────────────
 # Low-risk infra findings older than this many days are pruned automatically.
 INFRA_LOW_RISK_MAX_DAYS = int(os.environ.get("INFRA_LOW_RISK_MAX_DAYS", "30"))
