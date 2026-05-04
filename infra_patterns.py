@@ -438,12 +438,34 @@ _AZURE_COSMOS = re.compile(
 )
 
 
+def _azure_is_real_conn(conn: str) -> bool:
+    """Reject extracted Azure conn-strings that are obviously placeholder/regex."""
+    # Regex source detection (someone leaked their parser source code)
+    if "[A-Za-z" in conn or "[0-9]" in conn or "{40," in conn or "[a-z]" in conn:
+        return False
+    # AccountKey value should be base64 ~ 88 chars usually. <50 = placeholder.
+    m = re.search(r'AccountKey=([^;\s"\']+)', conn, re.IGNORECASE)
+    if m:
+        key = m.group(1)
+        if len(key) < 50 or _PLACEHOLDER_WORDS.search(key) or _VALUE_IS_ENV_NAME.match(key):
+            return False
+    # AccountName placeholder words
+    m = re.search(r'AccountName=([^;\s"\']+)', conn, re.IGNORECASE)
+    if m:
+        name = m.group(1).lower()
+        if name in ("myaccount", "your-account", "your_account", "youraccount",
+                    "storage", "test", "demo", "example", "myaccountname",
+                    "seu-storage", "su-storage", "tu-storage"):
+            return False
+    return True
+
+
 def extract_azure(content: str) -> list[str]:
     found = []
     for m in _AZURE_CONN.finditer(content):
         val = m.group(0)
-        if not _is_fake(val) and "AccountKey=" in val:
-            found.append(val[:200])
+        if not _is_fake(val) and "AccountKey=" in val and _azure_is_real_conn(val):
+            found.append(val[:300])
     for m in _AZURE_SAS.finditer(content):
         val = m.group(0)
         if not _is_fake(val):
@@ -518,12 +540,34 @@ _INFRA_TOKENS = re.compile(
 )
 
 
+# Reject token-values that are themselves env-var names — common placeholder
+# pattern: `CF_API_TOKEN=CF_TUNNEL_TOKEN`, `CLOUDFLARE_API_TOKEN=ELEVENLABS_API_KEY`.
+_VALUE_IS_ENV_NAME = re.compile(r'^[A-Z][A-Z0-9_]{4,}$')
+# Reject obviously-placeholder words (Portuguese / English) that snuck past _is_fake.
+_PLACEHOLDER_WORDS = re.compile(
+    r'(?i)(?:^|[\s_\-])(?:'
+    r'sua[_\-]?key|seu[_\-]?(?:storage|key)|tu[_\-]?clave'
+    r'|optional|fallback|tunnel|migration|legacy|prod[_\-]?placeholder'
+    r'|do[_\-]?not[_\-]?use|will[_\-]?be|todo|fixme|tbd'
+    r')(?:[\s_\-]|$)',
+)
+
+
 def extract_infra(content: str) -> list[str]:
     found = []
     for m in _INFRA_TOKENS.finditer(content):
         env_name = m.group(0).split("=")[0].split(":")[0].strip()
         val = m.group(1).strip("\"' ")
         if len(val) < 10 or _is_fake(val):
+            continue
+        # Skip if value is itself an UPPERCASE env-var name (placeholder pattern)
+        if _VALUE_IS_ENV_NAME.match(val):
+            continue
+        # Reject documented placeholder words
+        if _PLACEHOLDER_WORDS.search(val):
+            continue
+        # Reject if value contains regex source code (literal char-class)
+        if "[" in val and "]" in val and ("A-Z" in val or "0-9" in val or "a-z" in val):
             continue
         found.append(f"{env_name}={val}")
     return list(dict.fromkeys(found))
