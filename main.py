@@ -1457,6 +1457,40 @@ async def admin_purge_providers(authorization: str | None = Header(default=None)
     return {"ok": True, "providers": list(targets), "deleted": result}
 
 
+@app.get("/admin/dynamic_queries_stats")
+async def admin_dynamic_queries_stats(authorization: str | None = Header(default=None)):
+    """Inspect dynamic_queries pool: count by theme, recent inserts, sample
+    high-yielding queries. Used for verifying archetype miner output."""
+    _check_admin(authorization)
+    import sqlite3
+    from collections import Counter
+    out: dict = {}
+    with sqlite3.connect(DB_PATH) as c:
+        c.row_factory = sqlite3.Row
+        out["total"] = c.execute("SELECT COUNT(*) FROM dynamic_queries").fetchone()[0]
+        out["by_theme_top20"] = [
+            {"theme": r["theme"], "count": r["c"], "yielding": r["y"]}
+            for r in c.execute(
+                "SELECT theme, COUNT(*) as c, SUM(CASE WHEN keys_found>0 THEN 1 ELSE 0 END) as y "
+                "FROM dynamic_queries GROUP BY theme ORDER BY c DESC LIMIT 20"
+            ).fetchall()
+        ]
+        # Recent archetype:* inserts
+        out["recent_archetypes"] = [
+            {"theme": r["theme"], "query_str": r["query_str"][:120],
+             "generated_at": r["generated_at"]}
+            for r in c.execute(
+                "SELECT theme, query_str, generated_at FROM dynamic_queries "
+                "WHERE theme LIKE 'archetype:%' "
+                "ORDER BY generated_at DESC LIMIT 30"
+            ).fetchall()
+        ]
+        out["archetype_count"] = c.execute(
+            "SELECT COUNT(*) FROM dynamic_queries WHERE theme LIKE 'archetype:%'"
+        ).fetchone()[0]
+    return out
+
+
 @app.post("/admin/run_archetype_miner")
 async def admin_run_archetype_miner(authorization: str | None = Header(default=None)):
     """Manually trigger one archetype-mining cycle (skips the 24h wait)."""
