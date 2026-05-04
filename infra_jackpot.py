@@ -62,8 +62,6 @@ _KEY_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'sk-ant-api03-[A-Za-z0-9_\-]{90,130}'),  'anthropic'),
     (re.compile(r'sk-or-v1-[a-f0-9]{64}'),                'openrouter'),
     (re.compile(r'AIzaSy[A-Za-z0-9_\-]{33}'),             'google'),
-    (re.compile(r'(?<![A-Za-z0-9])csk-[a-f0-9]{40}'),     'cerebras'),
-    (re.compile(r'(?<![A-Za-z0-9_])gsk_[A-Za-z0-9]{50,60}'), 'groq'),
     (re.compile(r'(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{34,50}'), 'huggingface'),
     (re.compile(r'(?<![A-Za-z0-9_\-])xai-[A-Za-z0-9]{60,90}'), 'grok'),
     (re.compile(r'(?<![A-Za-z0-9])pplx-[a-f0-9]{48,64}'), 'perplexity'),
@@ -137,9 +135,7 @@ _KEY_VALUE_USD: dict[str, int] = {
     "anthropic":           500,   # claude-opus prod usage
     "google":              100,   # gemini paid; free tier has hard quota
     "openrouter":          200,
-    "cerebras":            150,
     "deepseek":             80,
-    "groq":                 50,
     "huggingface":          80,
     "grok":                150,
     "perplexity":           50,

@@ -70,15 +70,10 @@ _QUERIES: list[str] = [
     # Common integration patterns
     "langchain openai api key",
     "openai api key tutorial",
-    "groq llama api",
-    "together ai api",
-    "cerebras inference api",
     "huggingface inference api token",
     "replicate api python",
-    "mistral api key python",
     "fireworks ai python",
     "openrouter api",
-    "cohere api key",
     # Notebook title patterns where devs often hardcode
     "llm api keys notebook",
     "ai provider api",

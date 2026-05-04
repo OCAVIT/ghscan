@@ -86,15 +86,10 @@ _PROVIDER_EMOJI = {
     "glm":           "💜",
     "kling":         "🎞️",
     "runway":        "✈️",
-    "together":      "🤝",
     "perplexity":    "🔮",
     "huggingface":   "🤗",
-    "groq":          "⚡",
     "fireworks":     "🎆",
     "openrouter":    "🔀",
-    "mistral":       "🌬️",
-    "cohere":        "🌊",
-    "cerebras":      "🧠",
 }
 
 _CRED_EMOJI = {

@@ -109,8 +109,6 @@ _SEARCH_QUERIES: list[str] = [
     "google-genai",
     "gemini-pro",
     # Other frequent leakers
-    "groq-sdk",
-    "together-ai",
     "perplexity-api",
     "replicate-api",
     "huggingface-inference",

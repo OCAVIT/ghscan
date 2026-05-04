@@ -1375,6 +1375,46 @@ async def admin_cleanup_authors(authorization: str | None = Header(default=None)
     return {"ok": True, **result}
 
 
+@app.post("/admin/purge_providers")
+async def admin_purge_providers(authorization: str | None = Header(default=None)):
+    """One-time purge of providers we've decided not to track:
+    cerebras, groq, mistral, cohere, together. Removes from found_keys
+    AND axis_extensions AND dynamic_queries (where provider matches).
+    Safe to run multiple times — idempotent."""
+    _check_admin(authorization)
+    targets = ("cerebras", "groq", "mistral", "cohere", "together")
+    placeholders = ",".join("?" for _ in targets)
+
+    def _do() -> dict:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            counts = {}
+            for table, col in (
+                ("found_keys",       "provider"),
+                ("axis_extensions",  "provider"),
+                ("dynamic_queries",  "provider"),
+            ):
+                pre = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {col} IN ({placeholders})",
+                    targets,
+                ).fetchone()[0]
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {col} IN ({placeholders})",
+                    targets,
+                )
+                counts[table] = pre
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return counts
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(_do)
+    log.info("admin purge_providers: %s", result)
+    return {"ok": True, "providers": list(targets), "deleted": result}
+
+
 @app.post("/admin/cleanup_axes")
 async def admin_cleanup_axes(authorization: str | None = Header(default=None)):
     """One-time cleanup — reapply the current vocab_expander filter to
