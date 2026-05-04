@@ -136,7 +136,15 @@ THEMES (mix freely — do NOT cluster all queries on one theme):
      "API_키"  (kr)
 
   4. RECENT PUSHES — pushed:>{today[:8]}25 (or earlier in last 30 days)
-     and created:>{today[:7]}-01 for fresh repos
+     and created:>{today[:7]}-01 for fresh repos.
+
+     CRITICAL: For openai / anthropic / suno / perplexity / huggingface /
+     google — these providers REVOKE leaked keys within 24h via GitHub
+     Secret Scanning Partner Program. ALWAYS attach pushed:>YYYY-MM-DD
+     where YYYY-MM-DD is yesterday. Without this clause, queries against
+     these providers waste budget on guaranteed-revoked keys. Aim for
+     5-8 of your queries to specifically target the 24h pre-revoke race
+     window for these providers.
 
   5. SIZE BUCKETS to bypass 1000-result cap on broad queries:
      size:<2000  size:2000..5000  size:>5000

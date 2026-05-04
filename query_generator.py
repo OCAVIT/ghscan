@@ -196,11 +196,38 @@ _THEMES = [
     "ctx_file", "ctx_lang", "ctx_env",
 ]
 
+# Providers that are part of GitHub Secret Scanning Partner Program.
+# Their leaked keys get auto-revoked within 24h. To stand a chance of
+# catching live ones we MUST attach pushed:>(yesterday) and bias toward
+# fresh-indexed content.
+_SS_PARTNER_PROVIDERS = {
+    "anthropic", "openai", "openai_image", "google",   # confirmed in program
+    "suno", "perplexity", "huggingface",                # in program
+    "fireworks",                                         # uncertain but treated similarly
+}
 
-def _maybe_add_modifier(query: str, rnd: random.Random) -> tuple[str, str]:
-    """50/50 chance to append a time-window OR size-bucket modifier. Returns
-    (modified_query, theme_suffix) — suffix is appended to the theme tag for
-    telemetry so we can tell which modifier-class was applied."""
+
+def _maybe_add_modifier(query: str, rnd: random.Random,
+                        provider: str = "") -> tuple[str, str]:
+    """Roll for time-window or size-bucket modifier.
+
+    For SS-Partner-Program providers (anthropic/openai/suno/perplexity/etc),
+    auto-revoke happens within 24h. We FORCE pushed:>(yesterday) on these
+    queries — without that they'd waste rate-limit on guaranteed-revoked
+    keys. The 24h-window catches keys in the pre-revoke race.
+    """
+    if provider in _SS_PARTNER_PROVIDERS:
+        # Always attach the freshest-possible time window
+        days = rnd.choice([1, 2, 3])    # 1-3 days back
+        qual = "pushed:>"
+        modifier = f"{qual}{_fmt_date(days)}"
+        # 30% also add a size bucket to bypass 1000-result cap on broad
+        # queries when the time-window doesn't narrow enough
+        if rnd.random() < 0.3:
+            modifier = f"{modifier} {rnd.choice(SIZE_BUCKETS)}"
+            return f"{query} {modifier}", "+time-revoke-race+size"
+        return f"{query} {modifier}", "+time-revoke-race"
+
     roll = rnd.random()
     if roll < 0.40:
         # Time window — pushed:>YYYY-MM-DD or created:>YYYY-MM-DD
@@ -266,8 +293,8 @@ def generate_batch(batch_size: int = BATCH_SIZE, seed: int | None = None) -> int
                 if built is None:
                     continue
                 query, file_type = built
-                # 50/50 modifier
-                query, mod_suffix = _maybe_add_modifier(query, rnd)
+                # 50/50 modifier (forced to pushed:>recent for SS-Partner providers)
+                query, mod_suffix = _maybe_add_modifier(query, rnd, provider=prov)
                 # Length guard
                 if len(query) > _QUERY_LEN_CAP:
                     continue

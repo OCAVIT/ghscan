@@ -40,6 +40,7 @@ from pypi_scanner import pypi_loop
 from commoncrawl_scanner import cc_loop
 from author_scanner import author_walk_loop, walk_one_author, run_author_cycle
 from tg_bot import bot_loop
+from issues_scanner import issues_loop
 from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
 from query_themer import generate_themed_batch
 from vocab_expander import run_expansion_cycle
@@ -307,6 +308,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
         asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
         asyncio.create_task(_auto_jackpot_loop(),   name="auto_jackpot"),
+        asyncio.create_task(issues_loop(),          name="issues_scanner"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield

