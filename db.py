@@ -164,6 +164,16 @@ def init_db():
                 c.execute(f"ALTER TABLE found_keys ADD COLUMN {col} {defn}")
             except Exception:
                 pass
+        # infra_findings migrations
+        for col, defn in [
+            ("jackpot_data",  "TEXT DEFAULT NULL"),   # JSON: per-probe loot inventory
+            ("jackpot_score", "INTEGER DEFAULT 0"),   # 0-100, set by /admin/jackpot_probe
+            ("connect_route", "TEXT DEFAULT ''"),     # 'direct' | 'proxy:US' | 'proxy:DE' etc
+        ]:
+            try:
+                c.execute(f"ALTER TABLE infra_findings ADD COLUMN {col} {defn}")
+            except Exception:
+                pass
 
 
 def _now():

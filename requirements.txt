@@ -5,3 +5,10 @@ boto3==1.38.14
 cryptography==44.0.3
 PyJWT==2.10.1
 kaggle>=2.1.0
+
+# Infra jackpot probe — active discovery of API keys hidden inside reachable
+# databases / cloud services. Used by /admin/jackpot_probe.
+asyncpg==0.30.0
+motor==3.6.0
+redis[hiredis]==5.2.1
+python-socks[asyncio]==2.5.3
