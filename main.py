@@ -40,6 +40,9 @@ from pypi_scanner import pypi_loop
 from commoncrawl_scanner import cc_loop
 from author_scanner import author_walk_loop, walk_one_author, run_author_cycle
 from tg_bot import bot_loop
+from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
+from query_themer import generate_themed_batch
+from vocab_expander import run_expansion_cycle
 
 logging.basicConfig(
     level=logging.INFO,
@@ -112,6 +115,77 @@ async def _flush_loop():
             log.error("flush loop err: %s", e)
 
 
+async def _query_rotation_loop():
+    """
+    Combinatorial query generator (Layer 1) — runs every 8h.
+
+    Cheap deterministic Cartesian-product over PROVIDER_AXES + global axes
+    (filenames × languages × time-windows × size-buckets). 15-day non-repeat
+    enforced by db.get_recent_query_hashes pre-filter. Auto-blacklists
+    queries with 5+ uses and zero yield (30d cooldown).
+    """
+    # Stagger initial run so we don't slam DB during boot — wait 5 min so
+    # the scanner has time to warm caches and the first cycle is underway.
+    await asyncio.sleep(300)
+    while True:
+        try:
+            inserted = await asyncio.to_thread(generate_combo_batch)
+            blacklisted = await asyncio.to_thread(auto_blacklist_dead)
+            log.info("query_rotation: +%d combo queries | %d auto-blacklisted",
+                     inserted, blacklisted)
+        except Exception as e:
+            log.error("query_rotation crashed: %s", e)
+        await asyncio.sleep(8 * 3600)   # 8h
+
+
+async def _themer_loop():
+    """
+    DeepSeek-driven creative query generator (Layer 3) — runs every 8h.
+
+    Produces ~25 highly-targeted queries per batch using the model's
+    knowledge of new model releases, geo-linguistic patterns, niche file
+    types, and yield-feedback from prior batches. Uses valid DeepSeek keys
+    from our own DB with auto-rotation on 401/402.
+
+    Local probe verified: deepseek-v4-pro effort=max produces juice
+    (multi-provider OR-combos, Chinese 密钥, .cursor/mcp.json, claude-opus-4
+    model anchors). Each batch takes 4-7 min and ~$0.015.
+    """
+    # Stagger 4h offset from the combinatorial loop so they don't slam
+    # the DB / network simultaneously.
+    await asyncio.sleep(4 * 3600)
+    while True:
+        try:
+            inserted = await generate_themed_batch()
+            log.info("themer: +%d themed queries inserted", inserted)
+        except Exception as e:
+            log.error("themer crashed: %s", e)
+        await asyncio.sleep(8 * 3600)   # 8h
+
+
+async def _vocab_expander_loop():
+    """
+    AI vocabulary expander (Layer 2) — runs every 24h.
+
+    For each provider with valid keys in DB, fetches up to 20 recent
+    valid-key files, sends them to DeepSeek with a structured extraction
+    prompt, and writes new env_names / filenames / context_words to
+    axis_extensions. Picked up automatically by the next combinatorial
+    generator cycle — no code changes needed when DeepSeek discovers a
+    new naming convention in real leaked files.
+    """
+    # Wait 1h after boot so vocab discovery has fresh data to chew on
+    # (initial scan should yield some valid keys by then).
+    await asyncio.sleep(3600)
+    while True:
+        try:
+            summary = await run_expansion_cycle()
+            log.info("vocab_expander: %s", summary)
+        except Exception as e:
+            log.error("vocab_expander crashed: %s", e)
+        await asyncio.sleep(24 * 3600)   # 24h
+
+
 async def _hourly_alert_loop():
     if not HOURLY_ALERT:
         return
@@ -154,6 +228,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
         asyncio.create_task(cc_loop(),              name="commoncrawl_scanner"),
         asyncio.create_task(author_walk_loop(),     name="author_walk"),
+        asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
+        asyncio.create_task(_themer_loop(),         name="query_themer"),
+        asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield

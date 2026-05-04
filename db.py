@@ -108,6 +108,44 @@ def init_db():
             keys_found     INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_treewalk_at ON tree_walked_repos(walked_at DESC);
+
+        -- Dynamic AI/combinatorial queries — rotating pool generated every 8h.
+        -- 15-day non-repeat is enforced at insert time via query_hash dedup.
+        -- Per-query yield is tracked so the generator can prioritize productive
+        -- patterns and blacklist mutational dead-ends.
+        CREATE TABLE IF NOT EXISTS dynamic_queries (
+            query_hash        TEXT PRIMARY KEY,
+            query_str         TEXT NOT NULL,
+            provider          TEXT NOT NULL,
+            file_type         TEXT NOT NULL,
+            theme             TEXT DEFAULT '',
+            generated_at      TEXT NOT NULL,
+            last_used_at      TEXT,
+            times_used        INTEGER DEFAULT 0,
+            items_returned    INTEGER DEFAULT 0,
+            keys_found        INTEGER DEFAULT 0,
+            valid_keys_found  INTEGER DEFAULT 0,
+            blacklisted_until TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dq_provider_gen ON dynamic_queries(provider, generated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_dq_yield        ON dynamic_queries(valid_keys_found DESC, keys_found DESC);
+        CREATE INDEX IF NOT EXISTS idx_dq_active       ON dynamic_queries(blacklisted_until, generated_at DESC);
+
+        -- Axis extensions discovered by the AI vocabulary expander.
+        -- The combinatorial generator merges these on top of the static
+        -- PROVIDER_AXES dict in query_axes.py — so DeepSeek-discovered names
+        -- enter rotation on the next generator cycle without code changes.
+        CREATE TABLE IF NOT EXISTS axis_extensions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider      TEXT NOT NULL,
+            axis          TEXT NOT NULL,
+            value         TEXT NOT NULL,
+            discovered_at TEXT NOT NULL,
+            times_used    INTEGER DEFAULT 0,
+            keys_found    INTEGER DEFAULT 0,
+            UNIQUE(provider, axis, value)
+        );
+        CREATE INDEX IF NOT EXISTS idx_axis_prov ON axis_extensions(provider, axis);
         """)
         # Migrations — add columns if they don't exist yet (idempotent)
         for col, defn in [
@@ -597,4 +635,228 @@ def get_infra_since(since_iso: str) -> list[dict]:
             "FROM infra_findings WHERE discovered_at > ? "
             "GROUP BY cred_type ORDER BY cnt DESC",
             (since_iso,)
+        ).fetchall()]
+
+
+# ── Dynamic queries (rotating combinatorial pool) ─────────────────────────
+
+def _query_hash(query_str: str) -> str:
+    """Normalize whitespace and sha256 — the dedup primitive for 15-day non-repeat."""
+    norm = " ".join(query_str.split())
+    return hashlib.sha256(norm.encode()).hexdigest()
+
+
+def get_recent_query_hashes(days: int = 15) -> set[str]:
+    """All query hashes generated within the last N days. Generator filters
+    candidates against this set BEFORE attempting insert — guarantees no
+    repeat within the window even if the same combinatorial cell is hit
+    twice by different theme batches."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT query_hash FROM dynamic_queries WHERE generated_at > ?",
+            (cutoff,),
+        ).fetchall()
+    return {r["query_hash"] for r in rows}
+
+
+def register_dynamic_queries(items: list[dict]) -> int:
+    """Bulk insert generated queries. items: [{query_str, provider, file_type, theme}]
+    Returns count of NEW rows inserted (duplicates are silently ignored via
+    INSERT OR IGNORE — caller already pre-filtered against recent hashes,
+    but this is a belt-and-suspenders guard against races)."""
+    if not items:
+        return 0
+    now = _now()
+    rows = []
+    for it in items:
+        q  = it["query_str"]
+        h  = _query_hash(q)
+        rows.append((
+            h, q, it["provider"], it["file_type"],
+            it.get("theme", ""), now,
+        ))
+    with _conn() as c:
+        cur = c.executemany(
+            """INSERT OR IGNORE INTO dynamic_queries
+                 (query_hash, query_str, provider, file_type, theme, generated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        return cur.rowcount
+
+
+def get_active_dynamic_queries(max_age_days: int = 15) -> list[dict]:
+    """Return queries generated within the window AND not currently blacklisted.
+    Each row carries query_hash so the scanner can call record_query_usage()
+    afterwards to attribute yield. Blacklist auto-expires when blacklisted_until
+    passes — we filter `>= now` so expired blacklists return to rotation."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    now = _now()
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT query_hash, query_str, provider, file_type, theme,
+                      times_used, items_returned, keys_found, valid_keys_found
+               FROM dynamic_queries
+               WHERE generated_at > ?
+                 AND (blacklisted_until IS NULL OR blacklisted_until < ?)
+               ORDER BY valid_keys_found DESC, generated_at DESC""",
+            (cutoff, now),
+        ).fetchall()]
+
+
+def record_query_usage(query_hash: str, items_returned: int = 0,
+                       keys_found: int = 0, valid_keys_found: int = 0) -> None:
+    """Per-cycle counter increment. Called by scanner after each query is
+    exhausted (all pages walked). Static QUERIES skip this entirely
+    (their hash isn't in the table — UPDATE is a no-op)."""
+    if not query_hash:
+        return
+    now = _now()
+    with _conn() as c:
+        c.execute(
+            """UPDATE dynamic_queries
+               SET times_used       = times_used + 1,
+                   last_used_at     = ?,
+                   items_returned   = items_returned + ?,
+                   keys_found       = keys_found + ?,
+                   valid_keys_found = valid_keys_found + ?
+               WHERE query_hash = ?""",
+            (now, items_returned, keys_found, valid_keys_found, query_hash),
+        )
+
+
+def auto_blacklist_dead_queries(min_uses: int = 5, blacklist_days: int = 30) -> int:
+    """Blacklist queries that have been run >= min_uses times AND found zero
+    keys. Skipped for `blacklist_days` then auto-returned to rotation by
+    get_active_dynamic_queries (blacklisted_until < now)."""
+    cutoff = (datetime.now(timezone.utc) + timedelta(days=blacklist_days)).isoformat()
+    with _conn() as c:
+        cur = c.execute(
+            """UPDATE dynamic_queries
+               SET blacklisted_until = ?
+               WHERE times_used >= ?
+                 AND keys_found = 0
+                 AND blacklisted_until IS NULL""",
+            (cutoff, min_uses),
+        )
+        return cur.rowcount
+
+
+def get_top_yielding_queries(provider: str, limit: int = 50) -> list[dict]:
+    """Top queries by valid_keys_found for AI prompt context — gives the
+    vocab expander positive examples of what works."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT query_str, theme, times_used,
+                      keys_found, valid_keys_found
+               FROM dynamic_queries
+               WHERE provider = ?
+                 AND keys_found > 0
+               ORDER BY valid_keys_found DESC, keys_found DESC
+               LIMIT ?""",
+            (provider, limit),
+        ).fetchall()]
+
+
+def get_dead_queries(provider: str, limit: int = 30) -> list[dict]:
+    """Queries with >=3 uses and zero yield — negative examples for AI."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT query_str, theme, times_used
+               FROM dynamic_queries
+               WHERE provider = ?
+                 AND times_used >= 3
+                 AND keys_found = 0
+               ORDER BY times_used DESC
+               LIMIT ?""",
+            (provider, limit),
+        ).fetchall()]
+
+
+def get_dynamic_query_stats() -> dict:
+    """Summary for /health and Telegram digest."""
+    with _conn() as c:
+        total = c.execute("SELECT COUNT(*) FROM dynamic_queries").fetchone()[0]
+        active = c.execute(
+            "SELECT COUNT(*) FROM dynamic_queries "
+            "WHERE blacklisted_until IS NULL OR blacklisted_until < ?",
+            (_now(),)
+        ).fetchone()[0]
+        productive = c.execute(
+            "SELECT COUNT(*) FROM dynamic_queries WHERE keys_found > 0"
+        ).fetchone()[0]
+        valid_yielding = c.execute(
+            "SELECT COUNT(*) FROM dynamic_queries WHERE valid_keys_found > 0"
+        ).fetchone()[0]
+        by_prov = [dict(r) for r in c.execute(
+            """SELECT provider,
+                      COUNT(*)              as total,
+                      SUM(keys_found)       as keys,
+                      SUM(valid_keys_found) as valid_keys
+               FROM dynamic_queries
+               GROUP BY provider
+               ORDER BY valid_keys DESC, keys DESC"""
+        ).fetchall()]
+    return {
+        "total":          total,
+        "active":         active,
+        "productive":     productive,
+        "valid_yielding": valid_yielding,
+        "by_provider":    by_prov,
+    }
+
+
+# ── Axis extensions (AI-discovered vocabulary) ────────────────────────────
+
+def add_axis_extensions(provider: str, axis: str, values: list[str]) -> int:
+    """Bulk insert vocabulary discoveries. axis ∈ {'env_names','filenames',
+    'context_words','key_prefixes'}. Duplicates ignored. Returns inserted count."""
+    if not values:
+        return 0
+    now = _now()
+    rows = [(provider, axis, v.strip(), now) for v in values if v and v.strip()]
+    if not rows:
+        return 0
+    with _conn() as c:
+        cur = c.executemany(
+            """INSERT OR IGNORE INTO axis_extensions
+                 (provider, axis, value, discovered_at)
+               VALUES (?, ?, ?, ?)""",
+            rows,
+        )
+        return cur.rowcount
+
+
+def get_axis_extensions(provider: str, axis: str | None = None) -> dict[str, list[str]]:
+    """Return {axis: [values]} for a provider. If `axis` is given, returns
+    {axis: [values]} only for that axis."""
+    sql = "SELECT axis, value FROM axis_extensions WHERE provider = ?"
+    args: tuple = (provider,)
+    if axis:
+        sql += " AND axis = ?"
+        args = (provider, axis)
+    out: dict[str, list[str]] = {}
+    with _conn() as c:
+        for r in c.execute(sql, args).fetchall():
+            out.setdefault(r["axis"], []).append(r["value"])
+    return out
+
+
+def get_recent_valid_files(provider: str, limit: int = 20) -> list[dict]:
+    """Pull recent VALID-key file metadata for the AI vocab prompt — gives
+    DeepSeek real-world examples to extract new var-names/filenames from.
+
+    Returns repo + file_path + file_url so the caller can fetch raw content
+    (we don't store content in DB — too bulky)."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT repo, file_path, file_url, key_preview, discovered_at
+               FROM found_keys
+               WHERE provider = ?
+                 AND is_valid = 1
+                 AND file_url != ''
+               ORDER BY discovered_at DESC
+               LIMIT ?""",
+            (provider, limit),
         ).fetchall()]
