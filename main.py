@@ -997,15 +997,20 @@ _SPLIT_FORM_HINT = _re_main.compile(
 )
 
 
-def _classify_destination(cred: str, destination: str) -> str:
-    """Returns: 'mock' | 'template' | 'real'"""
+def _classify_destination(cred: str, destination: str, cred_type: str = "") -> str:
+    """Returns: 'mock' | 'template' | 'real'
+
+    cred_type-aware: non-DSN cred types (aws/azure/alibaba/ssh/infra)
+    classify as 'real' even without an extractable host — they need the
+    type-specific validator to determine liveness.
+    """
     if not cred:
         return "template"
     # Template variables like ${VAR_NAME}
     if "${" in cred or "{{" in cred:
         return "template"
-    # DSN without @password (no actual creds)
-    if "://" in cred and "@" not in cred:
+    # DSN without @password (no actual creds) — only applies to URL-style creds
+    if "://" in cred and "@" not in cred and cred_type == "database":
         return "template"
     # Extract host
     host = ""
@@ -1030,8 +1035,12 @@ def _classify_destination(cred: str, destination: str) -> str:
     if "." in host_l or host_l.count(":") >= 2:
         return "real"
     if not host_l:
-        # No host extracted → treat as template (e.g. AWS keys, Azure account
-        # strings, infra tokens — non-DSN format). Validation runs separately.
+        # No host extractable. For DSN-style cred types this means template.
+        # For non-DSN types (aws/azure/alibaba/ssh/infra), this is normal —
+        # the cred itself encodes everything and the type-specific validator
+        # establishes liveness directly.
+        if cred_type in ("aws", "azure", "alibaba", "ssh", "infra"):
+            return "real"
         return "template"
     return "mock"
 
@@ -1128,7 +1137,7 @@ async def _do_reclassify_infra() -> dict:
         cred = row["cred_full"] or ""
         cred_type = row["cred_type"]
         repo = row["repo"] or ""
-        cls = _classify_destination(cred, row["destination"] or "")
+        cls = _classify_destination(cred, row["destination"] or "", cred_type)
 
         # Validation
         is_valid = 0
