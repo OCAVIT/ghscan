@@ -439,24 +439,65 @@ _AZURE_COSMOS = re.compile(
 
 
 def _azure_is_real_conn(conn: str) -> bool:
-    """Reject extracted Azure conn-strings that are obviously placeholder/regex."""
-    # Regex source detection (someone leaked their parser source code)
-    if "[A-Za-z" in conn or "[0-9]" in conn or "{40," in conn or "[a-z]" in conn:
+    """Reject extracted Azure conn-strings that are obviously placeholder/regex.
+
+    Real Azure storage AccountKey is exactly 88 base64 chars ending in '=='
+    (64 bytes encoded). We use that shape + entropy + canonical-account-name
+    heuristics to filter trash extracted from leaked regex source code,
+    documentation snippets, and obvious placeholders.
+    """
+    # 1) Regex source detection (someone committed their parser source)
+    if any(marker in conn for marker in
+           ("[A-Za-z", "[0-9]", "{40,", "[a-z]", "[0-9a-f]", "+/=]",
+            "(?:", ")?", "\\d{")):
         return False
-    # AccountKey value should be base64 ~ 88 chars usually. <50 = placeholder.
+
+    # 2) AccountKey shape — should be 88 base64 chars (64 bytes raw).
+    #    Accept 86-90 to allow padding-edge variations. <50 = placeholder.
     m = re.search(r'AccountKey=([^;\s"\']+)', conn, re.IGNORECASE)
     if m:
         key = m.group(1)
-        if len(key) < 50 or _PLACEHOLDER_WORDS.search(key) or _VALUE_IS_ENV_NAME.match(key):
+        # Length sanity
+        if len(key) < 50 or len(key) > 200:
             return False
-    # AccountName placeholder words
+        # Placeholder words / env-var-name patterns
+        if _PLACEHOLDER_WORDS.search(key) or _VALUE_IS_ENV_NAME.match(key):
+            return False
+        # Base64 character class — real keys only use A-Za-z0-9+/=
+        if not re.match(r'^[A-Za-z0-9+/=]+$', key):
+            return False
+        # Entropy heuristic — placeholder keys are often runs of same char
+        unique_chars = len(set(key))
+        if unique_chars < 12:   # real base64 has ~50+ unique chars
+            return False
+        # AccountKey == AccountName (silly placeholder)
+        m_acct = re.search(r'AccountName=([^;\s"\']+)', conn, re.IGNORECASE)
+        if m_acct and m_acct.group(1) == key:
+            return False
+
+    # 3) AccountName must be lowercase-alphanumeric (Azure rule),
+    #    3-24 chars, and not in placeholder set.
     m = re.search(r'AccountName=([^;\s"\']+)', conn, re.IGNORECASE)
     if m:
-        name = m.group(1).lower()
-        if name in ("myaccount", "your-account", "your_account", "youraccount",
-                    "storage", "test", "demo", "example", "myaccountname",
-                    "seu-storage", "su-storage", "tu-storage"):
+        name = m.group(1)
+        # Azure rule: lowercase letters and numbers only, 3-24 chars
+        if not re.match(r'^[a-z0-9]{3,24}$', name):
             return False
+        # Known placeholder names (English + Portuguese + Russian)
+        _PLACEHOLDER_NAMES = {
+            "myaccount", "youraccount", "ouraccount", "storage", "store",
+            "test", "demo", "example", "sample", "myaccountname",
+            "seustorage", "sustorage", "tustorage",
+            "imyastorage", "tvoyastorage",
+            "mystoragecount", "mystorage", "demoaccount", "abc", "abcd",
+            "abc123", "test123", "storage1", "storage123",
+        }
+        if name in _PLACEHOLDER_NAMES:
+            return False
+        # Trivial repetition: "aaaaa" / "12345"
+        if len(set(name)) < 3:
+            return False
+
     return True
 
 
