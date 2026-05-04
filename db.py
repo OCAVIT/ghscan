@@ -282,12 +282,26 @@ def save_key(provider: str, key: str, repo: str, file_path: str,
 _WATCHLIST_THRESHOLD = 3
 
 
+# GitHub username shape: alphanumeric + hyphens, can't start/end with hyphen,
+# max 39 chars. We're permissive (allow up to 60) so foreign platforms with
+# longer login names also pass — but the negative shape rules below catch the
+# obvious garbage like 'https:' from URL-style repo strings.
+import re as _re_db
+_VALID_LOGIN = _re_db.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9_\-\.]{0,58}[A-Za-z0-9])?$')
+
+
 def _parse_repo(repo: str) -> tuple[str, str]:
     """Parse `owner/name` from various scanner repo formats.
 
     Handles plain GitHub `owner/name`, gitee/codeberg/bitbucket which all use
     the same format, plus prefixed variants like `postman:ws_name` or
-    `kaggle:owner/slug`. Returns (platform, login). Empty login = skip.
+    `kaggle:owner/slug`. Returns (platform, login). Empty login = skip
+    (caller treats empty as "don't track").
+
+    Defensive: rejects URL-style repo strings (`https://...`,
+    `http://...`) that surfaced as login='https:' in watched_authors.
+    Also rejects logins that fail GitHub's shape rules — those would never
+    correspond to a real account and pollute the watchlist.
     """
     if not repo:
         return ("github", "")
@@ -303,12 +317,24 @@ def _parse_repo(repo: str) -> tuple[str, str]:
         if repo.startswith(pfx):
             rest = repo[len(pfx):]
             login = rest.split("/", 1)[0] if "/" in rest else rest
-            return (plat, login.strip())
+            login = login.strip()
+            if not _VALID_LOGIN.match(login):
+                return (plat, "")
+            return (plat, login)
+
+    # Reject URL-style strings BEFORE generic split — `https://x/y`.split("/")
+    # would otherwise yield login='https:' which then poisons watched_authors.
+    if "://" in repo or repo.lower().startswith(("http:", "https:")):
+        return ("github", "")
+
     # Default: assume `owner/name` GitHub-shape (also valid for gitee/codeberg)
     parts = repo.split("/", 1)
-    if len(parts) == 2 and parts[0]:
-        return ("github", parts[0])
-    return ("github", "")
+    if len(parts) != 2 or not parts[0]:
+        return ("github", "")
+    login = parts[0].strip()
+    if not _VALID_LOGIN.match(login):
+        return ("github", "")
+    return ("github", login)
 
 
 def track_leak(repo: str, is_valid: bool):

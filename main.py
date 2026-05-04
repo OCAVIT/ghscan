@@ -760,6 +760,53 @@ async def admin_refilter_infra(authorization: str | None = Header(default=None))
     return {"ok": True, **result}
 
 
+@app.post("/admin/cleanup_authors")
+async def admin_cleanup_authors(authorization: str | None = Header(default=None)):
+    """One-time cleanup — delete watched_authors rows with logins that don't
+    match GitHub's username shape (alphanumeric + hyphens, ≤60 chars,
+    no `://` or `http:` prefixes).
+
+    Surfaced after the 2026-05-04 fix to _parse_repo: prior tracker
+    accepted URL-style repo strings (`https://x/y` → login='https:') which
+    polluted the watchlist. This scrubs them. The fix in db.py prevents
+    new pollution; this endpoint cleans the historic rows.
+    """
+    _check_admin(authorization)
+    from db import _VALID_LOGIN
+
+    def _do() -> dict:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT login, platform, leak_count, valid_count FROM watched_authors"
+            ).fetchall()
+            to_delete: list[tuple[str, str]] = []
+            for r in rows:
+                login = (r["login"] or "").strip()
+                if not login or not _VALID_LOGIN.match(login):
+                    to_delete.append((r["login"], r["platform"]))
+            for login, platform in to_delete:
+                conn.execute(
+                    "DELETE FROM watched_authors WHERE login=? AND platform=?",
+                    (login, platform),
+                )
+            conn.commit()
+            return {
+                "total":     len(rows),
+                "deleted":   len(to_delete),
+                "examples":  [{"login": l, "platform": p} for l, p in to_delete[:10]],
+            }
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(_do)
+    log.info("admin cleanup_authors: removed %d/%d invalid-login rows",
+             result["deleted"], result["total"])
+    return {"ok": True, **result}
+
+
 @app.post("/admin/cleanup_axes")
 async def admin_cleanup_axes(authorization: str | None = Header(default=None)):
     """One-time cleanup — reapply the current vocab_expander filter to
