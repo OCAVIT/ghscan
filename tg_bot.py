@@ -322,18 +322,30 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
         await _api(client, "answerCallbackQuery", callback_query_id=cbq_id)
         s     = db.get_stats()
         ic    = _infra_counts()
+        # Serper.dev is a search-tool API, not a "general AI provider".
+        # Subtract from headline AI-keys counters so the digest reflects
+        # actual AI-API findings; serper still accessible via the
+        # 🛠️ "Search/Agent Tools" category button.
+        by_prov_full = s.get("by_provider", [])
+        serper_total = sum(r["total"] for r in by_prov_full if r["provider"] == "serper")
+        serper_valid = sum(r["valid"] for r in by_prov_full if r["provider"] == "serper")
+        keys_found_ai = s["keys_found"] - serper_total
+        keys_valid_ai = s["keys_valid"] - serper_valid
+
         lines = [
             "📊 <b>Database Stats</b>",
             "",
             f"📁 Repos scanned:  <b>{s['repos_scanned']}</b>",
             f"📄 Files scanned:  <b>{s['files_scanned']}</b>",
-            f"🔑 AI keys found:  <b>{s['keys_found']}</b>",
-            f"✅ AI keys valid:  <b>{s['keys_valid']}</b>",
+            f"🔑 AI keys found:  <b>{keys_found_ai}</b>",
+            f"✅ AI keys valid:  <b>{keys_valid_ai}</b>",
             f"🏗️ Infra creds:   <b>{ic['total']}</b>  (🔴{ic['high']} high / 🟡{ic['medium']} medium)",
             "",
             "<b>By provider:</b>",
         ]
-        by_prov = {r["provider"]: r for r in s.get("by_provider", []) if r["total"] > 0}
+        by_prov = {r["provider"]: r for r in by_prov_full if r["total"] > 0}
+        # Hide serper from main listing — accessible via tools category
+        by_prov.pop("serper", None)
         # Seedance 2.0 — show ark + ark_fast combined
         ark_std  = by_prov.pop("ark",      None)
         ark_fast = by_prov.pop("ark_fast", None)
