@@ -152,7 +152,13 @@ def _main_keyboard(counts: dict[str, int]) -> dict:
     rows = []
     for cid in ("video", "text", "image", "voice", "music", "tools", "all"):
         cat   = _CATS[cid]
-        total = sum(counts.get(p, 0) for p in cat["p"])
+        # 'all' is the headline AI-counter category — exclude serper since
+        # it's a search-tool API, not a general AI provider. Serper is still
+        # accessible via the dedicated 'tools' category button.
+        provs = cat["p"]
+        if cid == "all":
+            provs = [p for p in provs if p != "serper"]
+        total = sum(counts.get(p, 0) for p in provs)
         rows.append([{"text": f"{cat['e']} {cat['n']}  ({total})", "callback_data": f"c:{cid}"}])
     ic = _infra_counts()
     infra_label = f"🏗️ Infra Creds  (🔴{ic['high']} / 🟡{ic['medium']})"
