@@ -1108,21 +1108,21 @@ async def _do_reclassify_infra() -> dict:
     # Telegram digest
     try:
         msg_lines = [
-            "🔬 <b>Infra reclassification done</b>",
-            f"Total: {counters['total']}",
-            f"  • mock (docker hosts): {counters['mock']}",
-            f"  • template (no creds): {counters['template']}",
-            f"  • real targets: {counters['real']}",
-            f"  • validated OK (TCP/auth ok): {counters['validated_ok']}",
-            f"  • validated FAIL: {counters['validated_fail']}",
+            "🔬 <b>Реклассификация инфры завершена</b>",
+            f"Всего: {counters['total']}",
+            f"  • mock (docker-хосты): {counters['mock']}",
+            f"  • template (без кредов): {counters['template']}",
+            f"  • реальные таргеты: {counters['real']}",
+            f"  • валидация прошла (TCP/auth): {counters['validated_ok']}",
+            f"  • валидация не прошла: {counters['validated_fail']}",
             "",
-            "🚨 New risk distribution:",
+            "🚨 Новое распределение по уровням:",
             f"  • CRITICAL: {counters['critical']}",
             f"  • HIGH: {counters['high']}",
             f"  • MEDIUM: {counters['medium']}",
             f"  • LOW: {counters['low']}",
             "",
-            "→ /infra?risk=critical для disclosure-target'ов",
+            "→ /infra?risk=critical для disclosure-таргетов",
         ]
         await _send("\n".join(msg_lines))
     except Exception as e:
@@ -1172,37 +1172,41 @@ async def admin_jackpot_probe(
             # Telegram digest
             try:
                 lines = [
-                    "💎 <b>Infra jackpot probe done</b>",
-                    f"Total validated rows: {counters['total']}",
-                    f"  • probed OK: {counters['probed']}",
-                    f"  • via Evomi proxy (TCP only): {counters['via_proxy']}",
-                    f"  • errors: {counters['errors']}",
+                    "💎 <b>Jackpot-probe инфры завершён</b>",
+                    f"Всего validated row'ов: {counters['total']}",
+                    f"  • успешно probed: {counters['probed']}",
+                    f"  • через Evomi proxy (только TCP): {counters['via_proxy']}",
+                    f"  • дедуп по host (один host = одна попытка): {counters.get('deduped', 0)}",
+                    f"  • ошибки/недоступны: {counters['errors']}",
                     "",
-                    f"🚨 With ANY AI keys inside: {counters['with_keys']}",
-                    f"✅ With <b>VALIDATED LIVE</b> keys: {counters['with_validated_keys']}",
-                    f"💰 Total keys found: {counters['total_keys_found']} "
-                    f"(<b>{counters['total_validated_keys']} validated live</b>)",
-                    f"💵 Estimated owner exposure: "
-                    f"<b>~${counters['total_estimated_exposure_usd']:,}/mo</b>",
+                    f"🚨 С AI-ключами внутри инфры: {counters['with_keys']}",
+                    f"✅ С <b>ВАЛИДНЫМИ ЖИВЫМИ</b> ключами: {counters['with_validated_keys']}",
+                    f"💰 Всего ключей найдено: {counters['total_keys_found']} "
+                    f"(<b>{counters['total_validated_keys']} валидных живых</b>)",
+                    f"💾 Сохранено в found_keys (новых): "
+                    f"<b>{counters.get('saved_to_found_keys', 0)}</b>",
+                    f"💵 Оценка ущерба владельцам: "
+                    f"<b>~${counters['total_estimated_exposure_usd']:,}/мес</b>",
                     "",
-                    f"🎯 score≥60 (disclosure-ready): {counters['jackpot_critical']}",
-                    f"🌋 score≥80 (JACKPOT-severe):  {counters['jackpot_severe']}",
+                    f"🎯 score≥60 (готовы к disclosure): {counters['jackpot_critical']}",
+                    f"🌋 score≥80 (JACKPOT-severe):       {counters['jackpot_severe']}",
                 ]
                 if counters['by_provider_validated']:
                     lines.append("")
-                    lines.append("✅ <b>Live keys by provider (verified):</b>")
+                    lines.append("✅ <b>Живые ключи по провайдерам (подтверждено):</b>")
                     for prov, n in sorted(counters['by_provider_validated'].items(),
                                            key=lambda x: -x[1]):
                         lines.append(f"  • {prov}: {n}")
                 if counters['by_provider']:
                     lines.append("")
-                    lines.append("Raw discovery (incl. revoked):")
+                    lines.append("Raw discovery (включая revoked):")
                     for prov, n in sorted(counters['by_provider'].items(),
                                            key=lambda x: -x[1]):
                         valid_n = counters['by_provider_validated'].get(prov, 0)
-                        lines.append(f"  • {prov}: {n} ({valid_n} live)")
+                        lines.append(f"  • {prov}: {n} ({valid_n} живых)")
                 lines.append("")
                 lines.append("→ /infra?risk=critical для disclosure-карточек")
+                lines.append("→ /infra/jackpot?min_score=60 для JSON-дампа")
                 await _send("\n".join(lines))
             except Exception as e:
                 log.error("jackpot tg digest err: %s", e)
