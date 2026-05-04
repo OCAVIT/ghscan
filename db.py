@@ -606,13 +606,21 @@ def save_infra(cred_type: str, cred: str, repo: str, file_path: str,
         return False
 
 
-def get_infra_results(risk_filter: str | None = None, limit: int = 200) -> list[dict]:
-    """risk_filter: 'high' | 'medium' | 'low' | None (all)"""
+def get_infra_results(risk_filter: str | None = None, limit: int = 200,
+                       sort: str = "score") -> list[dict]:
+    """risk_filter: 'critical' | 'high' | 'medium' | 'low' | None (all)
+    sort: 'score' (jackpot_score DESC then discovered_at DESC)
+        | 'recent' (discovered_at DESC)"""
+    order = (
+        "jackpot_score DESC, discovered_at DESC"
+        if sort == "score" else
+        "discovered_at DESC"
+    )
     if risk_filter:
-        q = "SELECT * FROM infra_findings WHERE risk_level=? ORDER BY discovered_at DESC LIMIT ?"
+        q = f"SELECT * FROM infra_findings WHERE risk_level=? ORDER BY {order} LIMIT ?"
         with _conn() as c:
             return [dict(r) for r in c.execute(q, (risk_filter, limit)).fetchall()]
-    q = "SELECT * FROM infra_findings ORDER BY discovered_at DESC LIMIT ?"
+    q = f"SELECT * FROM infra_findings ORDER BY {order} LIMIT ?"
     with _conn() as c:
         return [dict(r) for r in c.execute(q, (limit,)).fetchall()]
 

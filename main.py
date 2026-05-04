@@ -385,20 +385,33 @@ async def infra_page(risk: str = Query(None), limit: int = Query(200)):
         dest     = f"<code>{html.escape(dest_raw)}</code>" if dest_raw else "—"
         v        = r.get("is_validated", -1)
         val_badge = ("✅" if v == 1 else "❌" if v == 0 else "⏳")
+        jp_score  = r.get("jackpot_score", 0) or 0
+        jp_color  = ("#ff00aa" if jp_score >= 80 else
+                     "#ff4444" if jp_score >= 60 else
+                     "#ffaa00" if jp_score >= 30 else "#666")
+        jp_cell   = (f"<td style='color:{jp_color};font-weight:bold'>{jp_score}</td>"
+                     if jp_score else "<td style='color:#444'>—</td>")
+        route     = r.get("connect_route", "") or ""
+        route_cell = f"<td><code>{html.escape(route)}</code></td>" if route else "<td>—</td>"
         repo_e    = html.escape(r["repo"])
         ctype_e   = html.escape(r["cred_type"].upper())
         prev_e    = html.escape(r["cred_preview"])
-        ftype_e   = html.escape(r["file_type"])
+        file_path_e = html.escape(r.get("file_path", "") or "")
+        file_url  = r.get("file_url", "") or ""
+        repo_link = (f"<a href='{html.escape(file_url)}' target='_blank'>{repo_e}</a>"
+                     if file_url else
+                     f"<a href='https://github.com/{repo_e}' target='_blank'>{repo_e}</a>")
         rows_html += (
             f"<tr style='background:{bg}'>"
             f"<td style='color:{col};font-weight:bold'>{rl.upper()}</td>"
+            f"{jp_cell}"
             f"<td>{val_badge}</td>"
+            f"{route_cell}"
             f"<td>{ctype_e}</td>"
             f"<td><code>{prev_e}</code></td>"
             f"<td>{dest}</td>"
-            f"<td><a href='https://github.com/{repo_e}' target='_blank'>{repo_e}</a></td>"
+            f"<td>{repo_link}<br><small style='color:#888'>{file_path_e}</small></td>"
             f"<td>⭐{r['repo_stars']}</td>"
-            f"<td>{ftype_e}</td>"
             f"<td>{r['discovered_at'][:16]}</td></tr>\n"
         )
 
@@ -434,19 +447,64 @@ async def infra_page(risk: str = Query(None), limit: int = Query(200)):
   <tbody>{by_type_html}</tbody>
 </table>
 {"<h3>Top Destinations</h3><table style='width:auto'><thead><tr><th>Host</th><th>Type</th><th>Count</th></tr></thead><tbody>" + by_dest_html + "</tbody></table>" if by_dest_html else ""}
-<h3>Findings ({risk or "all"}, limit {limit})</h3>
+<h3>Findings ({risk or "all"}, sorted by jackpot_score, limit {limit})</h3>
 <table>
-  <thead><tr><th>Risk</th><th>Valid</th><th>Type</th><th>Preview</th><th>Destination</th>
-  <th>Repo</th><th>Stars</th><th>File type</th><th>Found at</th></tr></thead>
+  <thead><tr><th>Risk</th><th>Jackpot</th><th>Valid</th><th>Route</th>
+  <th>Type</th><th>Preview</th><th>Destination</th>
+  <th>Repo / file_path</th><th>Stars</th><th>Found at</th></tr></thead>
   <tbody>{rows_html}</tbody>
 </table>
-<p><a href='/'>← AI Keys</a></p>
+<p><a href='/'>← AI Keys</a> · <a href='/infra/jackpot' style='color:#ff00aa'>Top jackpots →</a></p>
 </body></html>"""
 
 
 @app.get("/infra/stats")
 async def infra_stats():
     return db.get_infra_stats()
+
+
+@app.get("/infra/jackpot")
+async def infra_jackpot_targets(
+    min_score: int = Query(60, ge=0, le=100),
+    limit: int = Query(200, ge=1, le=2000),
+    authorization: str | None = Header(default=None),
+):
+    """JSON dump of disclosure-ready targets, sorted by jackpot_score DESC.
+
+    Returns only rows with jackpot_score >= min_score (default 60). Each row
+    has every field the operator needs to write a manual disclosure email:
+      • cred_type, cred_full (raw — for verification on operator's side)
+      • repo, file_path, file_url
+      • destination, risk_level, is_validated, connect_route
+      • jackpot_score, jackpot_data (parsed JSON with previews,
+        suspicious_tables, ai_keys_validated, estimated_exposure_usd)
+    """
+    _check_admin(authorization)
+    import sqlite3, json as _json
+    with sqlite3.connect(DB_PATH) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            """SELECT cred_type, cred_full, cred_preview, repo, file_path, file_url,
+                      destination, risk_level, is_validated, connect_route,
+                      jackpot_score, jackpot_data, repo_stars, repo_created,
+                      discovered_at
+               FROM infra_findings
+               WHERE jackpot_score >= ?
+               ORDER BY jackpot_score DESC, discovered_at DESC
+               LIMIT ?""",
+            (min_score, limit),
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        jd = d.get("jackpot_data")
+        if jd:
+            try:
+                d["jackpot_data"] = _json.loads(jd)
+            except Exception:
+                pass
+        out.append(d)
+    return {"min_score": min_score, "count": len(out), "items": out}
 
 
 @app.get("/check-tokens")

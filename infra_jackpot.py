@@ -181,23 +181,6 @@ async def _validate_discovered_keys(raw: dict[str, list[str]]) -> dict[str, int]
     return counts
 
 
-def _build_report_summary(data: dict) -> str:
-    """One-line human-readable summary for disclosure preparation."""
-    keys = data.get("ai_keys_total", 0)
-    valid = data.get("ai_keys_total_valid", 0)
-    exposure = data.get("estimated_exposure_usd", 0)
-    susp = data.get("suspicious_tables", [])
-    probe = data.get("probe_type", "?")
-    if keys == 0:
-        return f"{probe}: достижим, AI-ключи внутри не обнаружены"
-    parts = [f"{probe}: {keys} AI-ключ(а) внутри"]
-    if valid:
-        parts.append(f"{valid} валидных")
-    if exposure:
-        parts.append(f"~${exposure}/мес потенциал")
-    if susp:
-        parts.append(f"таблиц подозр.: {len(susp)}")
-    return ", ".join(parts)
 
 
 def _compute_jackpot_score(probe_type: str, data: dict) -> int:
@@ -867,7 +850,6 @@ async def run_jackpot_cycle(limit: int | None = None) -> dict:
                 )
             # Recompute score with the populated validated counts
             data["score"] = _compute_jackpot_score(data.get("probe_type", ""), data)
-            data["report_summary"] = _build_report_summary(data)
             score = data["score"]
             if score >= 60:
                 counters["jackpot_critical"] += 1
