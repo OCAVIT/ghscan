@@ -1498,11 +1498,14 @@ async def validate_infra_token(cred: str) -> bool:
                             "Content-Type": "application/vnd.api+json"})
                     else:
                         return False
-                # 200 → alive. 401/403 → dead. Other 5xx → unknown, treat as
-                # alive to avoid false-negatives on transient outages.
+                # 200 → alive.
+                # 400/401/403 → dead (400 from CF/Vercel = malformed token =
+                # placeholder like CF_TUNNEL_TOKEN that's clearly not a real
+                # bearer token).
+                # 5xx → transient outage, count as alive to avoid false-negatives.
                 if r.status_code == 200:
                     return True
-                if r.status_code in (401, 403):
+                if r.status_code in (400, 401, 403, 404):
                     return False
                 return r.status_code < 500
             except Exception as e:
