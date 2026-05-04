@@ -655,6 +655,24 @@ def update_infra_validation(cred_hash: str, is_validated: int, result: str = "")
         )
 
 
+def get_unprobed_validated_infra(limit: int = 50) -> list[dict]:
+    """Validated infra rows that haven't been jackpot-probed yet.
+    Used by the periodic auto-jackpot loop in main.py to catch new
+    valid creds without waiting for manual /admin/jackpot_probe.
+    Excludes rows whose previous probe errored (we don't infinite-retry)."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT id, cred_type, cred_full, repo, file_path, file_url, "
+            "repo_stars, repo_created "
+            "FROM infra_findings "
+            "WHERE is_validated=1 "
+            "  AND (jackpot_data IS NULL OR jackpot_data='') "
+            "ORDER BY id DESC "
+            "LIMIT ?",
+            (limit,),
+        ).fetchall()]
+
+
 def cleanup_old_low_risk(older_than_days: int = 30) -> int:
     """Delete low-risk infra findings older than N days. Returns deleted count."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()

