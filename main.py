@@ -354,8 +354,10 @@ async def infra_page(risk: str = Query(None), limit: int = Query(200)):
     istats = db.get_infra_stats()
     rows   = db.get_infra_results(risk_filter=risk, limit=limit)
 
-    _RISK_COLOR = {"high": "#ff4444", "medium": "#ffaa00", "low": "#888"}
-    _RISK_BG    = {"high": "#2a0000", "medium": "#1a1200", "low": "#111"}
+    _RISK_COLOR = {"critical": "#ff00aa", "high": "#ff4444",
+                   "medium": "#ffaa00", "low": "#888"}
+    _RISK_BG    = {"critical": "#2a002a", "high": "#2a0000",
+                   "medium": "#1a1200", "low": "#111"}
 
     by_type_html = ""
     for row in istats.get("by_type", []):
@@ -402,6 +404,7 @@ async def infra_page(risk: str = Query(None), limit: int = Query(200)):
 
     filter_links = (
         "<a href='/infra'>All</a> · "
+        "<a href='/infra?risk=critical' style='color:#ff00aa'>Critical</a> · "
         "<a href='/infra?risk=high' style='color:#ff4444'>High</a> · "
         "<a href='/infra?risk=medium' style='color:#ffaa00'>Medium</a> · "
         "<a href='/infra?risk=low' style='color:#888'>Low</a>"
@@ -758,6 +761,317 @@ async def admin_refilter_infra(authorization: str | None = Header(default=None))
     log.info("admin refilter_infra: %d/%d removed",
              result["deleted"], result["total"])
     return {"ok": True, **result}
+
+
+_RECLASSIFY_RUNNING: bool = False
+_RECLASSIFY_LAST: dict = {}
+
+
+@app.post("/admin/reclassify_infra")
+async def admin_reclassify_infra(authorization: str | None = Header(default=None)):
+    """Re-validate every infra_findings row + recompute risk + add companion_score.
+
+    Pipeline per row:
+      1. Extract destination, classify mock vs real
+         • docker-internal hostnames (db, postgres, mongo, redis, mariadb,
+           localhost, 127.*) → MOCK → is_validated=0, risk_level=low
+         • Template DSNs without @password → MOCK → same handling
+         • Real FQDN/IP → run validate_database / validate_aws / validate_ssh /
+           validate_azure / validate_alibaba via INFRA_VALIDATORS
+      2. Compute companion_score (0-100) — heuristic for "probability that
+         the same repo has UNPARSED API keys / tokens / infra passwords":
+           +30  repo not tree-walked yet
+           +20  repo has 0 found_keys (suspicious — should have placeholders at least)
+           +15  repo younger than 90 days
+           +15  per ADDITIONAL cred_type in same repo (DB+SSH+AWS = juicy target)
+           +20  cred string mentions split-form vars (DB_PASSWORD/PGPASSWORD without @host) — parser likely missed it
+           -30  repo already has 5+ found_keys (well-covered already)
+           clamp [0, 100]
+      3. New risk_level computation:
+           critical  → is_validated=1 AND companion_score >= 50
+           high      → is_validated=1 OR companion_score >= 70
+           medium    → not mock, not template, has_password, score >= 30
+           low       → mock / template / un-passworded
+      4. risk_reasons gets a "companion_score=NN" entry + breakdown bullets.
+      5. After completion, send fresh Telegram digest with new counts.
+
+    Runs in background (Railway 300s gateway). Poll /admin/reclassify_status.
+    """
+    _check_admin(authorization)
+    global _RECLASSIFY_RUNNING
+    if _RECLASSIFY_RUNNING:
+        return {"ok": False, "error": "already running", "last": _RECLASSIFY_LAST}
+
+    async def _bg():
+        global _RECLASSIFY_RUNNING, _RECLASSIFY_LAST
+        _RECLASSIFY_RUNNING = True
+        try:
+            _RECLASSIFY_LAST = await _do_reclassify_infra()
+        except Exception as e:
+            log.error("reclassify_infra crashed: %s", e)
+            _RECLASSIFY_LAST = {"error": str(e)[:200]}
+        finally:
+            _RECLASSIFY_RUNNING = False
+
+    asyncio.create_task(_bg(), name="reclassify_infra")
+    return {"ok": True, "message": "reclassification started — poll /admin/reclassify_status"}
+
+
+@app.get("/admin/reclassify_status")
+async def admin_reclassify_status(authorization: str | None = Header(default=None)):
+    _check_admin(authorization)
+    return {"running": _RECLASSIFY_RUNNING, "last": _RECLASSIFY_LAST}
+
+
+# ── reclassify implementation ──────────────────────────────────────────────────
+
+import re as _re_main
+_DOCKER_INTERNAL_HOSTS = {
+    "localhost", "127.0.0.1", "0.0.0.0", "::1",
+    "db", "database", "postgres", "postgresql", "pg",
+    "mongo", "mongodb", "mongo-db",
+    "redis", "redis-master", "redis-cache",
+    "mysql", "mariadb",
+    "host.docker.internal", "docker.for.mac.localhost",
+    "dynamodb", "dynamodb-local",
+    "elasticsearch", "es",
+    "minio", "rabbitmq", "kafka", "zookeeper",
+    "ch", "clickhouse",
+}
+_SPLIT_FORM_HINT = _re_main.compile(
+    r'(?:DB_PASSWORD|DATABASE_PASSWORD|PGPASSWORD|MYSQL_PASSWORD|MONGO_PASSWORD'
+    r'|REDIS_PASSWORD|DB_HOST|DATABASE_HOST|PGHOST|MYSQL_HOST|MONGO_HOST'
+    r'|REDIS_HOST|DB_USER|DATABASE_USER|PGUSER|MYSQL_USER)',
+    _re_main.IGNORECASE,
+)
+
+
+def _classify_destination(cred: str, destination: str) -> str:
+    """Returns: 'mock' | 'template' | 'real'"""
+    if not cred:
+        return "template"
+    # Template variables like ${VAR_NAME}
+    if "${" in cred or "{{" in cred:
+        return "template"
+    # DSN without @password (no actual creds)
+    if "://" in cred and "@" not in cred:
+        return "template"
+    # Extract host
+    host = ""
+    if destination:
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(destination).hostname or ""
+        except Exception:
+            pass
+    if not host and "://" in cred:
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(cred).hostname or ""
+        except Exception:
+            pass
+    host_l = (host or "").lower()
+    if host_l in _DOCKER_INTERNAL_HOSTS:
+        return "mock"
+    if host_l.startswith("127.") or host_l.startswith("10.") or host_l == "::1":
+        return "mock"
+    # Real if has TLD or is dotted-quad public-ish
+    if "." in host_l or host_l.count(":") >= 2:
+        return "real"
+    if not host_l:
+        # No host extracted → treat as template (e.g. AWS keys, Azure account
+        # strings, infra tokens — non-DSN format). Validation runs separately.
+        return "template"
+    return "mock"
+
+
+def _compute_companion_score(repo: str, cred: str, repo_created: str,
+                             stats: dict) -> tuple[int, list[str]]:
+    """stats: {is_walked: bool, ai_keys: int, infra_types: set[str], current_type: str}"""
+    score = 0
+    reasons: list[str] = []
+    if not stats["is_walked"]:
+        score += 30
+        reasons.append("tree_walk не выполнен")
+    if stats["ai_keys"] == 0:
+        score += 20
+        reasons.append("0 распознанных AI-ключей в репо")
+    elif stats["ai_keys"] >= 5:
+        score -= 30
+        reasons.append(f"{stats['ai_keys']} AI-ключей уже распознано (хорошо покрыт)")
+    # Repo age
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        d = _dt.fromisoformat(repo_created.replace("Z", "+00:00"))
+        days = (_dt.now(_tz.utc) - d).days
+        if days < 90:
+            score += 15
+            reasons.append(f"свежее репо ({days}д)")
+    except Exception:
+        pass
+    # Other infra types in same repo
+    other_types = stats["infra_types"] - {stats["current_type"]}
+    if other_types:
+        score += min(15 * len(other_types), 30)
+        reasons.append(f"+{len(other_types)} тип(а) infra в репо: {sorted(other_types)}")
+    # Split-form hint in cred or anywhere (we only have cred — heuristic only)
+    if _SPLIT_FORM_HINT.search(cred or ""):
+        score += 20
+        reasons.append("обрывки имён переменных (split-form пароля)")
+    return max(0, min(100, score)), reasons
+
+
+def _new_risk_level(is_validated: int, companion_score: int,
+                    classification: str, has_password: bool) -> str:
+    if classification in ("mock", "template"):
+        return "low"
+    if is_validated == 1 and companion_score >= 50:
+        return "critical"
+    if is_validated == 1 or companion_score >= 70:
+        return "high"
+    if has_password and companion_score >= 30:
+        return "medium"
+    return "low"
+
+
+async def _do_reclassify_infra() -> dict:
+    """The actual heavy work — pulls all rows, validates, scores, updates."""
+    import sqlite3, json
+    from validators import INFRA_VALIDATORS
+    from notifier import _send
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    # Aggregate per-repo stats once for fast lookup
+    repo_stats: dict[str, dict] = {}
+    for r in conn.execute(
+        "SELECT repo, COUNT(*) as cnt FROM found_keys GROUP BY repo"
+    ).fetchall():
+        repo_stats.setdefault(r["repo"], {})["ai_keys"] = r["cnt"]
+    for r in conn.execute(
+        "SELECT repo, GROUP_CONCAT(DISTINCT cred_type) as types FROM infra_findings GROUP BY repo"
+    ).fetchall():
+        repo_stats.setdefault(r["repo"], {})["infra_types"] = set(
+            (r["types"] or "").split(",")
+        )
+    walked = {r[0] for r in conn.execute(
+        "SELECT repo_full_name FROM tree_walked_repos"
+    ).fetchall()}
+
+    rows = conn.execute(
+        "SELECT id, cred_hash, cred_type, cred_full, repo, repo_created, "
+        "destination, risk_level, is_validated FROM infra_findings"
+    ).fetchall()
+    conn.close()
+    log.info("reclassify_infra: %d rows to process", len(rows))
+
+    counters = {"mock": 0, "template": 0, "real": 0,
+                "validated_ok": 0, "validated_fail": 0,
+                "critical": 0, "high": 0, "medium": 0, "low": 0,
+                "total": len(rows)}
+
+    sem = asyncio.Semaphore(40)   # parallel TCP probes
+
+    async def _process_one(row) -> tuple[int, dict]:
+        cred = row["cred_full"] or ""
+        cred_type = row["cred_type"]
+        repo = row["repo"] or ""
+        cls = _classify_destination(cred, row["destination"] or "")
+
+        # Validation
+        is_valid = 0
+        if cls == "real":
+            validator = INFRA_VALIDATORS.get(cred_type)
+            if validator:
+                async with sem:
+                    try:
+                        ok = await validator(cred)
+                        is_valid = 1 if ok else 0
+                    except Exception:
+                        is_valid = 0
+
+        # Companion score
+        rs = repo_stats.get(repo, {})
+        companion, reasons = _compute_companion_score(
+            repo, cred, row["repo_created"] or "",
+            {
+                "is_walked":    repo in walked,
+                "ai_keys":      rs.get("ai_keys", 0),
+                "infra_types":  rs.get("infra_types", set()),
+                "current_type": cred_type,
+            },
+        )
+
+        has_password = "@" in cred and "://" in cred
+        new_risk = _new_risk_level(is_valid, companion, cls, has_password)
+
+        return row["id"], {
+            "cls":             cls,
+            "is_validated":    is_valid,
+            "companion_score": companion,
+            "reasons":         reasons,
+            "risk_level":      new_risk,
+        }
+
+    # Process in parallel
+    results = await asyncio.gather(*(_process_one(r) for r in rows),
+                                    return_exceptions=True)
+
+    # Bulk update
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        for res in results:
+            if isinstance(res, Exception):
+                continue
+            row_id, info = res
+            counters[info["cls"]] += 1
+            counters[info["risk_level"]] += 1
+            if info["is_validated"] == 1:
+                counters["validated_ok"] += 1
+            elif info["cls"] == "real":
+                counters["validated_fail"] += 1
+            # Append companion_score + breakdown to risk_reasons JSON
+            new_reasons = (
+                [f"companion_score={info['companion_score']}"]
+                + info["reasons"]
+            )
+            conn.execute(
+                "UPDATE infra_findings SET is_validated=?, risk_level=?, "
+                "risk_reasons=? WHERE id=?",
+                (info["is_validated"], info["risk_level"],
+                 json.dumps(new_reasons, ensure_ascii=False),
+                 row_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Telegram digest
+    try:
+        msg_lines = [
+            "🔬 <b>Infra reclassification done</b>",
+            f"Total: {counters['total']}",
+            f"  • mock (docker hosts): {counters['mock']}",
+            f"  • template (no creds): {counters['template']}",
+            f"  • real targets: {counters['real']}",
+            f"  • validated OK (TCP/auth ok): {counters['validated_ok']}",
+            f"  • validated FAIL: {counters['validated_fail']}",
+            "",
+            "🚨 New risk distribution:",
+            f"  • CRITICAL: {counters['critical']}",
+            f"  • HIGH: {counters['high']}",
+            f"  • MEDIUM: {counters['medium']}",
+            f"  • LOW: {counters['low']}",
+            "",
+            "→ /infra?risk=critical для disclosure-target'ов",
+        ]
+        await _send("\n".join(msg_lines))
+    except Exception as e:
+        log.error("reclassify TG digest err: %s", e)
+
+    log.info("reclassify_infra done: %s", counters)
+    return counters
 
 
 @app.post("/admin/cleanup_authors")
