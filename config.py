@@ -17,8 +17,13 @@ else:
 GITHUB_TOKEN = GITHUB_TOKENS[0]  # compat alias
 
 # ── Telegram ───────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+# Required on master (sends digests, runs key vault bot). Optional on mirror
+# satellite services (set MIRROR_MODE=1) — mirror doesn't ship to Telegram,
+# it posts finds back to master via mirror_relay. Use empty fallback so
+# satellite deployments don't need to fake these envs.
+_mirror_mode_early = os.environ.get("MIRROR_MODE", "0") == "1"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "") if _mirror_mode_early else os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")   if _mirror_mode_early else os.environ["TELEGRAM_CHAT_ID"]
 
 # ── Storage ────────────────────────────────────────────────────────────────
 # Check both existence AND writability — Railway creates /data mountpoint even
@@ -57,6 +62,28 @@ SCAN_LONG_TAIL_SAMPLE = float(os.environ.get("SCAN_LONG_TAIL_SAMPLE", "0.25"))
 # now we have 4x the load. Bump default to 3s — drops secondary 429 burst
 # rate without meaningfully extending elapsed cycle time.
 SCAN_PAGE_SLEEP_SEC = float(os.environ.get("SCAN_PAGE_SLEEP_SEC", "3"))
+
+# ── Mirror mode ────────────────────────────────────────────────────────────
+# Mirror mode = lightweight satellite Railway service that scans GitHub from
+# a different egress IP using its own slice of GITHUB_TOKENS, then ships
+# every find to the master via HTTP. The master keeps the single source of
+# truth (DB, Telegram bot, DeepSeek pipelines, validators).
+#
+# When MIRROR_MODE=1:
+#   • scan_cycle runs normally, using its own GITHUB_TOKENS env value
+#   • all OTHER background tasks are disabled (telegram bot, infra_jackpot,
+#     deepseek_themer/vocab/archetype, kaggle/postman/npm/pypi/hf/codeberg/
+#     gitee/commoncrawl/trufflehog/issues/gist/events/author scanners)
+#   • db.save_key still writes locally for dedup, then pushes the find to
+#     master via mirror_relay
+#   • master's existing /admin/validate_keys endpoint receives batches and
+#     does its own validation + dedup (key_hash UNIQUE)
+MIRROR_MODE       = os.environ.get("MIRROR_MODE", "0") == "1"
+MASTER_API_URL    = os.environ.get("MASTER_API_URL", "").rstrip("/")
+# Defaults to ADMIN_TOKEN — same secret on both services, no extra env needed
+MASTER_API_TOKEN  = os.environ.get("MASTER_API_TOKEN", "") or os.environ.get("ADMIN_TOKEN", "")
+MIRROR_FLUSH_SEC  = float(os.environ.get("MIRROR_FLUSH_SEC", "30"))   # how often to POST batched finds
+MIRROR_BATCH_MAX  = int(os.environ.get("MIRROR_BATCH_MAX", "200"))    # max items per batch POST
 
 # ── DB maintenance ─────────────────────────────────────────────────────────
 # Low-risk infra findings older than this many days are pruned automatically.

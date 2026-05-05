@@ -4,7 +4,7 @@ import httpx
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MIRROR_MODE
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +148,10 @@ async def notify_found(provider: str, key: str, repo: str, file_path: str,
     Only validated keys make it into the report — unverified findings are
     still saved to DB and visible at the / web UI, but Telegram noise is
     reserved for keys we've confirmed actually work + have quota."""
+    if MIRROR_MODE:
+        # Satellite service — Telegram lives on master. mirror_relay handles
+        # shipping the find to master where notification will fire.
+        return
     if not is_valid:
         return
     rarity = _ai_rarity(provider, key, is_valid)

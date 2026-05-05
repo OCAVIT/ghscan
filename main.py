@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse
 
 import db
 from config import (SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES,
-                    INFRA_LOW_RISK_MAX_DAYS, DB_PATH)
+                    INFRA_LOW_RISK_MAX_DAYS, DB_PATH, MIRROR_MODE)
 from validators import VALIDATORS as EXTRACTORS_AVAILABLE  # actually validators dict
 from scanner import run_cycle, _TOKEN_STATUS
 from notifier import notify_hourly_digest, notify_infra_hourly, flush_unverified_buffer
@@ -311,30 +311,42 @@ async def _hourly_alert_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    tasks = [
-        asyncio.create_task(_scan_loop(),           name="scan_loop"),
-        asyncio.create_task(_cleanup_loop(),        name="db_cleanup"),
-        asyncio.create_task(_revalidation_loop(),   name="revalidation"),
-        asyncio.create_task(trufflehog_loop(),      name="trufflehog"),
-        asyncio.create_task(gitee_loop(),           name="gitee_scanner"),
-        asyncio.create_task(events_loop(),          name="events_scanner"),
-        asyncio.create_task(gists_loop(),           name="gists_scanner"),
-        asyncio.create_task(kaggle_loop(),          name="kaggle_scanner"),
-        asyncio.create_task(hf_loop(),              name="hf_scanner"),
-        asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
-        asyncio.create_task(postman_loop(),         name="postman_scanner"),
-        asyncio.create_task(npm_loop(),             name="npm_scanner"),
-        asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
-        asyncio.create_task(cc_loop(),              name="commoncrawl_scanner"),
-        asyncio.create_task(author_walk_loop(),     name="author_walk"),
-        asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
-        asyncio.create_task(_themer_loop(),         name="query_themer"),
-        asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
-        asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
-        asyncio.create_task(_auto_jackpot_loop(),   name="auto_jackpot"),
-        asyncio.create_task(issues_loop(),          name="issues_scanner"),
-        asyncio.create_task(bot_loop(),             name="tg_bot"),
-    ]
+
+    if MIRROR_MODE:
+        # Mirror service: scans GitHub from a different IP, ships finds to
+        # master via mirror_relay. Disable everything else (telegram, deepseek
+        # pipelines, satellite scanners, infra_jackpot) — those run on master.
+        log.info("=== MIRROR_MODE active — only scan_cycle + mirror_relay flush ===")
+        from mirror_relay import flush_loop as _mirror_flush
+        tasks = [
+            asyncio.create_task(_scan_loop(),     name="scan_loop"),
+            asyncio.create_task(_mirror_flush(),  name="mirror_relay"),
+        ]
+    else:
+        tasks = [
+            asyncio.create_task(_scan_loop(),           name="scan_loop"),
+            asyncio.create_task(_cleanup_loop(),        name="db_cleanup"),
+            asyncio.create_task(_revalidation_loop(),   name="revalidation"),
+            asyncio.create_task(trufflehog_loop(),      name="trufflehog"),
+            asyncio.create_task(gitee_loop(),           name="gitee_scanner"),
+            asyncio.create_task(events_loop(),          name="events_scanner"),
+            asyncio.create_task(gists_loop(),           name="gists_scanner"),
+            asyncio.create_task(kaggle_loop(),          name="kaggle_scanner"),
+            asyncio.create_task(hf_loop(),              name="hf_scanner"),
+            asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
+            asyncio.create_task(postman_loop(),         name="postman_scanner"),
+            asyncio.create_task(npm_loop(),             name="npm_scanner"),
+            asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
+            asyncio.create_task(cc_loop(),              name="commoncrawl_scanner"),
+            asyncio.create_task(author_walk_loop(),     name="author_walk"),
+            asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
+            asyncio.create_task(_themer_loop(),         name="query_themer"),
+            asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
+            asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
+            asyncio.create_task(_auto_jackpot_loop(),   name="auto_jackpot"),
+            asyncio.create_task(issues_loop(),          name="issues_scanner"),
+            asyncio.create_task(bot_loop(),             name="tg_bot"),
+        ]
     yield
     for t in tasks:
         t.cancel()
@@ -703,7 +715,19 @@ async def health():
         },
         "db_mb":        db_mb,
         "files_scanned": db.get_stats().get("files_scanned", 0),
+        "mirror":       _mirror_queue_stats(),
     }
+
+
+def _mirror_queue_stats() -> dict | None:
+    """If we're a mirror service, expose unsynced relay queue depth so
+    diagnostics show whether finds are being shipped to master."""
+    try:
+        from mirror_relay import queue_stats
+        s = queue_stats()
+        return s if s.get("active") else None
+    except Exception:
+        return None
 
 
 # ── Rotation API for hermes-bounty rotation_proxy ─────────────────────────
@@ -876,6 +900,47 @@ async def admin_finds_timeline(
         ],
         "timeline": timeline,
     }
+
+
+@app.post("/admin/ingest_infra")
+async def admin_ingest_infra(
+    body: dict, authorization: str | None = Header(default=None)
+):
+    """Receive infra-cred finds from a mirror service. Master is the single
+    source of truth — mirror has already deduped locally; here we re-dedup
+    via cred_hash UNIQUE on insert and that's enough.
+
+    Body: {"source": "mirror", "items": [
+        {"cred_type", "cred", "repo", "path", "file_url",
+         "destination" (optional), "risk_level" (optional)}, ...
+    ]}
+    """
+    _check_admin(authorization)
+    items   = body.get("items") or []
+    src_lbl = (body.get("source") or "mirror")[:30]
+    n_saved = n_dupe = 0
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        ctype = (entry.get("cred_type") or "").strip()
+        cred  = (entry.get("cred") or "").strip()
+        repo  = (entry.get("repo") or "mirror")[:200]
+        path  = (entry.get("path") or "")[:200]
+        url   = (entry.get("file_url") or "")[:500]
+        dest  = (entry.get("destination") or "")[:300]
+        risk  = (entry.get("risk_level") or "low")[:10]
+        if not ctype or not cred:
+            continue
+        if db.infra_exists(cred):
+            n_dupe += 1
+            continue
+        ok = db.save_infra(ctype, cred, repo, path, url, 0, "",
+                           src_lbl, dest, risk, ["mirror_ingest"])
+        if ok:
+            n_saved += 1
+        else:
+            n_dupe += 1
+    return {"received": len(items), "ingested": n_saved, "duplicate": n_dupe}
 
 
 @app.get("/admin/config")

