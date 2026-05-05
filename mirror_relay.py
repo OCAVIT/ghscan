@@ -224,15 +224,18 @@ async def flush_loop() -> None:
 _LAST_QUERY_SYNC: dict = {"at": None, "inserted": 0, "blacklisted": 0, "total": 0}
 
 
-async def _pull_master_queries(client: httpx.AsyncClient) -> None:
+async def _pull_master_queries(client: httpx.AsyncClient) -> bool:
     """Fetch master's dynamic_queries snapshot and merge into local DB.
-    Called from query_sync_loop every MIRROR_QUERY_SYNC_SEC. Master's
-    /admin/dynamic_queries_export returns the full pool (DeepSeek-generated
-    + combinatorial + archetype-mined) including blacklist decisions, so
-    after sync mirror's scan_cycle picks them up via select_queries_for_cycle()
-    and stops being limited to the 1567 static QUERIES baseline."""
+    Returns True on success (200 + non-empty body parsed), False on any
+    failure (404 because master not redeployed yet, transient 5xx, network).
+
+    Master's /admin/dynamic_queries_export returns the full pool (DeepSeek-
+    generated + combinatorial + archetype-mined) including blacklist decisions,
+    so after sync mirror's scan_cycle picks them up via
+    select_queries_for_cycle() and stops being limited to the static baseline.
+    """
     if not is_active():
-        return
+        return False
     try:
         r = await client.get(
             f"{MASTER_API_URL}/admin/dynamic_queries_export",
@@ -243,11 +246,11 @@ async def _pull_master_queries(client: httpx.AsyncClient) -> None:
         if r.status_code != 200:
             log.warning("mirror query-sync: master returned %d: %s",
                         r.status_code, r.text[:200])
-            return
+            return False
         body = r.json()
         items = body.get("queries", [])
         if not items:
-            return
+            return False
         import db
         from datetime import datetime, timezone
         n_ins, n_bl = db.import_dynamic_queries_from_master(items)
@@ -257,27 +260,32 @@ async def _pull_master_queries(client: httpx.AsyncClient) -> None:
             "blacklisted": n_bl,
             "total":       len(items),
         })
-        if n_ins or n_bl:
-            log.info("mirror query-sync: pulled %d queries (new=%d, blacklist updated=%d)",
-                     len(items), n_ins, n_bl)
+        log.info("mirror query-sync: pulled %d queries (new=%d, blacklist updated=%d)",
+                 len(items), n_ins, n_bl)
+        return True
     except Exception as e:
         log.warning("mirror query-sync failed: %s", e)
+        return False
 
 
 async def query_sync_loop() -> None:
     """Background task — fetch master's dynamic_queries every
-    MIRROR_QUERY_SYNC_SEC. Started by main.py only when is_active() AND
-    MIRROR_QUERY_SYNC_SEC > 0."""
+    MIRROR_QUERY_SYNC_SEC on success, or RETRY_SEC on failure. Started
+    by main.py only when is_active() AND MIRROR_QUERY_SYNC_SEC > 0.
+
+    Failure-fast retry exists for the master-not-yet-redeployed-with-the-
+    /admin/dynamic_queries_export-endpoint case: without it, a 404 on first
+    attempt would force mirror to wait the full MIRROR_QUERY_SYNC_SEC=3600s
+    before retrying — meaning ~1h of running on the static baseline only."""
     if not is_active() or MIRROR_QUERY_SYNC_SEC <= 0:
         return
-    log.info("mirror_relay: query-sync started — pulling from %s every %ds",
-             MASTER_API_URL, MIRROR_QUERY_SYNC_SEC)
-    # Run once at startup so first cycle benefits from master's pool
+    RETRY_SEC = 60   # tight loop until first success
+    log.info("mirror_relay: query-sync started — pulling from %s every %ds (retry %ds on fail)",
+             MASTER_API_URL, MIRROR_QUERY_SYNC_SEC, RETRY_SEC)
     async with httpx.AsyncClient() as client:
-        await _pull_master_queries(client)
         while True:
-            await asyncio.sleep(MIRROR_QUERY_SYNC_SEC)
-            await _pull_master_queries(client)
+            ok = await _pull_master_queries(client)
+            await asyncio.sleep(MIRROR_QUERY_SYNC_SEC if ok else RETRY_SEC)
 
 
 def queue_stats() -> dict:
