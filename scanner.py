@@ -885,10 +885,10 @@ async def _run_chunk(client: httpx.AsyncClient,
 
         queries_done += 1
         # Inter-query throttle. Per-token search budget is 30 req/min ⇒ 2s/req
-        # would be safe-but-slow. With 30 PATs and most queries hitting 1-3 pages,
-        # 1s gives us ~60 q/min/worker headroom while still leaving search budget
-        # for the SCAN_PAGE_SLEEP_SEC=2 inter-page sleep on multi-page queries.
-        await asyncio.sleep(1)
+        # IS THE LIMIT. 30 PATs from a single Railway IP = server treats them
+        # as one source for SECONDARY rate limit (429). Lowering this to 1s
+        # at 30 workers caused a 429 storm (1800 q/min from 1 IP). Keep at 2s.
+        await asyncio.sleep(2)
 
 
 # ── Main cycle ─────────────────────────────────────────────────────────────
