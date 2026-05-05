@@ -943,6 +943,46 @@ async def admin_ingest_infra(
     return {"received": len(items), "ingested": n_saved, "duplicate": n_dupe}
 
 
+@app.get("/admin/mirror_stats")
+async def admin_mirror_stats(
+    hours: int = 24, authorization: str | None = Header(default=None)
+):
+    """Diagnostic — counts finds ingested from mirror service(s) in last N hours.
+    Mirror finds carry file_type='mirror' (or 'mirror_*') because the relay
+    posts them via /admin/validate_keys with source='mirror'."""
+    _check_admin(authorization)
+    hours = max(1, min(hours, 168))
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    with db._conn() as c:
+        ai_mirror = c.execute(
+            "SELECT COUNT(*) AS n, SUM(is_valid) AS v "
+            "FROM found_keys WHERE file_type LIKE 'mirror%' AND discovered_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        infra_mirror = c.execute(
+            "SELECT COUNT(*) AS n FROM infra_findings "
+            "WHERE file_type LIKE 'mirror%' AND discovered_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        # Latest mirror-sourced finds
+        latest = c.execute(
+            "SELECT provider, key_preview, repo, discovered_at "
+            "FROM found_keys WHERE file_type LIKE 'mirror%' "
+            "ORDER BY discovered_at DESC LIMIT 5",
+        ).fetchall()
+    return {
+        "window_hours":      hours,
+        "ai_from_mirror":    ai_mirror["n"] or 0,
+        "ai_valid_from_mirror": ai_mirror["v"] or 0,
+        "infra_from_mirror": infra_mirror["n"] or 0,
+        "latest": [
+            {"provider": r["provider"], "preview": r["key_preview"],
+             "repo": r["repo"], "at": r["discovered_at"]}
+            for r in latest
+        ],
+    }
+
+
 @app.get("/admin/config")
 async def admin_config(authorization: str | None = Header(default=None)):
     """Read-only snapshot of current scanner config (env-driven values).
