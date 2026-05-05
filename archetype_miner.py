@@ -41,7 +41,7 @@ import httpx
 import db
 from config import GITHUB_TOKENS
 from deepseek_client import call_deepseek, extract_text
-from query_axes import PROVIDER_AXES
+from query_axes import PROVIDER_AXES, DEPRIORITIZED_PROVIDERS
 
 log = logging.getLogger(__name__)
 
@@ -287,6 +287,10 @@ def _flatten_archetypes_to_queries(archetypes: list[dict]) -> list[dict]:
             provider = (qd.get("provider") or "multi").strip().lower().split(",")[0]
             if provider in ("gemini", "veo"):
                 provider = "google"
+            # Remap deprioritized tool APIs to "multi" — keeps the query but
+            # doesn't tag it as a serper/firecrawl-targeted archetype
+            if provider in DEPRIORITIZED_PROVIDERS:
+                provider = "multi"
             if provider not in _VALID_PROVIDERS:
                 provider = "multi"
             file_type = (qd.get("file_type") or "code").strip().lower()
@@ -335,9 +339,12 @@ async def run_archetype_cycle() -> dict:
             else:
                 y["evidence"] = ev
 
-    # Pull dead-pattern examples — from blacklisted dynamic_queries
+    # Pull dead-pattern examples — from blacklisted dynamic_queries.
+    # Skip serper/firecrawl: those are tool APIs, not core providers, and we
+    # don't want their dead patterns shaping archetype-mining direction.
     dead_query_rows: list[dict] = []
-    for prov in list(PROVIDER_AXES.keys())[:10]:
+    candidate_provs = [p for p in PROVIDER_AXES.keys() if p not in DEPRIORITIZED_PROVIDERS]
+    for prov in candidate_provs[:10]:
         for r in db.get_dead_queries(prov, limit=2):
             dead_query_rows.append({"repo": "(dead-pattern)", "evidence": {
                 "readme": f"Query: {r['query_str']} (used {r['times_used']}x, 0 yield)",

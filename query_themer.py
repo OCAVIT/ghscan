@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 import db
 from deepseek_client import call_deepseek, extract_text
-from query_axes import PROVIDER_AXES
+from query_axes import PROVIDER_AXES, DEPRIORITIZED_PROVIDERS
 
 log = logging.getLogger(__name__)
 
@@ -67,10 +67,14 @@ def _yield_summary_for_prompt() -> str:
     """Pull recent yield stats so DeepSeek learns what works/doesn't.
     Keeps each list short to fit prompt budget without recursive thinking."""
     parts: list[str] = []
+    # Skip tools/scrapers (serper, firecrawl) — they're not core AI providers
+    # and we don't want DeepSeek burning reasoning budget on them.
+    providers = [p for p in PROVIDER_AXES if p not in DEPRIORITIZED_PROVIDERS]
+
     # Top yielding queries across all providers (positive examples)
     seen = 0
     parts.append("YIELD FEEDBACK — top productive queries from prior batches:")
-    for prov in list(PROVIDER_AXES)[:30]:
+    for prov in providers[:30]:
         rows = db.get_top_yielding_queries(prov, limit=3)
         for r in rows:
             if seen >= 15:
@@ -87,7 +91,7 @@ def _yield_summary_for_prompt() -> str:
     # Dead patterns to avoid repeating
     parts.append("\nDEAD PATTERNS (5+ uses, 0 yield — DON'T mimic these):")
     seen = 0
-    for prov in list(PROVIDER_AXES)[:30]:
+    for prov in providers[:30]:
         rows = db.get_dead_queries(prov, limit=2)
         for r in rows:
             if seen >= 10:
@@ -113,7 +117,12 @@ PROVIDERS WE CARE ABOUT (priority order):
   ark/doubao/seedance (Volcengine), kimi/moonshot, glm/zhipuai,
   elevenlabs, fal, replicate, runway, suno, kling, fireworks,
   novita, hyperbolic, deepinfra, aimlapi, perplexity, grok/xai,
-  stability, luma, pika, twelvelabs, commonstack, serper, huggingface
+  stability, luma, pika, twelvelabs, commonstack, huggingface,
+  pixverse, siliconflow, portkey, krea, hedra, wavespeed
+
+DO NOT generate queries for: serper, firecrawl. These are search/scraping
+tool APIs (not AI generation providers); static QUERIES already cover them
+and we don't want to spend creative budget here.
 
 THEMES (mix freely — do NOT cluster all queries on one theme):
 

@@ -93,6 +93,13 @@ SIZE_BUCKETS: list[str] = ["size:<1000", "size:1000..5000", "size:>5000"]
 # get axes here. Shape-only matchers (luma- UUID, tlk_*, etc.) without a
 # meaningful literal "trigger word" rely on the static QUERIES alone.
 
+# Providers we still scan via static QUERIES but EXCLUDE from DeepSeek-driven
+# pipelines (themer/vocab_expander/archetype_miner) — they are
+# search/scraping tool APIs rather than core AI generation providers, and we
+# don't want DeepSeek burning reasoning budget on them. Static QUERIES still
+# cover them; the keys still validate; they just don't drive prompt generation.
+DEPRIORITIZED_PROVIDERS: frozenset[str] = frozenset({"serper", "firecrawl"})
+
 PROVIDER_AXES: dict[str, dict[str, list[str]]] = {
 
     "openai": {

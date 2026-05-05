@@ -32,7 +32,7 @@ import httpx
 import db
 from config import GITHUB_TOKENS
 from deepseek_client import call_deepseek, extract_text
-from query_axes import PROVIDER_AXES
+from query_axes import PROVIDER_AXES, DEPRIORITIZED_PROVIDERS
 
 log = logging.getLogger(__name__)
 
@@ -406,6 +406,9 @@ async def run_expansion_cycle() -> dict[str, Any]:
             # Skip providers without ANY valid keys — vocab discovery
             # needs concrete source examples
             if valid_count.get(provider, 0) == 0:
+                continue
+            # Skip search/scraping tool APIs — not core AI providers
+            if provider in DEPRIORITIZED_PROVIDERS:
                 continue
             try:
                 inserted = await expand_provider(provider, gh_token, c)
