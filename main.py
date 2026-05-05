@@ -878,6 +878,30 @@ async def admin_finds_timeline(
     }
 
 
+@app.get("/admin/config")
+async def admin_config(authorization: str | None = Header(default=None)):
+    """Read-only snapshot of current scanner config (env-driven values).
+    No secrets — just tunables."""
+    _check_admin(authorization)
+    from config import (
+        SCAN_INTERVAL, YOUNG_REPO_DAYS, BIG_SERVICE_STARS, REPO_RESCAN_DAYS,
+        CONCURRENT_ITEMS, MAX_PAGES, SCAN_MAX_QUERIES_PER_CYCLE,
+        SCAN_LONG_TAIL_SAMPLE, SCAN_PAGE_SLEEP_SEC, GITHUB_TOKENS,
+    )
+    return {
+        "tokens":                     len(GITHUB_TOKENS),
+        "SCAN_INTERVAL":              SCAN_INTERVAL,
+        "MAX_PAGES":                  MAX_PAGES,
+        "CONCURRENT_ITEMS":           CONCURRENT_ITEMS,
+        "SCAN_MAX_QUERIES_PER_CYCLE": SCAN_MAX_QUERIES_PER_CYCLE,
+        "SCAN_LONG_TAIL_SAMPLE":      SCAN_LONG_TAIL_SAMPLE,
+        "SCAN_PAGE_SLEEP_SEC":        SCAN_PAGE_SLEEP_SEC,
+        "YOUNG_REPO_DAYS":            YOUNG_REPO_DAYS,
+        "BIG_SERVICE_STARS":          BIG_SERVICE_STARS,
+        "REPO_RESCAN_DAYS":           REPO_RESCAN_DAYS,
+    }
+
+
 @app.post("/admin/fix_ark")
 async def admin_fix_ark(authorization: str | None = Header(default=None)):
     """
