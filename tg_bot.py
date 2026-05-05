@@ -182,10 +182,27 @@ def _main_keyboard(counts: dict[str, int]) -> dict:
     return {"inline_keyboard": rows}
 
 
-def _cat_text(cid: str, counts: dict[str, int]) -> str:
+_CAT_PAGE_SIZE = 12  # auto-paginate when category has more providers than this
+
+
+def _cat_pages(cid: str) -> int:
+    n = len(_CATS[cid]["p"])
+    return max(1, (n + _CAT_PAGE_SIZE - 1) // _CAT_PAGE_SIZE)
+
+
+def _cat_text(cid: str, counts: dict[str, int], page: int = 0) -> str:
     cat   = _CATS[cid]
-    lines = [f"{cat['e']} <b>{cat['n']}</b>\n"]
-    for prov in cat["p"]:
+    provs = cat["p"]
+    pages = _cat_pages(cid)
+    page  = max(0, min(page, pages - 1))
+
+    header = f"{cat['e']} <b>{cat['n']}</b>"
+    if pages > 1:
+        header += f"  <i>(стр. {page + 1}/{pages})</i>"
+    lines = [header, ""]
+
+    page_provs = provs[page * _CAT_PAGE_SIZE : (page + 1) * _CAT_PAGE_SIZE]
+    for prov in page_provs:
         cnt  = counts.get(prov, 0)
         meta = _PROV.get(prov, {"e": "🔑", "n": prov})
         mark = "✅" if cnt > 0 else "⬜"
@@ -194,11 +211,16 @@ def _cat_text(cid: str, counts: dict[str, int]) -> str:
     return "\n".join(lines)
 
 
-def _cat_keyboard(cid: str, counts: dict[str, int]) -> dict:
-    cat  = _CATS[cid]
+def _cat_keyboard(cid: str, counts: dict[str, int], page: int = 0) -> dict:
+    cat   = _CATS[cid]
+    provs = cat["p"]
+    pages = _cat_pages(cid)
+    page  = max(0, min(page, pages - 1))
+
+    page_provs = provs[page * _CAT_PAGE_SIZE : (page + 1) * _CAT_PAGE_SIZE]
     rows = []
     buf  = []
-    for prov in cat["p"]:
+    for prov in page_provs:
         cnt  = counts.get(prov, 0)
         meta = _PROV.get(prov, {"e": "🔑", "n": prov})
         buf.append({"text": f"{meta['e']} {meta['n']} ({cnt})", "callback_data": f"p:{prov}"})
@@ -207,7 +229,17 @@ def _cat_keyboard(cid: str, counts: dict[str, int]) -> dict:
             buf = []
     if buf:
         rows.append(buf)
-    total = sum(counts.get(p, 0) for p in cat["p"])
+
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append({"text": "◀ Prev", "callback_data": f"c:{cid}:{page - 1}"})
+        nav.append({"text": f"· {page + 1}/{pages} ·", "callback_data": "noop"})
+        if page < pages - 1:
+            nav.append({"text": "Next ▶", "callback_data": f"c:{cid}:{page + 1}"})
+        rows.append(nav)
+
+    total = sum(counts.get(p, 0) for p in provs)
     rows.append([{"text": f"📦 Все {cat['n']} ({total})", "callback_data": f"g:{cid}"}])
     rows.append([{"text": "◀ Назад", "callback_data": "m"}])
     return {"inline_keyboard": rows}
@@ -320,9 +352,20 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
                    reply_markup=_main_keyboard(counts))
         return
 
-    # ── Category sub-menu ─────────────────────────────────────────────
+    # ── Pagination tap on the page-indicator button (silent ack) ──────
+    if data == "noop":
+        await _api(client, "answerCallbackQuery", callback_query_id=cbq_id)
+        return
+
+    # ── Category sub-menu (с пагинацией: c:cid  |  c:cid:page) ─────────
     if data.startswith("c:"):
-        cid = data[2:]
+        rest  = data[2:]
+        parts = rest.split(":", 1)
+        cid   = parts[0]
+        try:
+            page = int(parts[1]) if len(parts) > 1 else 0
+        except ValueError:
+            page = 0
         if cid not in _CATS:
             await _api(client, "answerCallbackQuery", callback_query_id=cbq_id, text="?")
             return
@@ -330,8 +373,8 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
         counts = _counts()
         await _api(client, "editMessageText",
                    chat_id=chat_id, message_id=msg_id,
-                   text=_cat_text(cid, counts), parse_mode="HTML",
-                   reply_markup=_cat_keyboard(cid, counts))
+                   text=_cat_text(cid, counts, page), parse_mode="HTML",
+                   reply_markup=_cat_keyboard(cid, counts, page))
         return
 
     # ── Stats ─────────────────────────────────────────────────────────
