@@ -52,6 +52,30 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# In-memory ring buffer of recent log records. Lets us grep recent logs via
+# /admin/logs without needing Railway CLI access. Captures both INFO and
+# WARNING so 429/timeouts/etc are visible.
+from collections import deque as _deque
+_LOG_BUFFER: _deque = _deque(maxlen=10000)
+
+
+class _RingBufferHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            _LOG_BUFFER.append({
+                "ts":      datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+                "level":   record.levelname,
+                "logger":  record.name,
+                "message": record.getMessage()[:1000],
+            })
+        except Exception:
+            pass
+
+
+_ring_handler = _RingBufferHandler()
+_ring_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_ring_handler)
+
 
 async def _scan_loop():
     while True:
@@ -1416,6 +1440,47 @@ async def admin_cleanup_authors(authorization: str | None = Header(default=None)
     result = await asyncio.to_thread(_do)
     log.info("admin cleanup_authors: removed %d/%d invalid-login rows",
              result["deleted"], result["total"])
+    return {"ok": True, **result}
+
+
+@app.post("/admin/purge_happyhorse_fake")
+async def admin_purge_happyhorse_fake(authorization: str | None = Header(default=None)):
+    """One-shot cleanup of false-positive happyhorse rows from honeyhiveai/*
+    repos. The old extract_happyhorse regex had HH_API_KEY trigger that
+    collided with HoneyHive AI issue bodies. Since the new (tightened) regex
+    requires env-style =/: separator, we simply re-run the new extractor
+    against each existing happyhorse row's stored key shape — keys that don't
+    look like proper env-var values get deleted.
+
+    Conservative approach: just delete all is_valid=0 happyhorse rows
+    (none are valid anyway, and the new regex will re-find any genuine ones
+    on next scan if their source repos still exist)."""
+    _check_admin(authorization)
+
+    def _do() -> dict:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            cur = conn.execute(
+                "SELECT id, repo, file_path, key_full FROM found_keys "
+                "WHERE provider='happyhorse' AND is_valid=0"
+            )
+            rows = cur.fetchall()
+            ids = [r[0] for r in rows]
+            samples = [{"repo": r[1], "path": r[2], "key": r[3][:40]} for r in rows[:10]]
+            if ids:
+                conn.execute(
+                    f"DELETE FROM found_keys WHERE id IN ({','.join('?'*len(ids))})",
+                    ids,
+                )
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return {"deleted": len(ids), "samples": samples}
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(_do)
+    log.info("admin purge_happyhorse_fake: %s", result)
     return {"ok": True, **result}
 
 

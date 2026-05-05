@@ -347,11 +347,19 @@ def extract_runway(content: str) -> list[str]:
 # ── Happy Horse / RunHappyHorse / LimeAI ─────────────────────────────────────
 # AI video generation service (image-to-video / text-to-video).
 # Also exposed under limeai.top domain. Alibaba wan-video / i2v context.
+#
+# 2026-05-05: tightened after false-positive audit revealed honeyhiveai/* repos
+# triggering matches via 'HH_API_KEY' (too short prefix — collides with
+# section headers like "HH/INTEGRATION_CHECKLIST" in issue bodies) and
+# 'happy_horse_key' (generic English words). 300-char window also too wide
+# for issue-body content. Now requires env-style assignment immediately after
+# trigger, with only 60-char gap.
 _HH_CTX = re.compile(
     r'(?:HAPPY_HORSE_API_KEY|RUNHAPPYHORSE_API_KEY|HAPPYHORSE_API_KEY'
-    r'|HH_API_KEY|LIMEAI_API_KEY|LIME_AI_KEY|happy_horse_key'
+    r'|LIMEAI_API_KEY|LIME_AI_KEY'
     r'|runhappyhorse\.net|happyhorse\.ai|limeai\.top|lime-ai\.com)'
-    r'[\s\S]{0,300}'
+    r'[\s\S]{0,60}?'                    # tightened from 300 to 60, non-greedy
+    r'[=:]\s*["\']?'                    # MUST have =/: separator (env-var style)
     r'([A-Za-z0-9_\-]{20,120})',
     re.IGNORECASE,
 )
