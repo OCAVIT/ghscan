@@ -3068,6 +3068,93 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"TWELVELABS_API_KEY" extension:ipynb',	"twelvelabs",	"notebook"),
     ('"TWELVELABS_API_KEY" extension:md',	"twelvelabs",	"markdown"),
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # 2026-05 NEW PROVIDERS — pixverse, siliconflow, firecrawl, portkey,
+    # krea, hedra, wavespeed
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # ── PixVerse (text-to-video / image-to-video) ──────────────────────
+    ('"PIXVERSE_API_KEY" filename:.env',                  "pixverse", "env"),
+    ('"PIXVERSE_API_KEY" filename:.env.local',            "pixverse", "env"),
+    ('"PIXVERSE_API_KEY" filename:.env.production',       "pixverse", "env"),
+    ('"PIXVERSE_API_KEY" language:python',                "pixverse", "code"),
+    ('"PIXVERSE_API_KEY" language:javascript',            "pixverse", "code"),
+    ('"PIXVERSE_API_KEY" language:typescript',            "pixverse", "code"),
+    ('"PIXVERSE_API_KEY" extension:ipynb',                "pixverse", "notebook"),
+    ('"app-api.pixverse.ai" language:python',             "pixverse", "code"),
+    ('"app-api.pixverse.ai" language:javascript',         "pixverse", "code"),
+    ('"PIXVERSE_API_KEY" filename:docker-compose.yml',    "pixverse", "docker"),
+
+    # ── SiliconFlow (CN aggregator: DeepSeek/Qwen/GLM/Yi via one key) ──
+    ('"SILICONFLOW_API_KEY" filename:.env',               "siliconflow", "env"),
+    ('"SILICONFLOW_API_KEY" "sk-" filename:.env',         "siliconflow", "env"),
+    ('"SILICONCLOUD_API_KEY" filename:.env',              "siliconflow", "env"),
+    ('"SILICONFLOW_API_KEY" filename:.env.local',         "siliconflow", "env"),
+    ('"SILICONFLOW_API_KEY" filename:.env.production',    "siliconflow", "env"),
+    ('"SILICONFLOW_API_KEY" language:python',             "siliconflow", "code"),
+    ('"SILICONFLOW_API_KEY" language:javascript',         "siliconflow", "code"),
+    ('"SILICONFLOW_API_KEY" language:typescript',         "siliconflow", "code"),
+    ('"SILICONFLOW_API_KEY" language:go',                 "siliconflow", "code"),
+    ('"SILICONFLOW_API_KEY" extension:ipynb',             "siliconflow", "notebook"),
+    ('"api.siliconflow.cn" "sk-" language:python',        "siliconflow", "code"),
+    ('"api.siliconflow.cn" "sk-" language:javascript',    "siliconflow", "code"),
+    ('"siliconflow" "sk-" filename:config.py',            "siliconflow", "config"),
+    ('"SILICONFLOW_API_KEY" filename:docker-compose.yml', "siliconflow", "docker"),
+
+    # ── Firecrawl (fc-* prefix unique) ──────────────────────────────────
+    ('"FIRECRAWL_API_KEY" filename:.env',                 "firecrawl", "env"),
+    ('"FIRECRAWL_API_KEY" "fc-" filename:.env',           "firecrawl", "env"),
+    ('"FIRECRAWL_API_KEY" filename:.env.local',           "firecrawl", "env"),
+    ('"FIRECRAWL_API_KEY" filename:.env.production',      "firecrawl", "env"),
+    ('"fc-" filename:.env',                               "firecrawl", "env"),
+    ('"FIRECRAWL_API_KEY" language:python',               "firecrawl", "code"),
+    ('"FIRECRAWL_API_KEY" language:typescript',           "firecrawl", "code"),
+    ('"FIRECRAWL_API_KEY" language:javascript',           "firecrawl", "code"),
+    ('"FIRECRAWL_API_KEY" extension:ipynb',               "firecrawl", "notebook"),
+    ('"api.firecrawl.dev" language:python',               "firecrawl", "code"),
+    ('"firecrawl" "fc-" filename:config.py',              "firecrawl", "config"),
+
+    # ── Portkey AI gateway (pk-* virtual keys, gateway to upstream) ────
+    ('"PORTKEY_API_KEY" filename:.env',                   "portkey", "env"),
+    ('"PORTKEY_API_KEY" filename:.env.local',             "portkey", "env"),
+    ('"PORTKEY_API_KEY" filename:.env.production',        "portkey", "env"),
+    ('"PORTKEY_API_KEY" "pk-" filename:.env',             "portkey", "env"),
+    ('"x-portkey-api-key" language:javascript',           "portkey", "code"),
+    ('"x-portkey-api-key" language:python',               "portkey", "code"),
+    ('"x-portkey-virtual-key" language:python',           "portkey", "code"),
+    ('"PORTKEY_API_KEY" language:python',                 "portkey", "code"),
+    ('"PORTKEY_API_KEY" language:typescript',             "portkey", "code"),
+    ('"PORTKEY_API_KEY" extension:ipynb',                 "portkey", "notebook"),
+    ('"api.portkey.ai" "pk-" language:python',            "portkey", "code"),
+
+    # ── Krea AI (image+video gen) ──────────────────────────────────────
+    ('"KREA_API_KEY" filename:.env',                      "krea", "env"),
+    ('"KREA_API_KEY" filename:.env.local',                "krea", "env"),
+    ('"KREA_API_KEY" language:python',                    "krea", "code"),
+    ('"KREA_API_KEY" language:typescript',                "krea", "code"),
+    ('"KREA_API_KEY" language:javascript',                "krea", "code"),
+    ('"api.krea.ai" "Bearer" language:python',            "krea", "code"),
+    ('"api.krea.ai" "Bearer" language:typescript',        "krea", "code"),
+
+    # ── Hedra AI (Character-3, Omnia, Veo 3.1 unified) ─────────────────
+    ('"HEDRA_API_KEY" filename:.env',                     "hedra", "env"),
+    ('"HEDRA_API_KEY" filename:.env.local',               "hedra", "env"),
+    ('"HEDRA_API_KEY" language:python',                   "hedra", "code"),
+    ('"HEDRA_API_KEY" language:typescript',               "hedra", "code"),
+    ('"HEDRA_API_KEY" language:javascript',               "hedra", "code"),
+    ('"X-API-Key" "api.hedra.com" language:python',       "hedra", "code"),
+    ('"X-API-Key" "api.hedra.com" language:typescript',   "hedra", "code"),
+    ('"HEDRA_API_KEY" extension:ipynb',                   "hedra", "notebook"),
+
+    # ── WaveSpeed AI (WAN 2.7, Z-Image multimodal) ─────────────────────
+    ('"WAVESPEED_API_KEY" filename:.env',                 "wavespeed", "env"),
+    ('"WAVESPEED_API_KEY" filename:.env.local',           "wavespeed", "env"),
+    ('"WAVESPEED_API_KEY" language:python',               "wavespeed", "code"),
+    ('"WAVESPEED_API_KEY" language:typescript',           "wavespeed", "code"),
+    ('"WAVESPEED_API_KEY" language:javascript',           "wavespeed", "code"),
+    ('"api.wavespeed.ai" "Bearer" language:python',       "wavespeed", "code"),
+    ('"api.wavespeed.ai" "Bearer" language:typescript',   "wavespeed", "code"),
+
     # ─────────────────────────────────────────────────────────────────────
     # Archetype queries B (multi-provider chat UIs), C (agent frameworks),
     # E (Discord/TG/Slack bots), F (RAG kits), G (image/video frontend),
