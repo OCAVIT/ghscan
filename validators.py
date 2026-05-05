@@ -1220,6 +1220,164 @@ async def validate_twelvelabs(key: str) -> bool:
         return False
 
 
+# ── 2026-05 additions ────────────────────────────────────────────────────────
+
+async def validate_pixverse(key: str) -> bool:
+    """API-KEY header (NOT Bearer) + Ai-Trace-Id UUID per request.
+    Uses /openapi/v2/video/list — cheap GET that requires valid auth."""
+    import uuid as _uuid
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://app-api.pixverse.ai/openapi/v2/video/list",
+                headers={"API-KEY": key,
+                         "Ai-Trace-Id": str(_uuid.uuid4())},
+            )
+            if r.status_code == 200:
+                # 200 may come with success=false if auth is wrong
+                try:
+                    body = r.json()
+                    if isinstance(body, dict) and body.get("ErrCode") in (50001, 50002, 401):
+                        return False
+                except Exception:
+                    pass
+                return True
+            if r.status_code in (401, 403):
+                return False
+            return r.status_code < 500
+    except Exception as e:
+        log.debug("pixverse validate err: %s", e)
+        return False
+
+
+async def validate_siliconflow(key: str) -> bool:
+    """OpenAI-compatible Bearer auth. /v1/user/info returns balance.
+    True only if balance > 0 (matches deepseek pattern)."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.siliconflow.cn/v1/user/info",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            if r.status_code != 200:
+                return False
+            body = r.json()
+            data = body.get("data") or body
+            for fld in ("balance", "totalBalance", "total_balance",
+                        "current_balance", "remaining"):
+                v = data.get(fld) if isinstance(data, dict) else None
+                if v is not None:
+                    try:
+                        return float(v) > 0
+                    except (TypeError, ValueError):
+                        return True
+            return True
+    except Exception as e:
+        log.debug("siliconflow validate err: %s", e)
+        return False
+
+
+async def validate_firecrawl(key: str) -> bool:
+    """Bearer fc-* token. /v1/team/credit-usage returns remaining credits."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.firecrawl.dev/v1/team/credit-usage",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            if r.status_code != 200:
+                return False
+            body = r.json()
+            data = body.get("data") or body
+            for fld in ("remaining_credits", "remainingCredits",
+                        "credits_remaining", "credits"):
+                v = data.get(fld) if isinstance(data, dict) else None
+                if v is not None:
+                    try:
+                        return int(v) > 0
+                    except (TypeError, ValueError):
+                        return True
+            return True
+    except Exception as e:
+        log.debug("firecrawl validate err: %s", e)
+        return False
+
+
+async def validate_portkey(key: str) -> bool:
+    """x-portkey-api-key header (NOT Bearer). /v1/models is cheap."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.portkey.ai/v1/models",
+                headers={"x-portkey-api-key": key},
+            )
+            return r.status_code == 200
+    except Exception as e:
+        log.debug("portkey validate err: %s", e)
+        return False
+
+
+async def validate_krea(key: str) -> bool:
+    """Bearer auth. Try /v1/me first; fall back to /v1/models."""
+    try:
+        async with _client() as c:
+            for path in ("/v1/me", "/v1/users/me", "/v1/models"):
+                r = await c.get(
+                    f"https://api.krea.ai{path}",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+                if r.status_code == 200:
+                    return True
+                if r.status_code in (401, 403):
+                    return False
+            return False
+    except Exception as e:
+        log.debug("krea validate err: %s", e)
+        return False
+
+
+async def validate_hedra(key: str) -> bool:
+    """X-API-Key header. /web-app/public/models lists available models."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.hedra.com/web-app/public/models",
+                headers={"X-API-Key": key},
+            )
+            if r.status_code == 200:
+                return True
+            if r.status_code in (401, 403):
+                return False
+            return r.status_code < 500
+    except Exception as e:
+        log.debug("hedra validate err: %s", e)
+        return False
+
+
+async def validate_wavespeed(key: str) -> bool:
+    """Bearer auth. /api/v3/balance — requires top-up to be activated."""
+    try:
+        async with _client() as c:
+            r = await c.get(
+                "https://api.wavespeed.ai/api/v3/balance",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            if r.status_code != 200:
+                return False
+            body = r.json()
+            data = body.get("data") or body
+            bal = data.get("balance") if isinstance(data, dict) else None
+            if bal is not None:
+                try:
+                    return float(bal) > 0
+                except (TypeError, ValueError):
+                    return True
+            return True
+    except Exception as e:
+        log.debug("wavespeed validate err: %s", e)
+        return False
+
+
 VALIDATORS: dict[str, callable] = {
     "openai":       validate_openai,
     "openai_image": validate_openai_image,
@@ -1253,6 +1411,14 @@ VALIDATORS: dict[str, callable] = {
     "luma":         validate_luma,
     "pika":         validate_pika,
     "twelvelabs":   validate_twelvelabs,
+    # 2026-05 additions
+    "siliconflow":  validate_siliconflow,
+    "firecrawl":    validate_firecrawl,
+    "portkey":      validate_portkey,
+    "krea":         validate_krea,
+    "hedra":        validate_hedra,
+    "wavespeed":    validate_wavespeed,
+    "pixverse":     validate_pixverse,
 }
 
 

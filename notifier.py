@@ -90,6 +90,14 @@ _PROVIDER_EMOJI = {
     "huggingface":   "🤗",
     "fireworks":     "🎆",
     "openrouter":    "🔀",
+    # 2026-05 additions
+    "pixverse":      "🎥",
+    "siliconflow":   "🌊",
+    "firecrawl":     "🔥",
+    "portkey":       "🚪",
+    "krea":          "🎭",
+    "hedra":         "🎬",
+    "wavespeed":     "🌐",
 }
 
 _CRED_EMOJI = {

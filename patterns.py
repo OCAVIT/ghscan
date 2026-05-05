@@ -911,6 +911,197 @@ def extract_twelvelabs(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# ── PixVerse (AI text-to-video / image-to-video) ─────────────────────────────
+# Auth: 'API-KEY' header (NOT Bearer) + 'Ai-Trace-Id' UUID per request.
+# Domain: app-api.pixverse.ai. Key shape: generic 20-80 char alnum (no
+# specific prefix observed in 2026-05 docs).
+_PIXVERSE_CTX = re.compile(
+    r'(?:PIXVERSE_API_KEY|PIXVERSE_KEY|PIXVERSE_TOKEN|PIXVERSE_SECRET'
+    r'|app-api\.pixverse\.ai|platform\.pixverse\.ai)'
+    r'\s*[=:]\s*["\']?'
+    r'([A-Za-z0-9_\-]{20,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_pixverse(content: str) -> list[str]:
+    if not re.search(r'(?i)pixverse', content):
+        return []
+    found = []
+    for m in _PIXVERSE_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 20 and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── SiliconFlow / SiliconCloud (Chinese multi-model aggregator) ──────────────
+# OpenAI-compatible at api.siliconflow.cn/v1. Frontier: DeepSeek/Qwen/GLM/Yi.
+# Key shape: sk-* 48 chars (mirrors OpenAI exactly — disambiguation via context).
+_SF_DIRECT = re.compile(
+    r'(?:SILICONFLOW_API_KEY|SILICONCLOUD_API_KEY|SILICON_FLOW_KEY'
+    r'|SILICONFLOW_KEY|SILICONCLOUD_KEY)'
+    r'\s*[=:]\s*["\']?(sk-[A-Za-z0-9]{48})',
+    re.IGNORECASE,
+)
+_SF_CTX = re.compile(
+    r'(?:api\.siliconflow\.cn|siliconflow\.cn|siliconcloud|siliconflow)'
+    r'[\s\S]{0,300}'
+    r'(sk-[A-Za-z0-9]{48})',
+    re.IGNORECASE,
+)
+
+
+def extract_siliconflow(content: str) -> list[str]:
+    if not re.search(r'(?i)siliconflow|siliconcloud', content):
+        return []
+    found = []
+    for m in _SF_DIRECT.finditer(content):
+        key = m.group(1)
+        if not _FAKE.search(key):
+            found.append(key)
+    for m in _SF_CTX.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Firecrawl (web scraping API for AI agents) ───────────────────────────────
+# Key: 'fc-' + 32 hex chars (UUID without dashes). Auth: Bearer.
+# Used heavily in 2025-26 AI-agent stacks (Mastra, LiteLLM tools, n8n).
+_FC_STANDALONE = re.compile(r'(?<![A-Za-z0-9])(fc-[a-f0-9]{32})(?![A-Za-z0-9])')
+_FC_CTX = re.compile(
+    r'(?:FIRECRAWL_API_KEY|FIRECRAWL_KEY|FIRECRAWL_TOKEN'
+    r'|api\.firecrawl\.dev|firecrawl\.dev|firecrawl)'
+    r'[\s\S]{0,200}'
+    r'(fc-[a-f0-9]{32})',
+    re.IGNORECASE,
+)
+
+
+def extract_firecrawl(content: str) -> list[str]:
+    found = []
+    for m in _FC_STANDALONE.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 80): m.end() + 40]
+        if not _FAKE.search(ctx):
+            found.append(key)
+    for m in _FC_CTX.finditer(content):
+        key = m.group(1)
+        if key not in found and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Portkey AI (LLM gateway / one-key access to user's stored upstream keys) ─
+# Critical: Portkey users store their OpenAI/Anthropic/etc keys in Portkey
+# dashboard. Leaking PORTKEY_API_KEY = access to all stored upstream keys
+# via /v1/api-keys/* endpoints. Per-user balance can be huge.
+# Auth: 'x-portkey-api-key' header (NOT Bearer).
+# Virtual keys (per-provider) use 'pk-*' prefix.
+_PORTKEY_PK = re.compile(r'(?<![A-Za-z0-9])(pk-[A-Za-z0-9_\-]{20,60})(?![A-Za-z0-9])')
+_PORTKEY_CTX = re.compile(
+    r'(?:PORTKEY_API_KEY|PORTKEY_KEY|PORTKEY_TOKEN|x-portkey-api-key'
+    r'|x-portkey-virtual-key|api\.portkey\.ai|portkey\.ai)'
+    r'[\s\S]{0,150}?'
+    r'[=:\s"\']'
+    r'([A-Za-z0-9_\-]{30,80})',
+    re.IGNORECASE,
+)
+
+
+def extract_portkey(content: str) -> list[str]:
+    if not re.search(r'(?i)portkey', content):
+        return []
+    found = []
+    # pk- prefix (virtual keys) — strong signal
+    for m in _PORTKEY_PK.finditer(content):
+        key = m.group(1)
+        ctx = content[max(0, m.start() - 100): m.end() + 50]
+        if 'portkey' in ctx.lower() and not _FAKE.search(key):
+            found.append(key)
+    # ENV-name context (main account API key)
+    for m in _PORTKEY_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) < 30 or _FAKE.search(key) or key in found:
+            continue
+        # Filter junk: must contain digit + letter mix
+        if not re.search(r'[0-9]', key) or not re.search(r'[a-zA-Z]', key):
+            continue
+        found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Krea AI (image + video generation, popular in creative-dev tools) ────────
+# Auth: Bearer (or KEY_ID:SECRET pair stored together).
+_KREA_CTX = re.compile(
+    r'(?:KREA_API_KEY|KREA_KEY|KREA_TOKEN|KREA_SECRET'
+    r'|api\.krea\.ai|krea\.ai/api)'
+    r'\s*[=:]\s*["\']?'
+    r'([A-Za-z0-9_\-:.]{30,120})',
+    re.IGNORECASE,
+)
+
+
+def extract_krea(content: str) -> list[str]:
+    if not re.search(r'(?i)krea\.ai|KREA_API', content):
+        return []
+    found = []
+    for m in _KREA_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 30 and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── Hedra AI (character video gen — Character-3, Omnia, etc) ─────────────────
+# Auth: 'X-API-Key' header. Domain: api.hedra.com.
+# Launched full Platform API Feb 2026 — high freshness, popular among
+# YouTube tutorial repos.
+_HEDRA_CTX = re.compile(
+    r'(?:HEDRA_API_KEY|HEDRA_KEY|HEDRA_TOKEN|HEDRA_SECRET'
+    r'|api\.hedra\.com|hedra\.com/api|hedra-labs)'
+    r'\s*[=:]\s*["\']?'
+    r'([A-Za-z0-9_\-]{30,120})',
+    re.IGNORECASE,
+)
+
+
+def extract_hedra(content: str) -> list[str]:
+    if not re.search(r'(?i)hedra', content):
+        return []
+    found = []
+    for m in _HEDRA_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 30 and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
+# ── WaveSpeed AI (multimodal acceleration platform — WAN, Z-Image, etc) ──────
+# Auth: Bearer. Domain: api.wavespeed.ai. Has /api/v3/balance for validation.
+# Note: keys require top-up to activate per docs.
+_WAVESPEED_CTX = re.compile(
+    r'(?:WAVESPEED_API_KEY|WAVESPEED_KEY|WAVESPEED_TOKEN|WAVESPEED_SECRET'
+    r'|api\.wavespeed\.ai|wavespeed\.ai)'
+    r'\s*[=:]\s*["\']?'
+    r'([A-Za-z0-9_\-]{30,120})',
+    re.IGNORECASE,
+)
+
+
+def extract_wavespeed(content: str) -> list[str]:
+    if not re.search(r'(?i)wavespeed', content):
+        return []
+    found = []
+    for m in _WAVESPEED_CTX.finditer(content):
+        key = m.group(1)
+        if len(key) >= 30 and not _FAKE.search(key):
+            found.append(key)
+    return list(dict.fromkeys(found))
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 EXTRACTORS: dict[str, callable] = {
     "openai":        extract_openai,
@@ -950,6 +1141,14 @@ EXTRACTORS: dict[str, callable] = {
     "pika":          extract_pika,           # Pika Labs
     # AI Video understanding
     "twelvelabs":    extract_twelvelabs,
+    # 2026-05 additions — multi-model aggregators + agent search + new video gen
+    "siliconflow":   extract_siliconflow,    # CN aggregator: DeepSeek/Qwen/GLM/Yi
+    "firecrawl":     extract_firecrawl,      # web-scrape API for AI agents (fc-*)
+    "portkey":       extract_portkey,        # AI gateway — leaks user's upstream keys
+    "krea":          extract_krea,           # image+video gen
+    "hedra":         extract_hedra,          # character video (Character-3/Omnia)
+    "wavespeed":     extract_wavespeed,      # WAN, Z-Image multimodal accel
+    "pixverse":      extract_pixverse,       # AI text-to-video / image-to-video
 }
 
 
@@ -1089,6 +1288,24 @@ AI_TRIGGER: tuple[str, ...] = (
 
     # ── TwelveLabs (video understanding) ────────────────────────────────
     "tlk_", "TWELVELABS_API_KEY", "twelvelabs", "api.twelvelabs.io",
+
+    # ── 2026-05 additions ───────────────────────────────────────────────
+    # PixVerse — text-to-video / image-to-video
+    "PIXVERSE_API_KEY", "PIXVERSE", "pixverse", "app-api.pixverse.ai",
+    # SiliconFlow — Chinese multi-model aggregator (DeepSeek/Qwen/GLM/Yi)
+    "SILICONFLOW_API_KEY", "SILICONCLOUD_API_KEY",
+    "siliconflow", "siliconcloud", "api.siliconflow.cn",
+    # Firecrawl — agent web-scraping API (fc-* prefix unique)
+    "fc-", "FIRECRAWL_API_KEY", "firecrawl", "firecrawl.dev",
+    # Portkey AI gateway — pk-* virtual keys + main API key
+    "PORTKEY_API_KEY", "portkey", "api.portkey.ai",
+    "x-portkey-api-key", "x-portkey-virtual-key",
+    # Krea AI — image+video gen
+    "KREA_API_KEY", "krea.ai", "api.krea.ai",
+    # Hedra — character video generation
+    "HEDRA_API_KEY", "hedra", "api.hedra.com", "hedra.com",
+    # WaveSpeed AI — multimodal acceleration
+    "WAVESPEED_API_KEY", "wavespeed", "api.wavespeed.ai",
 )
 
 # Same role for infra extractors (DB URLs, AWS keys, private keys).

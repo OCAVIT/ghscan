@@ -68,6 +68,7 @@ _KEY_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'(?<![A-Za-z0-9_])r8_[A-Za-z0-9]{35,55}'), 'replicate'),
     (re.compile(r'(?<![A-Za-z0-9_])fw_[A-Za-z0-9]{30,60}'), 'fireworks'),
     (re.compile(r'(?<![A-Za-z0-9_])tlk_[A-Za-z0-9]{20,40}'), 'twelvelabs'),
+    (re.compile(r'(?<![A-Za-z0-9_])fc-[a-f0-9]{32}(?![A-Za-z0-9])'), 'firecrawl'),
     # legacy OpenAI / Stability collision — flagged as "openai_or_stability"
     (re.compile(r'(?<![A-Za-z0-9])sk-[A-Za-z0-9]{48}(?![A-Za-z0-9])'), 'sk48_ambiguous'),
 ]
@@ -137,6 +138,14 @@ _KEY_VALUE_USD: dict[str, int] = {
     "openrouter":          200,
     "deepseek":             80,
     "huggingface":          80,
+    # 2026-05 additions
+    "siliconflow":         150,
+    "firecrawl":            50,
+    "portkey":             400,   # gateway: stored upstream keys = high value
+    "krea":                100,
+    "hedra":               100,
+    "wavespeed":            80,
+    "pixverse":             80,
     "grok":                150,
     "perplexity":           50,
     "replicate":           100,

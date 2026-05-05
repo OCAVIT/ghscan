@@ -69,6 +69,14 @@ _PROV: dict[str, dict] = {
     "pika":         {"e": "🎬", "n": "Pika Labs"},
     # Video understanding
     "twelvelabs":   {"e": "📹", "n": "TwelveLabs"},
+    # 2026-05 additions
+    "pixverse":     {"e": "🎥", "n": "PixVerse"},
+    "siliconflow":  {"e": "🌊", "n": "SiliconFlow"},
+    "firecrawl":    {"e": "🔥", "n": "Firecrawl"},
+    "portkey":      {"e": "🚪", "n": "Portkey AI"},
+    "krea":         {"e": "🎭", "n": "Krea AI"},
+    "hedra":        {"e": "🎬", "n": "Hedra"},
+    "wavespeed":    {"e": "🌐", "n": "WaveSpeed AI"},
 }
 
 # ── Category → provider mapping ───────────────────────────────────────────
@@ -76,22 +84,25 @@ _CATS: dict[str, dict] = {
     "video": {
         "e": "🎬", "n": "AI Video",
         "p": ["ark", "ark_fast", "happyhorse", "kling", "runway", "fal", "replicate", "fireworks",
-              "luma", "pika", "twelvelabs"],
+              "luma", "pika", "twelvelabs",
+              "pixverse", "hedra", "krea", "wavespeed"],
     },
     "text": {
         "e": "💬", "n": "AI Text",
         "p": ["openai", "anthropic", "google", "deepseek", "kimi", "glm", "grok",
               "perplexity", "openrouter", "huggingface",
-              "aimlapi", "deepinfra", "hyperbolic", "commonstack"],
+              "aimlapi", "deepinfra", "hyperbolic", "commonstack",
+              "siliconflow", "portkey"],
     },
     "image": {
         "e": "🖼️", "n": "AI Image",
         "p": ["openai_image", "fal", "replicate", "fireworks", "stability",
-              "aimlapi", "novita", "deepinfra"],
+              "aimlapi", "novita", "deepinfra", "krea", "wavespeed"],
     },
     "aggregator": {
         "e": "🌐", "n": "Aggregators (Claude/Gemini/GPT proxy)",
-        "p": ["openrouter", "aimlapi", "deepinfra", "hyperbolic", "novita", "commonstack"],
+        "p": ["openrouter", "aimlapi", "deepinfra", "hyperbolic", "novita",
+              "commonstack", "siliconflow", "portkey"],
     },
     "voice": {
         "e": "🎙️", "n": "AI Voice",
@@ -103,7 +114,7 @@ _CATS: dict[str, dict] = {
     },
     "tools": {
         "e": "🛠️", "n": "Search / Agent Tools",
-        "p": ["serper"],
+        "p": ["serper", "firecrawl"],
     },
     "all": {
         "e": "🔌", "n": "All Providers",

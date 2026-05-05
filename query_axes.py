@@ -449,6 +449,71 @@ PROVIDER_AXES: dict[str, dict[str, list[str]]] = {
         "model_names": ["marengo", "pegasus"],
     },
 
+    # ── 2026-05 additions ────────────────────────────────────────────────
+
+    "pixverse": {
+        "env_names": ["PIXVERSE_API_KEY", "PIXVERSE_KEY", "PIXVERSE_TOKEN",
+                       "PIXVERSE_SECRET"],
+        "key_prefixes": [],
+        "domains": ["app-api.pixverse.ai", "platform.pixverse.ai", "pixverse.ai"],
+        "model_names": ["pixverse-v3.5", "pixverse-v4", "pixverse-v4.5",
+                         "pixverse-c1"],
+    },
+
+    "siliconflow": {
+        "env_names": [
+            "SILICONFLOW_API_KEY", "SILICONCLOUD_API_KEY",
+            "SILICON_FLOW_KEY", "SILICONFLOW_KEY", "SILICONCLOUD_KEY",
+            "SILICONFLOW_TOKEN",
+        ],
+        "key_prefixes": [],   # sk-* shape — context-gated, collides with OpenAI
+        "domains": ["api.siliconflow.cn", "siliconflow.cn", "siliconcloud",
+                     "siliconflow.com"],
+        "model_names": [
+            "Qwen/Qwen2.5-72B-Instruct", "Qwen/QwQ-32B",
+            "deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1",
+            "01-ai/Yi-1.5-34B-Chat", "THUDM/glm-4-9b-chat",
+            "meta-llama/Llama-3.3-70B-Instruct",
+        ],
+    },
+
+    "firecrawl": {
+        "env_names": ["FIRECRAWL_API_KEY", "FIRECRAWL_KEY", "FIRECRAWL_TOKEN"],
+        "key_prefixes": ["fc-"],
+        "domains": ["api.firecrawl.dev", "firecrawl.dev"],
+        "model_names": [],
+    },
+
+    "portkey": {
+        "env_names": ["PORTKEY_API_KEY", "PORTKEY_KEY", "PORTKEY_TOKEN",
+                       "PORTKEY_VIRTUAL_KEY"],
+        "key_prefixes": ["pk-"],   # virtual keys (gateway to upstream)
+        "domains": ["api.portkey.ai", "portkey.ai"],
+        "model_names": [],
+    },
+
+    "krea": {
+        "env_names": ["KREA_API_KEY", "KREA_KEY", "KREA_TOKEN", "KREA_SECRET"],
+        "key_prefixes": [],
+        "domains": ["api.krea.ai", "krea.ai"],
+        "model_names": ["flux-1-krea", "flux-krea-dev"],
+    },
+
+    "hedra": {
+        "env_names": ["HEDRA_API_KEY", "HEDRA_KEY", "HEDRA_TOKEN",
+                       "HEDRA_SECRET"],
+        "key_prefixes": [],
+        "domains": ["api.hedra.com", "hedra.com"],
+        "model_names": ["character-3", "omnia", "veo-3.1", "sora-2"],
+    },
+
+    "wavespeed": {
+        "env_names": ["WAVESPEED_API_KEY", "WAVESPEED_KEY", "WAVESPEED_TOKEN",
+                       "WAVESPEED_SECRET"],
+        "key_prefixes": [],
+        "domains": ["api.wavespeed.ai", "wavespeed.ai"],
+        "model_names": ["wan-2.7", "z-image"],
+    },
 }
 
 
