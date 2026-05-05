@@ -314,14 +314,33 @@ async def lifespan(app: FastAPI):
 
     if MIRROR_MODE:
         # Mirror service: scans GitHub from a different IP, ships finds to
-        # master via mirror_relay. Disable everything else (telegram, deepseek
-        # pipelines, satellite scanners, infra_jackpot) — those run on master.
-        log.info("=== MIRROR_MODE active — only scan_cycle + mirror_relay flush + query_sync ===")
+        # master via mirror_relay. We KEEP additional GitHub-surface scanners
+        # (events/gists/issues — different rate-limit pools than /search/code,
+        # so they don't compete with main scan) and PUBLIC-only scanners
+        # (npm/pypi/commoncrawl) that need no extra tokens. Their finds go
+        # through db.save_key() which automatically relays to master via
+        # mirror_relay — same dedup, same Telegram digest path.
+        #
+        # Disabled: telegram bot, deepseek pipelines (run only on master where
+        # the canonical DB lives), per-platform scanners that need their own
+        # tokens (gitee/codeberg/hf/kaggle/postman/trufflehog) — saves env
+        # complexity on mirror, master already covers them.
+        log.info("=== MIRROR_MODE active — scan + events/gists/issues + npm/pypi/cc + relay ===")
         from mirror_relay import flush_loop as _mirror_flush, query_sync_loop as _mirror_query_sync
         tasks = [
             asyncio.create_task(_scan_loop(),         name="scan_loop"),
             asyncio.create_task(_mirror_flush(),      name="mirror_relay_flush"),
             asyncio.create_task(_mirror_query_sync(), name="mirror_relay_query_sync"),
+            # Extra GitHub-surface scanners (separate rate-limit pools) ─────
+            asyncio.create_task(events_loop(),        name="events_scanner"),
+            asyncio.create_task(gists_loop(),         name="gists_scanner"),
+            asyncio.create_task(issues_loop(),        name="issues_scanner"),
+            # Public registries — no auth, no rate-limit overlap with GitHub ─
+            asyncio.create_task(npm_loop(),           name="npm_scanner"),
+            asyncio.create_task(pypi_loop(),          name="pypi_scanner"),
+            asyncio.create_task(cc_loop(),            name="commoncrawl_scanner"),
+            # Author-walk uses GITHUB_TOKENS but on a different surface ─────
+            asyncio.create_task(author_walk_loop(),   name="author_walk"),
         ]
     else:
         tasks = [
