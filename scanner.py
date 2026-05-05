@@ -884,7 +884,11 @@ async def _run_chunk(client: httpx.AsyncClient,
                           worker_id, query_hash[:12], e)
 
         queries_done += 1
-        await asyncio.sleep(2)  # between queries — keeps token at ≤30 req/min
+        # Inter-query throttle. Per-token search budget is 30 req/min ⇒ 2s/req
+        # would be safe-but-slow. With 30 PATs and most queries hitting 1-3 pages,
+        # 1s gives us ~60 q/min/worker headroom while still leaving search budget
+        # for the SCAN_PAGE_SLEEP_SEC=2 inter-page sleep on multi-page queries.
+        await asyncio.sleep(1)
 
 
 # ── Main cycle ─────────────────────────────────────────────────────────────
