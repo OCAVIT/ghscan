@@ -361,7 +361,7 @@ _ROTATION_TOKEN: str = os.environ.get("ROTATION_API_TOKEN", "")
 
 # Only providers used by Hermes are exposed via /api/keys — even with a leaked
 # token, an attacker can't enumerate every provider in the DB this way.
-_ROTATION_ALLOWED_PROVIDERS = frozenset({"deepseek", "kimi", "glm"})
+_ROTATION_ALLOWED_PROVIDERS = frozenset({"deepseek", "kimi", "glm", "firecrawl"})
 
 
 def _check_rotation(authorization: str | None) -> None:
@@ -714,7 +714,7 @@ async def health():
 
 @app.get("/api/keys")
 async def api_keys_list(
-    provider: str = Query(..., description="One of: deepseek, kimi, glm"),
+    provider: str = Query(..., description="One of: deepseek, kimi, glm, firecrawl"),
     authorization: str | None = Header(default=None),
 ):
     _check_rotation(authorization)
