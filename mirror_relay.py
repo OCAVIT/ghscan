@@ -27,7 +27,7 @@ import httpx
 
 from config import (
     MIRROR_MODE, MASTER_API_URL, MASTER_API_TOKEN,
-    MIRROR_FLUSH_SEC, MIRROR_BATCH_MAX,
+    MIRROR_FLUSH_SEC, MIRROR_BATCH_MAX, MIRROR_QUERY_SYNC_SEC,
 )
 
 log = logging.getLogger(__name__)
@@ -221,10 +221,70 @@ async def flush_loop() -> None:
             await asyncio.sleep(MIRROR_FLUSH_SEC)
 
 
+_LAST_QUERY_SYNC: dict = {"at": None, "inserted": 0, "blacklisted": 0, "total": 0}
+
+
+async def _pull_master_queries(client: httpx.AsyncClient) -> None:
+    """Fetch master's dynamic_queries snapshot and merge into local DB.
+    Called from query_sync_loop every MIRROR_QUERY_SYNC_SEC. Master's
+    /admin/dynamic_queries_export returns the full pool (DeepSeek-generated
+    + combinatorial + archetype-mined) including blacklist decisions, so
+    after sync mirror's scan_cycle picks them up via select_queries_for_cycle()
+    and stops being limited to the 1567 static QUERIES baseline."""
+    if not is_active():
+        return
+    try:
+        r = await client.get(
+            f"{MASTER_API_URL}/admin/dynamic_queries_export",
+            headers={"Authorization": f"Bearer {MASTER_API_TOKEN}"},
+            params={"max_age_days": 15},
+            timeout=120,
+        )
+        if r.status_code != 200:
+            log.warning("mirror query-sync: master returned %d: %s",
+                        r.status_code, r.text[:200])
+            return
+        body = r.json()
+        items = body.get("queries", [])
+        if not items:
+            return
+        import db
+        from datetime import datetime, timezone
+        n_ins, n_bl = db.import_dynamic_queries_from_master(items)
+        _LAST_QUERY_SYNC.update({
+            "at":          datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "inserted":    n_ins,
+            "blacklisted": n_bl,
+            "total":       len(items),
+        })
+        if n_ins or n_bl:
+            log.info("mirror query-sync: pulled %d queries (new=%d, blacklist updated=%d)",
+                     len(items), n_ins, n_bl)
+    except Exception as e:
+        log.warning("mirror query-sync failed: %s", e)
+
+
+async def query_sync_loop() -> None:
+    """Background task — fetch master's dynamic_queries every
+    MIRROR_QUERY_SYNC_SEC. Started by main.py only when is_active() AND
+    MIRROR_QUERY_SYNC_SEC > 0."""
+    if not is_active() or MIRROR_QUERY_SYNC_SEC <= 0:
+        return
+    log.info("mirror_relay: query-sync started — pulling from %s every %ds",
+             MASTER_API_URL, MIRROR_QUERY_SYNC_SEC)
+    # Run once at startup so first cycle benefits from master's pool
+    async with httpx.AsyncClient() as client:
+        await _pull_master_queries(client)
+        while True:
+            await asyncio.sleep(MIRROR_QUERY_SYNC_SEC)
+            await _pull_master_queries(client)
+
+
 def queue_stats() -> dict:
     """For /health diagnostics on the mirror service."""
     return {
-        "ai_queued":    len(_AI_QUEUE),
-        "infra_queued": len(_INFRA_QUEUE),
-        "active":       is_active(),
+        "ai_queued":      len(_AI_QUEUE),
+        "infra_queued":   len(_INFRA_QUEUE),
+        "active":         is_active(),
+        "last_query_sync": _LAST_QUERY_SYNC,
     }
