@@ -1558,6 +1558,68 @@ async def admin_dynamic_queries_stats(authorization: str | None = Header(default
     return out
 
 
+@app.post("/admin/run_combo_gen")
+async def admin_run_combo_gen(authorization: str | None = Header(default=None)):
+    """Manually trigger one combinatorial generator batch (synchronous,
+    deterministic, no DeepSeek). Adds ~80 fresh queries to dynamic_queries
+    pool. Fast — completes in <1s."""
+    _check_admin(authorization)
+    n_inserted = await asyncio.to_thread(generate_combo_batch)
+    n_blacklisted = await asyncio.to_thread(auto_blacklist_dead)
+    return {"ok": True, "queries_inserted": n_inserted,
+             "auto_blacklisted": n_blacklisted}
+
+
+@app.post("/admin/run_themer")
+async def admin_run_themer(authorization: str | None = Header(default=None)):
+    """Manually trigger one themer batch (DeepSeek effort=max, 4-7 min).
+    Generates ~25 creative themed queries. Fire-and-forget background."""
+    _check_admin(authorization)
+
+    async def _bg():
+        try:
+            from notifier import _send
+            n = await generate_themed_batch()
+            log.info("manual themer: +%d themed queries", n)
+            try:
+                await _send(f"🎨 <b>Manual themer done</b>\nInserted: <b>{n}</b> themed queries")
+            except Exception:
+                pass
+        except Exception as e:
+            log.error("manual themer crashed: %s", e)
+
+    asyncio.create_task(_bg(), name="manual_themer")
+    return {"ok": True, "message": "themer started in background (4-7 min)"}
+
+
+@app.post("/admin/run_vocab_expander")
+async def admin_run_vocab_expander(authorization: str | None = Header(default=None)):
+    """Manually trigger vocab expander cycle (DeepSeek per provider with
+    valid keys, 5-15 min total). Discovers new env-names / model-names /
+    context-words from real valid-key files."""
+    _check_admin(authorization)
+
+    async def _bg():
+        try:
+            from notifier import _send
+            summary = await run_expansion_cycle()
+            log.info("manual vocab_expander: %s", summary)
+            try:
+                msg = (
+                    "🧠 <b>Manual vocab expander done</b>\n"
+                    f"Total new vocab items: <b>{summary.get('total_inserted', 0)}</b>\n"
+                    f"Providers updated: {len(summary.get('providers', {}))}"
+                )
+                await _send(msg)
+            except Exception:
+                pass
+        except Exception as e:
+            log.error("manual vocab_expander crashed: %s", e)
+
+    asyncio.create_task(_bg(), name="manual_vocab_expander")
+    return {"ok": True, "message": "vocab_expander started in background (5-15 min)"}
+
+
 @app.post("/admin/run_archetype_miner")
 async def admin_run_archetype_miner(authorization: str | None = Header(default=None)):
     """Manually trigger one archetype-mining cycle (skips the 24h wait)."""
