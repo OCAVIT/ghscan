@@ -756,11 +756,15 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
 
 # ── Per-token worker ────────────────────────────────────────────────────────
 
-async def _run_chunk(client: httpx.AsyncClient,
-                     queries: list[tuple], token: str,
-                     sem: asyncio.Semaphore, worker_id: int):
+async def _run_worker(client: httpx.AsyncClient,
+                      queue: asyncio.Queue, token: str,
+                      sem: asyncio.Semaphore, worker_id: int):
     """
-    Processes an exclusive slice of QUERIES using a single token.
+    Pulls queries off a SHARED queue using a single token. Continues until
+    the queue is empty OR this worker's token is exhausted (primary 403 with
+    distant reset). Other workers with healthy tokens keep draining the queue
+    independently — a single burned token doesn't hold up the whole cycle.
+
     Maintains 2s inter-query sleep → stays within 30 req/min per token.
     """
     hdrs = _gh_headers(token)
@@ -775,14 +779,25 @@ async def _run_chunk(client: httpx.AsyncClient,
         log.error("[w%d token=%s...] DEAD (401) — worker skipped", worker_id, token[:8])
         return
 
-    log.info("[w%d token=%s...] handling %d queries, search=%s core=%s",
-             worker_id, token[:8], len(queries),
+    log.info("[w%d token=%s...] starting (queue=%d), search=%s core=%s",
+             worker_id, token[:8], queue.qsize(),
              search_q if search_q >= 0 else "unknown",
              core_q   if core_q   >= 0 else "unknown")
 
     queries_done = 0
 
-    for query_tuple in queries:
+    while True:
+        try:
+            query_tuple = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            log.info("[w%d token=%s...] queue empty — done (%d queries processed)",
+                     worker_id, token[:8], queries_done)
+            return
+
+        # The body that follows is the SAME inner per-query logic as the old
+        # static-partition _run_chunk — we just drive it from a shared queue
+        # instead of an exclusive list slice. Keeping the indentation level
+        # below as a `while True` loop body avoids a massive diff.
         # Backwards-compat: support both 3-tuple (legacy) and 4-tuple shapes.
         if len(query_tuple) == 4:
             query_str, provider, file_type, query_hash = query_tuple
@@ -822,10 +837,24 @@ async def _run_chunk(client: httpx.AsyncClient,
             # Core quota throttle — each search result triggers ~1.5 core REST
             # calls (repo meta + file content). With 5000/hr per token, hitting
             # <200 means the next batch of items will blow through the quota.
+            #
+            # If reset is far away (>5 min), DON'T sleep — abandon: return
+            # from the worker so other workers (with healthy tokens) keep
+            # draining the shared queue. Static partitioning would hold the
+            # entire cycle hostage; with the shared queue + abandon pattern
+            # one burned token only loses its own throughput, not everyone's.
             if 0 <= core_q < 200:
                 core_reset = _TOKEN_STATUS.get(tk, {}).get("core_reset", 0)
                 now        = int(datetime.now(timezone.utc).timestamp())
-                wait       = max(min(core_reset - now, _PRIMARY_WAIT_CAP), 60) if core_reset else 120
+                eta        = (core_reset - now) if core_reset else 120
+                if eta > 300:
+                    log.warning(
+                        "[w%d] core exhausted (reset %ds away — too long); "
+                        "worker exits, others continue draining queue",
+                        worker_id, eta,
+                    )
+                    return
+                wait = max(min(eta, _PRIMARY_WAIT_CAP), 60)
                 log.warning("[w%d] core quota low (%d remaining), sleeping %ds until reset",
                             worker_id, core_q, wait)
                 await asyncio.sleep(wait + random.uniform(0, 30))
@@ -901,14 +930,20 @@ async def run_cycle():
     all_queries = select_queries_for_cycle()
     static_n  = sum(1 for q in all_queries if len(q) == 4 and q[3] is None)
     dynamic_n = len(all_queries) - static_n
-    chunks: list[list] = [[] for _ in range(n)]
-    for i, q in enumerate(all_queries):
-        chunks[i % n].append(q)
+
+    # Shared work queue — workers pull on-demand instead of having an
+    # exclusive static slice. If one worker's token burns (primary 403, distant
+    # reset), it returns and the OTHER 14 workers keep draining. Static
+    # partitioning held the entire cycle hostage on the slowest token because
+    # asyncio.gather() waits for every worker.
+    queue: asyncio.Queue = asyncio.Queue()
+    for q in all_queries:
+        queue.put_nowait(q)
 
     log.info(
-        "=== scan cycle start | %d tokens | %d queries (%d static + %d dynamic) -> %s chunks | "
+        "=== scan cycle start | %d tokens | %d queries (%d static + %d dynamic) | "
         "%d concurrent items | max %d pages | cross-extract: %d infra providers ===",
-        n, len(all_queries), static_n, dynamic_n, [len(c) for c in chunks],
+        n, len(all_queries), static_n, dynamic_n,
         CONCURRENT_ITEMS, MAX_PAGES, len(INFRA_EXTRACTORS),
     )
 
@@ -916,13 +951,18 @@ async def run_cycle():
 
     async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS) as client:
         workers = [
-            asyncio.create_task(_run_chunk(client, chunks[i], GITHUB_TOKENS[i], sem, i))
+            asyncio.create_task(_run_worker(client, queue, GITHUB_TOKENS[i], sem, i))
             for i in range(n)
         ]
         results = await asyncio.gather(*workers, return_exceptions=True)
         for r in results:
             if isinstance(r, Exception):
                 log.error("worker crashed: %s", r)
+        remaining = queue.qsize()
+        if remaining:
+            log.warning("scan cycle done — %d queries left in queue (all workers exited early; "
+                        "likely most tokens hit primary 403). Will be retried next cycle.",
+                        remaining)
 
     stats = db.get_stats()
     log.info("=== cycle done: %s ===", stats)
