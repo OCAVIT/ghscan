@@ -1223,28 +1223,33 @@ async def validate_twelvelabs(key: str) -> bool:
 # ── 2026-05 additions ────────────────────────────────────────────────────────
 
 async def validate_pixverse(key: str) -> bool:
-    """API-KEY header (NOT Bearer) + Ai-Trace-Id UUID per request.
-    Uses /openapi/v2/video/list — cheap GET that requires valid auth."""
+    """API-KEY header + Ai-Trace-Id UUID per request.
+    /openapi/v2/account/balance → Resp.credit_monthly + Resp.credit_package.
+    True only if combined balance > 0."""
     import uuid as _uuid
     try:
         async with _client() as c:
             r = await c.get(
-                "https://app-api.pixverse.ai/openapi/v2/video/list",
+                "https://app-api.pixverse.ai/openapi/v2/account/balance",
                 headers={"API-KEY": key,
                          "Ai-Trace-Id": str(_uuid.uuid4())},
             )
-            if r.status_code == 200:
-                # 200 may come with success=false if auth is wrong
-                try:
-                    body = r.json()
-                    if isinstance(body, dict) and body.get("ErrCode") in (50001, 50002, 401):
-                        return False
-                except Exception:
-                    pass
-                return True
-            if r.status_code in (401, 403):
+            if r.status_code != 200:
                 return False
-            return r.status_code < 500
+            body = r.json()
+            if not isinstance(body, dict):
+                return False
+            if body.get("ErrCode") not in (0, None, "0"):
+                return False
+            data = body.get("Resp") or body.get("data") or {}
+            if not isinstance(data, dict):
+                return False
+            monthly = data.get("credit_monthly", 0) or 0
+            package = data.get("credit_package", 0) or 0
+            try:
+                return (int(monthly) + int(package)) > 0
+            except (TypeError, ValueError):
+                return False
     except Exception as e:
         log.debug("pixverse validate err: %s", e)
         return False
@@ -1337,18 +1342,40 @@ async def validate_krea(key: str) -> bool:
 
 
 async def validate_hedra(key: str) -> bool:
-    """X-API-Key header. /web-app/public/models lists available models."""
+    """X-API-Key header. /web-app/public/billing/credits → CreditBalance schema:
+    remaining (int), expiring (int), used (int), workspace_credits (dict).
+    True only if remaining > 0."""
     try:
         async with _client() as c:
             r = await c.get(
-                "https://api.hedra.com/web-app/public/models",
+                "https://api.hedra.com/web-app/public/billing/credits",
                 headers={"X-API-Key": key},
             )
-            if r.status_code == 200:
-                return True
-            if r.status_code in (401, 403):
+            if r.status_code != 200:
                 return False
-            return r.status_code < 500
+            body = r.json()
+            if not isinstance(body, dict):
+                return False
+            rem = body.get("remaining")
+            if rem is not None:
+                try:
+                    return int(rem) > 0
+                except (TypeError, ValueError):
+                    pass
+            # workspace credits fallback
+            wsc = body.get("workspace_credits") or {}
+            if isinstance(wsc, dict):
+                for v in wsc.values():
+                    if isinstance(v, dict):
+                        rv = v.get("remaining")
+                    else:
+                        rv = v
+                    try:
+                        if int(rv or 0) > 0:
+                            return True
+                    except (TypeError, ValueError):
+                        continue
+            return False
     except Exception as e:
         log.debug("hedra validate err: %s", e)
         return False
