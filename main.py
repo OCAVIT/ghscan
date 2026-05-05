@@ -767,6 +767,59 @@ async def admin_revalidate(authorization: str | None = Header(default=None)):
     }
 
 
+@app.post("/admin/revalidate_providers")
+async def admin_revalidate_providers(
+    body: dict, authorization: str | None = Header(default=None)
+):
+    """
+    Targeted re-validation: only the providers passed in body['providers'].
+    Runs concurrently (asyncio.gather with semaphore) — faster than the broad
+    /admin/revalidate sweep when you just need to refresh a few providers.
+
+    Body: {"providers": ["pixverse", "hedra", ...]}
+    """
+    _check_admin(authorization)
+    provs = [p.strip() for p in (body.get("providers") or []) if isinstance(p, str)]
+    if not provs:
+        raise HTTPException(400, detail="missing or empty 'providers'")
+
+    from validators import validate as _validate
+
+    rows: list[dict] = []
+    for p in provs:
+        rows.extend(db.get_valid_keys_by_provider(p))
+
+    if not rows:
+        return {"checked": 0, "now_dead": 0, "still_alive": 0,
+                "by_provider": {p: {"alive": 0, "dead": 0} for p in provs}}
+
+    sem = asyncio.Semaphore(8)
+    by_prov: dict[str, dict[str, int]] = {p: {"alive": 0, "dead": 0} for p in provs}
+    dead_keys: list[str] = []
+
+    async def _one(row: dict):
+        async with sem:
+            try:
+                ok = await _validate(row["provider"], row["key_full"])
+            except Exception:
+                ok = False
+        db.update_key_validity(row["key_hash"], ok)
+        bp = by_prov.setdefault(row["provider"], {"alive": 0, "dead": 0})
+        bp["alive" if ok else "dead"] += 1
+        if not ok:
+            dead_keys.append(f"{row['provider']}:{row['key_full'][:16]}…")
+
+    await asyncio.gather(*(_one(r) for r in rows))
+    log.info("admin revalidate_providers (%s): checked=%d", provs, len(rows))
+    return {
+        "checked":     len(rows),
+        "now_dead":    sum(b["dead"]  for b in by_prov.values()),
+        "still_alive": sum(b["alive"] for b in by_prov.values()),
+        "by_provider": by_prov,
+        "dead_keys":   dead_keys[:50],
+    }
+
+
 @app.post("/admin/fix_ark")
 async def admin_fix_ark(authorization: str | None = Header(default=None)):
     """
