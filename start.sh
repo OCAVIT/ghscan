@@ -3,13 +3,23 @@
 # so user sees a clear one-line error instead of a 100-line uvicorn traceback.
 missing=""
 [ -z "${GITHUB_TOKEN}${GITHUB_TOKENS}" ] && missing="${missing} GITHUB_TOKEN(or GITHUB_TOKENS)"
-[ -z "${TELEGRAM_BOT_TOKEN}" ]            && missing="${missing} TELEGRAM_BOT_TOKEN"
-[ -z "${TELEGRAM_CHAT_ID}" ]              && missing="${missing} TELEGRAM_CHAT_ID"
+# Telegram is required only on master. Mirror service (MIRROR_MODE=1) ships
+# finds back to master via mirror_relay; it doesn't talk to Telegram itself.
+if [ "${MIRROR_MODE}" != "1" ]; then
+    [ -z "${TELEGRAM_BOT_TOKEN}" ]            && missing="${missing} TELEGRAM_BOT_TOKEN"
+    [ -z "${TELEGRAM_CHAT_ID}" ]              && missing="${missing} TELEGRAM_CHAT_ID"
+else
+    [ -z "${MASTER_API_URL}" ]                && missing="${missing} MASTER_API_URL"
+    [ -z "${MASTER_API_TOKEN}${ADMIN_TOKEN}" ] && missing="${missing} MASTER_API_TOKEN(or ADMIN_TOKEN)"
+fi
 if [ -n "$missing" ]; then
     echo "[start.sh] FATAL: missing required env vars on Railway:${missing}"
     echo "[start.sh] set them in Railway → Variables, then redeploy."
     sleep 30   # avoid CrashLoopBackoff hammering — give user time to see the log
     exit 1
+fi
+if [ "${MIRROR_MODE}" = "1" ]; then
+    echo "[start.sh] === MIRROR MODE === relaying finds to ${MASTER_API_URL}"
 fi
 
 # Download trufflehog binary at container start (Nixpacks doesn't have it).
