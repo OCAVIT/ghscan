@@ -820,6 +820,64 @@ async def admin_revalidate_providers(
     }
 
 
+@app.get("/admin/finds_timeline")
+async def admin_finds_timeline(
+    hours: int = 24, authorization: str | None = Header(default=None)
+):
+    """Hour-by-hour timeline of NEW finds — AI keys, infra creds, valid AI keys.
+    Reads found_keys.discovered_at and infra_findings.discovered_at."""
+    _check_admin(authorization)
+    hours = max(1, min(hours, 168))
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    with db._conn() as c:
+        ai_rows = c.execute(
+            "SELECT substr(discovered_at,1,13) AS h, "
+            "       COUNT(*) AS total, SUM(is_valid) AS valid "
+            "FROM found_keys WHERE discovered_at >= ? GROUP BY h ORDER BY h",
+            (cutoff,),
+        ).fetchall()
+        infra_rows = c.execute(
+            "SELECT substr(discovered_at,1,13) AS h, COUNT(*) AS total "
+            "FROM infra_findings WHERE discovered_at >= ? GROUP BY h ORDER BY h",
+            (cutoff,),
+        ).fetchall()
+        # last 24h breakdown by provider
+        by_prov = c.execute(
+            "SELECT provider, COUNT(*) AS total, SUM(is_valid) AS valid "
+            "FROM found_keys WHERE discovered_at >= ? "
+            "GROUP BY provider ORDER BY total DESC",
+            (cutoff,),
+        ).fetchall()
+
+    ai = {r["h"]: {"total": r["total"], "valid": r["valid"] or 0} for r in ai_rows}
+    inf = {r["h"]: r["total"] for r in infra_rows}
+    all_hours = sorted(set(ai) | set(inf))
+    timeline = [
+        {
+            "hour":      h,
+            "ai_total":  ai.get(h, {}).get("total", 0),
+            "ai_valid":  ai.get(h, {}).get("valid", 0),
+            "infra":     inf.get(h, 0),
+        }
+        for h in all_hours
+    ]
+    return {
+        "window_hours":  hours,
+        "since":         cutoff,
+        "totals": {
+            "ai_total":  sum(r["ai_total"] for r in timeline),
+            "ai_valid":  sum(r["ai_valid"] for r in timeline),
+            "infra":     sum(r["infra"]    for r in timeline),
+        },
+        "by_provider": [
+            {"provider": r["provider"], "total": r["total"], "valid": r["valid"] or 0}
+            for r in by_prov
+        ],
+        "timeline": timeline,
+    }
+
+
 @app.post("/admin/fix_ark")
 async def admin_fix_ark(authorization: str | None = Header(default=None)):
     """
