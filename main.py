@@ -1048,6 +1048,60 @@ async def admin_mirror_stats(
     }
 
 
+@app.get("/admin/source_breakdown")
+async def admin_source_breakdown(
+    hours: int = 720, authorization: str | None = Header(default=None)
+):
+    """Diagnostic — counts finds by source surface (search_code / gist / events /
+    issues / mirror / npm / pypi / commoncrawl / author_walk) over the window.
+    Distinguishes by URL/path patterns set by each scanner.
+
+    Patterns:
+      - gist:    file_url LIKE 'https://gist.github.com/%'
+      - issues:  file_path LIKE '#%'  (issues_scanner uses '#NUMBER' / '#NUMBER/comment')
+      - events:  file_url LIKE '%/blob/%' AND substr after blob/ is 40-hex (commit sha)
+      - mirror:  file_type LIKE 'mirror%' (push from another instance)
+      - npm/pypi/commoncrawl: file_type matches
+      - search:  rest (default scanner path)
+    """
+    _check_admin(authorization)
+    hours = max(1, min(hours, 24 * 365))
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    with db._conn() as c:
+        rows = c.execute(
+            """
+            SELECT
+              CASE
+                WHEN file_type LIKE 'mirror%'                               THEN 'mirror'
+                WHEN file_type IN ('npm','pypi','commoncrawl','cc')         THEN file_type
+                WHEN file_url LIKE 'https://gist.github.com/%'              THEN 'gist'
+                WHEN file_path LIKE '#%'                                    THEN 'issues'
+                WHEN file_url LIKE '%/blob/%'
+                     AND length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(
+                       substr(file_url,
+                              instr(file_url,'/blob/')+6,
+                              40),
+                       '0',''),'1',''),'2',''),'3',''),'4',''),'5',''),'6',''),'7',''),'8',''),'9',''),'a',''),'b',''),'c',''),'d',''),'e',''),'f','')) = 0
+                     AND length(substr(file_url, instr(file_url,'/blob/')+6, 40)) = 40
+                                                                            THEN 'events'
+                ELSE 'search_code'
+              END AS source,
+              COUNT(*)              AS total,
+              COALESCE(SUM(is_valid),0) AS valid
+            FROM found_keys
+            WHERE discovered_at >= ?
+            GROUP BY source
+            ORDER BY valid DESC, total DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+    return {
+        "window_hours": hours,
+        "since":        cutoff,
+        "by_source":    [dict(r) for r in rows],
+    }
+
+
 @app.post("/admin/test_llm_pipelines")
 async def admin_test_llm_pipelines(
     body: dict, authorization: str | None = Header(default=None)
