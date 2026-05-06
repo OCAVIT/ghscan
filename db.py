@@ -696,6 +696,33 @@ _STATS_CACHE: dict = {"ts": 0.0, "data": None}
 _STATS_TTL = 15.0   # seconds
 
 
+def _aggregate_mirror_kaggle() -> dict:
+    """Sum kaggle_scanned/found/valid across mirror /stats endpoints.
+    Returns {scanned: N, found: N, valid: N} or empty on failure.
+    Mirrors maintain their own scanned_files / kaggle_kernels_scanned tables;
+    master only sees what was relayed via mirror_relay (found/valid via
+    save_key push). The 'scanned' counter never crosses → must aggregate
+    over HTTP. Cached at /stats level (15s) so this is once per cache miss.
+    """
+    import os, httpx
+    raw = os.environ.get("MIRROR_STATS_URLS", "")
+    if not raw:
+        return {"scanned": 0, "found": 0, "valid": 0}
+    urls = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+    out = {"scanned": 0, "found": 0, "valid": 0}
+    for url in urls:
+        try:
+            r = httpx.get(f"{url}/stats", timeout=4.0)
+            if r.status_code == 200:
+                d = r.json()
+                out["scanned"] += int(d.get("kaggle_scanned", 0) or 0)
+                out["found"]   += int(d.get("kaggle_found", 0) or 0)
+                out["valid"]   += int(d.get("kaggle_valid", 0) or 0)
+        except Exception:
+            pass
+    return out
+
+
 def get_stats() -> dict:
     import time as _t
     now = _t.time()
@@ -706,31 +733,40 @@ def get_stats() -> dict:
             "SELECT provider, COUNT(*) as total, COALESCE(SUM(is_valid),0) as valid "
             "FROM found_keys GROUP BY provider ORDER BY total DESC"
         ).fetchall()]
-        kaggle_scanned = c.execute("SELECT COUNT(*) FROM kaggle_kernels_scanned").fetchone()[0]
+        kaggle_scanned_local = c.execute("SELECT COUNT(*) FROM kaggle_kernels_scanned").fetchone()[0]
         kaggle_found   = c.execute("SELECT COUNT(*) FROM found_keys WHERE file_type='kaggle'").fetchone()[0]
         kaggle_valid   = c.execute("SELECT COALESCE(SUM(is_valid),0) FROM found_keys WHERE file_type='kaggle'").fetchone()[0]
         # Per-type breakdown of infra (replit/aws/database/ssh/etc) for digest.
-        # is_validated: 1=valid, 0=invalid, -1=pending. We count both validated
-        # and pending since validation lags behind extraction.
         infra_by_type = [dict(r) for r in c.execute(
             "SELECT cred_type AS t, COUNT(*) AS total, "
             "       COALESCE(SUM(CASE WHEN is_validated=1 THEN 1 ELSE 0 END), 0) AS valid "
             "FROM infra_findings GROUP BY cred_type ORDER BY total DESC"
         ).fetchall()]
-        result = {
-            "repos_scanned":   c.execute("SELECT COUNT(*) FROM scanned_repos").fetchone()[0],
-            "files_scanned":   c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0],
-            "keys_found":      c.execute("SELECT COUNT(*) FROM found_keys").fetchone()[0],
-            "keys_valid":      c.execute("SELECT COUNT(*) FROM found_keys WHERE is_valid=1").fetchone()[0],
-            "by_provider":     by_prov,
-            "kaggle_scanned":  kaggle_scanned,
-            "kaggle_found":    kaggle_found,
-            "kaggle_valid":    kaggle_valid,
-            "infra_by_type":   infra_by_type,
-        }
-        _STATS_CACHE["ts"]   = now
-        _STATS_CACHE["data"] = result
-        return result
+        repos_scanned = c.execute("SELECT COUNT(*) FROM scanned_repos").fetchone()[0]
+        files_scanned = c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
+        keys_found    = c.execute("SELECT COUNT(*) FROM found_keys").fetchone()[0]
+        keys_valid    = c.execute("SELECT COUNT(*) FROM found_keys WHERE is_valid=1").fetchone()[0]
+    # OUTSIDE `with`: aggregate kaggle counters across mirrors (their
+    # kaggle_kernels_scanned table is local, never relayed to master).
+    # MIRROR_STATS_URLS env = "https://m1.example.com,https://m2.example.com".
+    # found/valid: master DB already has these via mirror_relay push,
+    # so don't double-count from mirror /stats.
+    mirror_agg = _aggregate_mirror_kaggle()
+    kaggle_scanned = kaggle_scanned_local + mirror_agg["scanned"]
+    result = {
+        "repos_scanned":   repos_scanned,
+        "files_scanned":   files_scanned,
+        "keys_found":      keys_found,
+        "keys_valid":      keys_valid,
+        "by_provider":     by_prov,
+        "kaggle_scanned":  kaggle_scanned,
+        "kaggle_found":    kaggle_found,
+        "kaggle_valid":    kaggle_valid,
+        "infra_by_type":   infra_by_type,
+    }
+    _STATS_CACHE["ts"]   = now
+    _STATS_CACHE["data"] = result
+    return result
 
 
 def get_keys_since(since_iso: str) -> list[dict]:
