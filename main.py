@@ -47,7 +47,11 @@ from codeberg_scanner import codeberg_loop
 # confirmed each returns 404. Dead branch.
 from npm_scanner import npm_loop
 from pypi_scanner import pypi_loop
-from commoncrawl_scanner import cc_loop
+# commoncrawl_scanner dropped 2026-05-06: Railway IP can't reach
+# index.commoncrawl.org (AWS S3 endpoint blocks data center IPs).
+# Could route via Evomi but WARC fetches are GBs of traffic — not
+# worth the proxy bandwidth cost for unproven yield.
+# from commoncrawl_scanner import cc_loop
 from author_scanner import author_walk_loop, walk_one_author, run_author_cycle
 from tg_bot import bot_loop
 from issues_scanner import issues_loop
@@ -347,7 +351,7 @@ async def lifespan(app: FastAPI):
             # Public registries — no auth, no rate-limit overlap with GitHub
             asyncio.create_task(npm_loop(),           name="npm_scanner"),
             asyncio.create_task(pypi_loop(),          name="pypi_scanner"),
-            asyncio.create_task(cc_loop(),            name="commoncrawl_scanner"),
+            # cc_loop dropped — Railway IP blocked
             # Author-walk uses GITHUB_TOKENS but on a different surface
             asyncio.create_task(author_walk_loop(),   name="author_walk"),
         ]
@@ -374,7 +378,7 @@ async def lifespan(app: FastAPI):
             # postman_loop dropped — see import-block comment
             asyncio.create_task(npm_loop(),             name="npm_scanner"),
             asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
-            asyncio.create_task(cc_loop(),              name="commoncrawl_scanner"),
+            # cc_loop dropped — Railway IP blocked, see commoncrawl_scanner import comment
             asyncio.create_task(author_walk_loop(),     name="author_walk"),
             asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
             asyncio.create_task(_themer_loop(),         name="query_themer"),
@@ -1195,22 +1199,29 @@ async def admin_probe_external_apis(authorization: str | None = Header(default=N
     except Exception:
         pass
 
+    # Build per-country Evomi URLs by overriding country in the env-built URL
+    import os as _os
+    evo_user = _os.environ.get("EVOMI_USER", "")
+    evo_pass = _os.environ.get("EVOMI_PASS", "")
+    def _evo(country: str) -> str | None:
+        if not (evo_user and evo_pass):
+            return None
+        return f"http://{evo_user}_country-{country}:{evo_pass}@rp.evomi.com:1000"
+
     targets = [
         # gitee — direct (no proxy)
-        ("gitee_direct_orgs",     "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      None),
-        ("gitee_direct_search",   "https://gitee.com/api/v5/search/repositories?q=python&per_page=5", None),
-        # gitee — through Evomi CN proxy (current scanner setup)
-        ("gitee_evomi_orgs",      "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      evomi_proxy),
-        # kaggle — direct (Railway IP blocked by Cloudflare datacenter filter)
+        ("gitee_direct",          "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      None),
+        ("gitee_evomi_cn",        "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      _evo("cn")),
+        # kaggle — try multiple country exits (Kaggle is US-based, Cloudflare-fronted)
         ("kaggle_direct",         "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   None),
-        # kaggle — through Evomi (test if proxy IP is accepted)
-        ("kaggle_evomi",          "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   evomi_proxy),
+        ("kaggle_evomi_us",       "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   _evo("us")),
+        ("kaggle_evomi_de",       "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   _evo("de")),
+        ("kaggle_evomi_gb",       "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   _evo("gb")),
+        ("kaggle_evomi_jp",       "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   _evo("jp")),
         # codeberg — control
         ("codeberg_search",       "https://codeberg.org/api/v1/repos/search?q=docker-compose&limit=5",         None),
-        # commoncrawl — independent verification
-        ("commoncrawl_collinfo",  "https://index.commoncrawl.org/collinfo.json",                               None),
-        # commoncrawl — try via Evomi (probably too expensive in production)
-        ("commoncrawl_evomi",     "https://index.commoncrawl.org/collinfo.json",                               evomi_proxy),
+        # commoncrawl — try US (it's an AWS US-east service)
+        ("commoncrawl_us",        "https://index.commoncrawl.org/collinfo.json",                               _evo("us")),
     ]
 
     results = []
