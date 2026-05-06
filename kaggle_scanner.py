@@ -22,6 +22,7 @@ Rate limits (Kaggle):
 import asyncio
 import hashlib
 import json
+import base64
 import logging
 import os
 import tempfile
@@ -38,6 +39,16 @@ from notifier import notify_found
 log = logging.getLogger(__name__)
 
 _BASE         = "https://www.kaggle.com/api/v1"
+
+# Legacy Basic auth (KAGGLE_USERNAME + KAGGLE_KEY from kaggle.json) takes
+# precedence — Kaggle's REST API endpoints (/api/v1/*) require Basic auth,
+# the new "KGAT_*" tokens are for the SDK only and return 404 against /api/v1.
+# When both are configured, Basic auth path is used (works reliably).
+_KAGGLE_USER = os.environ.get("KAGGLE_USERNAME", "").strip()
+_KAGGLE_KEY  = os.environ.get("KAGGLE_KEY", "").strip()
+_BASIC_AUTH: str | None = None
+if _KAGGLE_USER and _KAGGLE_KEY:
+    _BASIC_AUTH = "Basic " + base64.b64encode(f"{_KAGGLE_USER}:{_KAGGLE_KEY}".encode()).decode()
 _PULL_SLEEP   = 1.5   # seconds between pulls per token
 _SEARCH_SLEEP = 2.0   # seconds between search queries
 _MAX_PAGES    = 3     # search pages per query (20 results/page = 60 notebooks)
@@ -85,6 +96,11 @@ _AI_TRIGGER = AI_TRIGGER
 
 
 def _headers(token: str) -> dict:
+    """Build Authorization header. Prefers KAGGLE_USERNAME+KAGGLE_KEY Basic
+    auth (the only scheme accepted by /api/v1 endpoints); falls back to
+    Bearer KGAT for backwards compat (will likely 404 but won't crash)."""
+    if _BASIC_AUTH:
+        return {"Authorization": _BASIC_AUTH, "Content-Type": "application/json"}
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
