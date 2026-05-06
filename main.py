@@ -1199,14 +1199,23 @@ async def admin_probe_external_apis(authorization: str | None = Header(default=N
     except Exception:
         pass
 
-    # Build per-country Evomi URLs by overriding country in the env-built URL
-    import os as _os
-    evo_user = _os.environ.get("EVOMI_USER", "")
-    evo_pass = _os.environ.get("EVOMI_PASS", "")
+    # Build per-country Evomi URLs by mutating the country suffix in the
+    # configured evomi_proxy_url(). Works whether the proxy comes from
+    # EVOMI_PROXY (full URL) or EVOMI_USER+EVOMI_PASS split env vars.
+    import re as _re_country
     def _evo(country: str) -> str | None:
-        if not (evo_user and evo_pass):
+        if not evomi_proxy:
             return None
-        return f"http://{evo_user}_country-{country}:{evo_pass}@rp.evomi.com:1000"
+        url = _re_country.sub(r'_country-[A-Za-z]{2}', f'_country-{country}', evomi_proxy)
+        # If no _country- suffix at all, append it (only safe when user is in URL)
+        if '_country-' not in url and '@' in url:
+            user_part, host_part = url.split('@', 1)
+            # user_part is "http://USER:PASS" — inject country into user
+            head, sep, creds = user_part.rpartition('//')
+            if ':' in creds:
+                u, p = creds.split(':', 1)
+                url = f"{head}{sep}{u}_country-{country}:{p}@{host_part}"
+        return url
 
     targets = [
         # gitee — direct (no proxy)
