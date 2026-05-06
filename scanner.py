@@ -708,6 +708,31 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
             for key in ai_fn(content):
                 if db.key_exists(key):
                     continue
+                # Pre-validation context filter: cheap LLM (deepseek-v4-flash /
+                # glm-4.5-air) classifies key as real-vs-placeholder using 200
+                # chars of context + filename. Skips ~30-40% of regex matches
+                # that are obvious placeholders (sk-XXXXX, ${VAR}, your-key)
+                # WITHOUT burning a paid validation API call to the provider.
+                # On classifier failure → defaults to validating (don't lose real keys).
+                try:
+                    from pre_validator import is_real_key
+                    # Extract ~400 chars of context around the key
+                    idx = content.find(key)
+                    if idx >= 0:
+                        ctx = content[max(0, idx - 200):idx + len(key) + 200]
+                    else:
+                        ctx = content[:400]
+                    is_real = await is_real_key(key, ctx, file_path, file_url)
+                    if not is_real:
+                        # Save as is_valid=False without burning provider validation
+                        db.save_key(ai_prov, key, full_name, file_path, file_url,
+                                    stars, created_at, file_type, False)
+                        log.debug("[pre-filter] skipped placeholder %s from %s",
+                                  ai_prov, full_name)
+                        continue
+                except Exception as e:
+                    log.debug("pre_validator crashed: %s — falling through to validate",
+                              type(e).__name__)
                 is_valid = await validate(ai_prov, key)
                 saved = db.save_key(
                     ai_prov, key, full_name, file_path, file_url,
@@ -727,11 +752,24 @@ async def _process_inner(client: httpx.AsyncClient, item: dict,
     # repo across cycles. Runs as background task so it doesn't block the
     # main scan loop. Captures sibling-file keys that GitHub Code Search
     # missed due to indexing lag or pagination caps.
+    #
+    # Pre-treewalk: repo_prioritizer skips template/tutorial/example repos
+    # (~30-40% of jackpot repos are placeholder-keyed and waste 100 file
+    # fetches each). Cheap LLM classification (deepseek-v4-flash / glm-4.5-air)
+    # decides walk-or-skip. Falls through to walk on classifier failure.
     if any_key_saved:
-        t = asyncio.create_task(
-            walk_repo_tree(client, full_name, stars, created_at, token_headers),
-            name=f"treewalk_{full_name}",
-        )
+        async def _gated_walk():
+            try:
+                from repo_prioritizer import should_walk_repo
+                walk_ok = await should_walk_repo(client, full_name,
+                                                  _token_from_headers(token_headers))
+            except Exception as e:
+                log.debug("repo_prioritizer crashed for %s: %s — defaulting to walk",
+                          full_name, e)
+                walk_ok = True
+            if walk_ok:
+                await walk_repo_tree(client, full_name, stars, created_at, token_headers)
+        t = asyncio.create_task(_gated_walk(), name=f"treewalk_{full_name}")
         _BG_TASKS.add(t)
         t.add_done_callback(_BG_TASKS.discard)
 

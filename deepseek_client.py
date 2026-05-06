@@ -25,7 +25,9 @@ log = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.deepseek.com/v1/chat/completions"
 _DEFAULT_MODEL = "deepseek-v4-pro"
-_FALLBACK_MODEL = "deepseek-chat"
+# Per 2026-04 DeepSeek docs only two models exist: v4-pro and v4-flash.
+# Old `deepseek-chat` was renamed/dropped; v4-flash is the budget classifier.
+_FALLBACK_MODEL = "deepseek-v4-flash"
 
 # Status codes that mean "this key is dead, rotate":
 #   401 — invalid token

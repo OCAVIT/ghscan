@@ -262,6 +262,30 @@ async def _archetype_miner_loop():
         await asyncio.sleep(24 * 3600)
 
 
+async def _active_learner_loop():
+    """
+    Active-learning yield refinement — runs every 30 min.
+
+    Reads last cycle's stats + last 100 finds, generates 5-10 tactical
+    follow-up queries using DeepSeek-v4-pro (max thinking) with GLM-5.1
+    fallback. Catches emerging patterns within 30 min vs themer's 8h delay
+    — especially valuable for SS Partner pre-revoke 24h race window.
+    """
+    # Wait 5 min after boot so initial scan_cycle has stats to chew on
+    await asyncio.sleep(300)
+    while True:
+        try:
+            from active_learner import run_active_learning
+            summary = await run_active_learning()
+            if summary.get("inserted", 0) > 0:
+                log.info("active_learner: %s", summary)
+            else:
+                log.debug("active_learner: %s", summary)
+        except Exception as e:
+            log.error("active_learner crashed: %s", e)
+        await asyncio.sleep(1800)   # 30 min
+
+
 async def _vocab_expander_loop():
     """
     AI vocabulary expander (Layer 2) — runs every 24h.
@@ -363,6 +387,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_themer_loop(),         name="query_themer"),
             asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
             asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
+            asyncio.create_task(_active_learner_loop(),  name="active_learner"),
             asyncio.create_task(_auto_jackpot_loop(),   name="auto_jackpot"),
             asyncio.create_task(issues_loop(),          name="issues_scanner"),
             asyncio.create_task(bot_loop(),             name="tg_bot"),
@@ -1052,6 +1077,28 @@ async def admin_mirror_stats(
             for r in latest
         ],
     }
+
+
+@app.get("/admin/llm_pool_stats")
+async def admin_llm_pool_stats(authorization: str | None = Header(default=None)):
+    """LLM compute capacity snapshot — DeepSeek + GLM key pools used by
+    repo_prioritizer, pre_validator, active_learner, author_profiler, and
+    extractor_synthesizer pipelines via llm_client.call_creative/fast.
+
+    Low pool size (e.g. <30 deepseek + <50 glm) means LLM-driven pipelines
+    will start failing gracefully (returning None / defaulting to non-LLM
+    behavior). Telegram alert fires below threshold.
+    """
+    _check_admin(authorization)
+    from llm_client import llm_pool_stats
+    stats = await llm_pool_stats()
+    # Repo prioritizer cache stats — visibility on classification volume
+    try:
+        from repo_prioritizer import cache_stats as _rp_stats
+        stats["repo_prioritizer_cache"] = _rp_stats()
+    except Exception:
+        pass
+    return stats
 
 
 @app.get("/admin/config")
