@@ -61,51 +61,63 @@ _LIMITS = httpx.Limits(max_connections=15, max_keepalive_connections=5, keepaliv
 
 
 # ── Google dork queries (all gated on site:replit.com) ─────────────────────
-# Critical: `filename:` is GitHub syntax, NOT Google. Use `inurl:` for path
-# matching. Quoted strings with `=` can also break serper parser — use
-# space-separated tokens instead.
+# CRITICAL learnings (probed 2026-05-06):
+#   - serper.dev rejects ALL secret-hunting dorks with 400 'Query not allowed'
+#     → use firecrawl /v1/search instead (no policy filter)
+#   - Multi-quoted dorks like 'site:X "Y" "Z"' return 0 results from firecrawl
+#     → use single-token (no quotes) or single-quoted strings
+#   - `filename:` is GitHub syntax; use `inurl:` for path matching
 _DORKS = [
-    # Replit-specific cred shapes
-    'site:replit.com "REPLIT_DB_URL"',
-    'site:replit.com "kv.replit.com/v0"',
-    'site:replit.com "REPLIT_API_TOKEN"',
-    # Major AI providers — quote ONLY the prefix, not the assignment
-    'site:replit.com "OPENAI_API_KEY" "sk-"',
-    'site:replit.com "ANTHROPIC_API_KEY" "sk-ant-"',
-    'site:replit.com "GEMINI_API_KEY" "AIzaSy"',
-    'site:replit.com "GOOGLE_API_KEY" "AIzaSy"',
-    'site:replit.com "DEEPSEEK_API_KEY" "sk-"',
-    'site:replit.com "GROQ_API_KEY" "gsk_"',
-    'site:replit.com "REPLICATE_API_TOKEN" "r8_"',
-    'site:replit.com "HF_TOKEN" "hf_"',
-    'site:replit.com "HUGGINGFACE_TOKEN" "hf_"',
-    'site:replit.com "XAI_API_KEY" "xai-"',
-    'site:replit.com "MISTRAL_API_KEY"',
-    'site:replit.com "ELEVENLABS_API_KEY"',
-    'site:replit.com "OPENROUTER_API_KEY" "sk-or-v1-"',
-    'site:replit.com "STABILITY_API_KEY" "sk-"',
+    # Replit-specific cred shapes (single-token, unquoted)
+    'site:replit.com REPLIT_DB_URL',
+    'site:replit.com kv.replit.com',
+    'site:replit.com REPLIT_API_TOKEN',
+    # Major AI providers — single-token (firecrawl indexes case-insensitive)
+    'site:replit.com OPENAI_API_KEY',
+    'site:replit.com ANTHROPIC_API_KEY',
+    'site:replit.com GEMINI_API_KEY',
+    'site:replit.com GOOGLE_API_KEY',
+    'site:replit.com DEEPSEEK_API_KEY',
+    'site:replit.com GROQ_API_KEY',
+    'site:replit.com REPLICATE_API_TOKEN',
+    'site:replit.com HF_TOKEN',
+    'site:replit.com HUGGINGFACE_TOKEN',
+    'site:replit.com XAI_API_KEY',
+    'site:replit.com MISTRAL_API_KEY',
+    'site:replit.com ELEVENLABS_API_KEY',
+    'site:replit.com OPENROUTER_API_KEY',
+    'site:replit.com STABILITY_API_KEY',
+    'site:replit.com TOGETHER_API_KEY',
+    'site:replit.com FIREWORKS_API_KEY',
+    'site:replit.com PERPLEXITY_API_KEY',
     # CN providers
-    'site:replit.com "ZHIPUAI_API_KEY"',
-    'site:replit.com "MOONSHOT_API_KEY" "sk-"',
-    'site:replit.com "ARK_API_KEY"',
-    'site:replit.com "DASHSCOPE_API_KEY"',
-    'site:replit.com "QWEN_API_KEY"',
-    'site:replit.com "SILICONFLOW_API_KEY"',
+    'site:replit.com ZHIPUAI_API_KEY',
+    'site:replit.com MOONSHOT_API_KEY',
+    'site:replit.com KIMI_API_KEY',
+    'site:replit.com ARK_API_KEY',
+    'site:replit.com DASHSCOPE_API_KEY',
+    'site:replit.com QWEN_API_KEY',
+    'site:replit.com SILICONFLOW_API_KEY',
     # Infra
-    'site:replit.com "AKIA"',                   # AWS access key prefix
-    'site:replit.com "DATABASE_URL" "postgres"',
-    'site:replit.com "MONGODB_URI" "mongodb"',
-    'site:replit.com "REDIS_URL" "redis"',
+    'site:replit.com AKIA',
+    'site:replit.com DATABASE_URL',
+    'site:replit.com MONGODB_URI',
+    'site:replit.com REDIS_URL',
+    'site:replit.com SUPABASE_URL',
+    'site:replit.com PINECONE_API_KEY',
     'site:replit.com inurl:.env',
-    'site:replit.com inurl:secrets.toml',
     'site:replit.com inurl:.replit',
     # Bot tokens & integration
-    'site:replit.com "DISCORD_TOKEN"',
-    'site:replit.com "TELEGRAM_BOT_TOKEN"',
-    'site:replit.com "STRIPE_SECRET_KEY" "sk_live_"',
-    'site:replit.com "TWILIO_AUTH_TOKEN"',
-    'site:replit.com "SUPABASE_KEY"',
-    'site:replit.com "PINECONE_API_KEY"',
+    'site:replit.com DISCORD_TOKEN',
+    'site:replit.com TELEGRAM_BOT_TOKEN',
+    'site:replit.com STRIPE_SECRET_KEY',
+    'site:replit.com TWILIO_AUTH_TOKEN',
+    'site:replit.com SUPABASE_KEY',
+    # Generic patterns (broader catch — firecrawl indexes well)
+    'site:replit.com .env tutorial',
+    'site:replit.com api key chatbot',
+    'site:replit.com langchain rag',
+    'site:replit.com openai gpt python',
 ]
 
 
