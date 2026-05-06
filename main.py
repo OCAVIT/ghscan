@@ -1163,6 +1163,16 @@ async def admin_source_breakdown(
     }
 
 
+@app.post("/admin/run_replit_cycle")
+async def admin_run_replit_cycle(authorization: str | None = Header(default=None)):
+    """Manually trigger one replit_scanner cycle (skip 3h wait). Returns
+    when cycle completes — slow endpoint (~5 min), use with care."""
+    _check_admin(authorization)
+    from replit_scanner import run_replit_cycle
+    await run_replit_cycle()
+    return {"ok": True, "msg": "cycle done — check /admin/source_full for replit row"}
+
+
 @app.post("/admin/run_kaggle_themer")
 async def admin_run_kaggle_themer(authorization: str | None = Header(default=None)):
     """Manually trigger one kaggle_themer batch (for testing without

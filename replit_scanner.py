@@ -335,17 +335,22 @@ async def _process_dork(client: httpx.AsyncClient, query: str,
         ai_saved += ks
         valid_saved += vs
 
-        # Phase 2: if snippet has trigger but extractor found nothing in snippet,
-        # OR snippet was non-trivial — fetch full page for deeper scan.
-        # Direct HTTP first (free), firecrawl as fallback.
+        # Phase 2: full-page fetch — Replit is a JavaScript SPA so direct HTTP
+        # returns mostly empty skeleton without code. Firecrawl renders JS and
+        # returns proper markdown. Use firecrawl FIRST (we have 77 valid keys
+        # in pool, plenty), fall back to direct HTTP only if firecrawl pool
+        # exhausted or fails.
+        # Always fetch when URL points to a Repl page — snippets often lack
+        # the actual code body that contains keys.
         full = None
-        # Heuristic: trigger present but no save = likely truncated by snippet
-        snippet_had_trigger = (any(t in snippet for t in AI_TRIGGER)
-                               or any(t in snippet for t in INFRA_TRIGGER))
-        if snippet_had_trigger and ks == 0:
-            full = await _direct_fetch(client, url)
-            if not full and fc_keys:
+        is_repl_page = ("/@" in url or "replit.com/repl" in url
+                        or url.endswith(".replit.dev")
+                        or "replit.dev/" in url)
+        if is_repl_page:
+            if fc_keys:
                 full = await _firecrawl_fetch(client, url, fc_keys)
+            if not full:
+                full = await _direct_fetch(client, url)
             if full:
                 fetched += 1
                 ks2, vs2 = await _scan_text(full, url, query)
