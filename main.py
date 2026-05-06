@@ -1079,6 +1079,127 @@ async def admin_mirror_stats(
     }
 
 
+@app.post("/admin/test_llm_pipelines")
+async def admin_test_llm_pipelines(
+    body: dict, authorization: str | None = Header(default=None)
+):
+    """Run each LLM-driven pipeline against a sample input and return the
+    raw LLM response + parsed output for quality evaluation.
+
+    Body: {"pipelines": ["repo_prioritizer", "pre_validator", "active_learner",
+                          "author_profiler"]}  (optional, default = all)
+
+    Each pipeline runs ONCE against a hardcoded realistic test input. Output
+    shows whether LLM (deepseek or glm fallback) returned sensible JSON, the
+    classifier decision, and the source. Used to verify production quality
+    before relying on the pipelines for real scan decisions.
+
+    Cost: ~4-5 LLM calls (one per pipeline tested). Negligible on our pool.
+    """
+    _check_admin(authorization)
+    requested = body.get("pipelines") or [
+        "repo_prioritizer", "pre_validator", "active_learner", "author_profiler"
+    ]
+    results: dict = {}
+
+    # Sample inputs designed to be representative real-world cases.
+    samples = {
+        "repo_prioritizer": {
+            "test_repo": "openai/openai-cookbook",   # known TUTORIAL repo
+            "expected_class": "tutorial or example",
+        },
+        "pre_validator": {
+            "key":       "sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",  # obvious placeholder
+            "context":   "OPENAI_API_KEY=sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n# replace this with your real key\nMODEL=gpt-4",
+            "file_path": ".env.example",
+            "expected":  False,
+        },
+        "active_learner": {
+            "test": "runs against actual recent finds in DB; output is fresh queries",
+        },
+        "author_profiler": {
+            "login": "torvalds",   # known prominent dev — should score HIGH
+        },
+    }
+
+    if "repo_prioritizer" in requested:
+        try:
+            from repo_prioritizer import _build_user_prompt, _parse_classification
+            from llm_client       import call_fast
+            from config           import GITHUB_TOKENS
+            import httpx
+            async with httpx.AsyncClient(timeout=30) as c:
+                prompt = await _build_user_prompt(
+                    c, samples["repo_prioritizer"]["test_repo"],
+                    GITHUB_TOKENS[0],
+                )
+            if not prompt:
+                results["repo_prioritizer"] = {"error": "could_not_fetch_metadata"}
+            else:
+                from repo_prioritizer import _SYSTEM_PROMPT
+                text, source = await call_fast(
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user",   "content": prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    max_tokens=128,
+                    timeout=20,
+                )
+                parsed = _parse_classification(text)
+                results["repo_prioritizer"] = {
+                    "input":           samples["repo_prioritizer"],
+                    "raw_llm_output":  (text or "")[:500],
+                    "source":          source,
+                    "parsed":          {"class": parsed[0], "confidence": parsed[1]} if parsed else None,
+                    "prompt_excerpt":  prompt[:600],
+                }
+        except Exception as e:
+            results["repo_prioritizer"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    if "pre_validator" in requested:
+        try:
+            from pre_validator import is_real_key, _heuristic_pre_filter
+            s = samples["pre_validator"]
+            heur = _heuristic_pre_filter(s["key"], s["file_path"])
+            llm_result = await is_real_key(s["key"], s["context"], s["file_path"])
+            results["pre_validator"] = {
+                "input":            s,
+                "heuristic_match":  heur,           # True = caught by regex
+                "llm_decision":     llm_result,     # bool: True=real, False=placeholder
+                "expected":         s["expected"],  # ground truth
+                "match":            llm_result == s["expected"],
+            }
+        except Exception as e:
+            results["pre_validator"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    if "active_learner" in requested:
+        try:
+            from active_learner import run_active_learning
+            summary = await run_active_learning()
+            results["active_learner"] = summary
+        except Exception as e:
+            results["active_learner"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    if "author_profiler" in requested:
+        try:
+            from author_profiler import profile_author
+            from config           import GITHUB_TOKENS
+            import httpx
+            async with httpx.AsyncClient(timeout=30) as c:
+                profile = await profile_author(c, samples["author_profiler"]["login"],
+                                                GITHUB_TOKENS[0])
+            results["author_profiler"] = {
+                "input":          samples["author_profiler"],
+                "profile":        profile,
+                "expected":       "score >= 80 (prominent OSS contributor)",
+            }
+        except Exception as e:
+            results["author_profiler"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    return results
+
+
 @app.get("/admin/llm_pool_stats")
 async def admin_llm_pool_stats(authorization: str | None = Header(default=None)):
     """LLM compute capacity snapshot — DeepSeek + GLM key pools used by
