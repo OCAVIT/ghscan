@@ -390,11 +390,15 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
         keys_found_ai = s["keys_found"] - tools_total
         keys_valid_ai = s["keys_valid"] - tools_valid
 
+        kg_scanned = s.get('kaggle_scanned', 0)
+        kg_found   = s.get('kaggle_found',   0)
+        kg_valid   = s.get('kaggle_valid',   0)
         lines = [
             "📊 <b>Database Stats</b>",
             "",
             f"📁 Repos scanned:  <b>{s['repos_scanned']}</b>",
             f"📄 Files scanned:  <b>{s['files_scanned']}</b>",
+            f"📓 Kaggle nbs:     <b>{kg_scanned}</b>  ({kg_valid}/{kg_found} valid keys)",
             f"🔑 AI keys found:  <b>{keys_found_ai}</b>",
             f"✅ AI keys valid:  <b>{keys_valid_ai}</b>",
             f"🏗️ Infra creds:   <b>{ic['total']}</b>  (🔴{ic['high']} high / 🟡{ic['medium']} medium)",

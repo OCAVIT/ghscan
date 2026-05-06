@@ -26,6 +26,13 @@ def init_db():
             sha TEXT PRIMARY KEY,
             scanned_at TEXT NOT NULL
         );
+        -- Kaggle notebooks scanned (separate from scanned_files since
+        -- that table uses sha256 hashes — we want a clean count of
+        -- unique notebook refs processed, displayable in TG digest).
+        CREATE TABLE IF NOT EXISTS kaggle_kernels_scanned (
+            ref TEXT PRIMARY KEY,
+            scanned_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS scanned_repos (
             full_name TEXT PRIMARY KEY,
             first_seen TEXT NOT NULL,
@@ -231,6 +238,18 @@ def clear_scanned_files() -> int:
         cnt = c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0]
         c.execute("DELETE FROM scanned_files")
         return cnt
+
+
+def kaggle_mark_scanned(ref: str) -> bool:
+    """Atomically claim a Kaggle kernel ref for processing. Returns True on
+    new claim, False if already scanned. Distinct table from scanned_files
+    so we can count unique kernels without sha256 hash obfuscation."""
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT OR IGNORE INTO kaggle_kernels_scanned(ref, scanned_at) VALUES(?,?)",
+            (ref, _now()),
+        )
+        return cur.rowcount == 1
 
 
 # kept for backward compat with any external callers
@@ -649,12 +668,18 @@ def get_stats() -> dict:
             "SELECT provider, COUNT(*) as total, COALESCE(SUM(is_valid),0) as valid "
             "FROM found_keys GROUP BY provider ORDER BY total DESC"
         ).fetchall()]
+        kaggle_scanned = c.execute("SELECT COUNT(*) FROM kaggle_kernels_scanned").fetchone()[0]
+        kaggle_found   = c.execute("SELECT COUNT(*) FROM found_keys WHERE file_type='kaggle'").fetchone()[0]
+        kaggle_valid   = c.execute("SELECT COALESCE(SUM(is_valid),0) FROM found_keys WHERE file_type='kaggle'").fetchone()[0]
         return {
-            "repos_scanned": c.execute("SELECT COUNT(*) FROM scanned_repos").fetchone()[0],
-            "files_scanned": c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0],
-            "keys_found":    c.execute("SELECT COUNT(*) FROM found_keys").fetchone()[0],
-            "keys_valid":    c.execute("SELECT COUNT(*) FROM found_keys WHERE is_valid=1").fetchone()[0],
-            "by_provider":   by_prov,
+            "repos_scanned":   c.execute("SELECT COUNT(*) FROM scanned_repos").fetchone()[0],
+            "files_scanned":   c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0],
+            "keys_found":      c.execute("SELECT COUNT(*) FROM found_keys").fetchone()[0],
+            "keys_valid":      c.execute("SELECT COUNT(*) FROM found_keys WHERE is_valid=1").fetchone()[0],
+            "by_provider":     by_prov,
+            "kaggle_scanned":  kaggle_scanned,
+            "kaggle_found":    kaggle_found,
+            "kaggle_valid":    kaggle_valid,
         }
 
 

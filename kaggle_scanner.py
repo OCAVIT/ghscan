@@ -70,7 +70,7 @@ if _kg_users and _kg_keys and len(_kg_users) == len(_kg_keys):
         _BASIC_AUTHS.append("Basic " + base64.b64encode(f"{u}:{k}".encode()).decode())
 _PULL_SLEEP   = 1.5   # seconds between pulls per token
 _SEARCH_SLEEP = 2.0   # seconds between search queries
-_MAX_PAGES    = 3     # search pages per query (20 results/page = 60 notebooks)
+_MAX_PAGES    = 7     # search pages per query (20 results/page = 140 notebooks)
 _LANGUAGES    = ["python", "r"]  # R community uses openai/ellmer R packages
 
 _LIMITS = httpx.Limits(
@@ -82,32 +82,135 @@ _LIMITS = httpx.Limits(
 # Search queries — match notebook titles/descriptions that suggest AI key presence.
 # Kaggle search indexes title, subtitle, tags, and (partially) source code.
 _QUERIES: list[str] = [
-    # Env var names — most likely to be in code comments / markdown cells too
+    # ── Env var names — most likely to be in code comments / markdown cells ──
+    # Major providers
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    # Aggregators
+    "OPENROUTER_API_KEY",
     "TOGETHER_API_KEY",
+    "AIMLAPI_API_KEY",
+    "DEEPINFRA_TOKEN",
+    "HYPERBOLIC_API_KEY",
+    "NOVITA_API_KEY",
+    "PORTKEY_API_KEY",
+    # Hosted-model APIs
     "GROQ_API_KEY",
     "CEREBRAS_API_KEY",
-    "REPLICATE_API_TOKEN",
-    "HF_TOKEN huggingface",
-    "FIREWORKS_API_KEY",
-    "OPENROUTER_API_KEY",
     "MISTRAL_API_KEY",
     "COHERE_API_KEY",
     "PERPLEXITY_API_KEY",
+    "FIREWORKS_API_KEY",
+    "REPLICATE_API_TOKEN",
     "FAL_KEY",
-    "DEEPSEEK_API_KEY",
-    # Common integration patterns
+    # HuggingFace
+    "HF_TOKEN",
+    "HUGGINGFACE_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    # Chinese ecosystem
+    "ZHIPUAI_API_KEY",
+    "GLM_API_KEY",
+    "BIGMODEL_API_KEY",
+    "MOONSHOT_API_KEY",
+    "KIMI_API_KEY",
+    "ARK_API_KEY",
+    "DOUBAO_API_KEY",
+    "VOLC_ACCESSKEY",
+    "SILICONFLOW_API_KEY",
+    "KLING_ACCESS_KEY",
+    "KLING_SECRET_KEY",
+    # Image / video / audio
+    "STABILITY_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "XI_API_KEY",
+    "LUMA_API_KEY",
+    "RUNWAYML_API_SECRET",
+    "PIKA_API_KEY",
+    "TWELVELABS_API_KEY",
+    "INWORLD_BASE64",
+    "WAVESPEED_API_KEY",
+    "HEDRA_API_KEY",
+    "KREA_API_KEY",
+    "PIXVERSE_API_KEY",
+    "HIGGSFIELD_API_KEY",
+    # Search/agent tools
+    "FIRECRAWL_API_KEY",
+    "SERPER_API_KEY",
+    # xAI / Grok
+    "XAI_API_KEY",
+    "GROK_API_KEY",
+
+    # ── Notebook content patterns (titles + frontmatter) ──
     "langchain openai api key",
     "openai api key tutorial",
+    "anthropic claude api tutorial",
     "huggingface inference api token",
-    "replicate api python",
+    "gemini api python tutorial",
+    "deepseek api python",
+    "deepseek tutorial",
+    "openrouter api python",
+    "groq llama tutorial",
     "fireworks ai python",
-    "openrouter api",
-    # Notebook title patterns where devs often hardcode
+    "replicate api python",
+    "stability ai sdxl",
+    "elevenlabs voice clone",
+    "kling ai video",
+    "luma dream machine",
+    "fal.ai api",
+    "siliconflow api",
+    "zhipu glm api",
+    "moonshot kimi api",
+    "ark seedance api",
+    "xai grok api",
+    "perplexity sonar api",
+    "mistral api python",
+    "cohere api python",
+    "novita ai api",
+    "deepinfra api",
+    "aimlapi tutorial",
+    "hyperbolic api python",
+    "portkey ai api",
+
+    # ── Use-case patterns where keys often leak ──
+    "langchain rag",
+    "llamaindex rag",
+    "rag pipeline tutorial",
+    "rag question answering",
+    "vector db pinecone openai",
+    "qdrant rag",
+    "weaviate rag",
+    "chroma rag",
+    "agentic workflow",
+    "multi agent",
+    "crewai tutorial",
+    "autogen tutorial",
+    "smolagents tutorial",
+    "fine-tuning lora",
+    "stable diffusion api",
+    "image generation api",
+    "video generation api",
+    "tts elevenlabs",
+    "voice cloning api",
+
+    # ── Generic notebook title patterns ──
     "llm api keys notebook",
     "ai provider api",
     "inference api notebook",
+    "chatbot tutorial api",
+    "openai chatbot",
+    "claude chatbot",
+    "ai agent",
+    "ai assistant",
+
+    # ── Compliance / leaky framework patterns ──
+    "litellm config",
+    "litellm proxy",
+    "openai_api_key environment",
+    "load_dotenv",
+    "kaggle secrets api",
 ]
 
 # AI trigger strings for fast pre-scan (avoids running full regex on irrelevant cells)
@@ -319,6 +422,10 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
                         continue
 
                     scanned.add(ref)
+                    # Track unique kernel refs scanned for stats / TG digest.
+                    # Distinct from scanned_files (sha256 hash) so we can count
+                    # actual notebooks processed across cycles.
+                    db.kaggle_mark_scanned(ref)
                     content = await _fetch_kernel_source(token, ref)
                     if content:
                         await _scan_notebook(ref, content)
