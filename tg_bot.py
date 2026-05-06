@@ -393,6 +393,24 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
         kg_scanned = s.get('kaggle_scanned', 0)
         kg_found   = s.get('kaggle_found',   0)
         kg_valid   = s.get('kaggle_valid',   0)
+        # Infra breakdown by type — show top types with valid count
+        infra_by_type = s.get('infra_by_type', [])
+        _infra_emoji = {
+            "replit":   "🌳",
+            "database": "🐘",
+            "aws":      "☁️",
+            "ssh":      "🔐",
+            "alibaba":  "🐉",
+            "azure":    "🔷",
+            "infra":    "🔧",
+        }
+        infra_lines = []
+        for r in infra_by_type:
+            t = r['t']; total = r['total']; valid = r['valid']
+            if total < 1: continue
+            em = _infra_emoji.get(t, "🏗️")
+            infra_lines.append(f"   {em} {t:<10} {total:>4} found, {valid:>3} valid")
+
         lines = [
             "📊 <b>Database Stats</b>",
             "",
@@ -402,9 +420,13 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
             f"🔑 AI keys found:  <b>{keys_found_ai}</b>",
             f"✅ AI keys valid:  <b>{keys_valid_ai}</b>",
             f"🏗️ Infra creds:   <b>{ic['total']}</b>  (🔴{ic['high']} high / 🟡{ic['medium']} medium)",
+        ]
+        if infra_lines:
+            lines.extend(infra_lines)
+        lines.extend([
             "",
             "<b>By provider:</b>",
-        ]
+        ])
         by_prov = {r["provider"]: r for r in by_prov_full if r["total"] > 0}
         # Hide serper + firecrawl from main listing — accessible via tools category
         by_prov.pop("serper", None)

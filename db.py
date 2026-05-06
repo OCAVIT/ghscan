@@ -692,6 +692,14 @@ def get_stats() -> dict:
         kaggle_scanned = c.execute("SELECT COUNT(*) FROM kaggle_kernels_scanned").fetchone()[0]
         kaggle_found   = c.execute("SELECT COUNT(*) FROM found_keys WHERE file_type='kaggle'").fetchone()[0]
         kaggle_valid   = c.execute("SELECT COALESCE(SUM(is_valid),0) FROM found_keys WHERE file_type='kaggle'").fetchone()[0]
+        # Per-type breakdown of infra (replit/aws/database/ssh/etc) for digest.
+        # is_validated: 1=valid, 0=invalid, -1=pending. We count both validated
+        # and pending since validation lags behind extraction.
+        infra_by_type = [dict(r) for r in c.execute(
+            "SELECT cred_type AS t, COUNT(*) AS total, "
+            "       COALESCE(SUM(CASE WHEN is_validated=1 THEN 1 ELSE 0 END), 0) AS valid "
+            "FROM infra_findings GROUP BY cred_type ORDER BY total DESC"
+        ).fetchall()]
         return {
             "repos_scanned":   c.execute("SELECT COUNT(*) FROM scanned_repos").fetchone()[0],
             "files_scanned":   c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0],
@@ -701,6 +709,7 @@ def get_stats() -> dict:
             "kaggle_scanned":  kaggle_scanned,
             "kaggle_found":    kaggle_found,
             "kaggle_valid":    kaggle_valid,
+            "infra_by_type":   infra_by_type,
         }
 
 
@@ -742,11 +751,25 @@ def infra_exists(cred: str) -> bool:
                          (h,)).fetchone() is not None
 
 
+_CRITICAL_INFRA_TYPES = {"replit"}  # cred_type values that are ALWAYS critical
+                                      # (URL/token alone = full access, no extra
+                                      # context needed). assess_risk's heuristics
+                                      # don't know about these — override here.
+
+
 def save_infra(cred_type: str, cred: str, repo: str, file_path: str,
                file_url: str, repo_stars: int, repo_created: str,
                file_type: str, destination: str,
                risk_level: str, risk_reasons: list[str]) -> bool:
     import json
+    # Force high-risk for cred types where the leak itself is the breach
+    # (e.g. REPLIT_DB_URL: URL alone grants full read+write to K/V store).
+    if cred_type in _CRITICAL_INFRA_TYPES and risk_level != "high":
+        risk_level = "high"
+        risk_reasons = list(risk_reasons or [])
+        if f"{cred_type}_critical_by_type" not in risk_reasons:
+            risk_reasons.insert(0, f"{cred_type}_critical_by_type")
+
     h = hashlib.sha256(cred.encode()).hexdigest()
     # Preview: first 20 + last 8, never expose DB passwords/SSH keys in full in preview
     preview = cred[:20] + "..." + cred[-8:] if len(cred) > 28 else cred[:16] + "..."
