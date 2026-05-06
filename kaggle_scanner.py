@@ -32,8 +32,7 @@ import httpx
 import db
 from config import KAGGLE_TOKENS, KAGGLE_SCAN_INTERVAL, evomi_proxy_url
 from patterns import EXTRACTORS, AI_TRIGGER, INFRA_TRIGGER
-from infra_patterns import INFRA_EXTRACTORS
-from infra_jackpot import extract_destination, assess_risk
+from infra_patterns import INFRA_EXTRACTORS, extract_destination, assess_risk
 from deobfuscate import expand as _deobf_expand
 from validators import validate
 from notifier import notify_found, notify_infra_found
