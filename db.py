@@ -58,6 +58,11 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_found_valid    ON found_keys(is_valid, discovered_at DESC);
         CREATE INDEX IF NOT EXISTS idx_found_provider ON found_keys(provider, discovered_at DESC);
         CREATE INDEX IF NOT EXISTS idx_found_at       ON found_keys(discovered_at DESC);
+        -- file_type index: digest + source_breakdown + mirror_stats hit this
+        -- with WHERE file_type='kaggle' / LIKE 'mirror%' frequently. Without
+        -- index on 22k+ rows table = full scan per query → slow Refresh
+        -- Stats button.
+        CREATE INDEX IF NOT EXISTS idx_found_file_type ON found_keys(file_type, is_valid);
 
         -- Infrastructure credentials: DB connection strings, SSH keys, cloud keys, deploy tokens.
         -- Separate table from found_keys (AI provider keys) so we can query/display them
@@ -683,7 +688,19 @@ def get_valid_keys_to_revalidate(max_age_hours: int = 12, limit: int = 200) -> l
 
 # ── Stats / Results ────────────────────────────────────────────────────────
 
+# Cache get_stats() result briefly so rapid refreshes (TG button, web UI,
+# /stats endpoint hit by multiple clients) don't each pay the 8-query cost.
+# 15s feels real-time enough — scanner produces finds at <1/s typical, so
+# missing the latest 15s of activity is acceptable for a stats button.
+_STATS_CACHE: dict = {"ts": 0.0, "data": None}
+_STATS_TTL = 15.0   # seconds
+
+
 def get_stats() -> dict:
+    import time as _t
+    now = _t.time()
+    if _STATS_CACHE["data"] is not None and (now - _STATS_CACHE["ts"]) < _STATS_TTL:
+        return _STATS_CACHE["data"]
     with _conn() as c:
         by_prov = [dict(r) for r in c.execute(
             "SELECT provider, COUNT(*) as total, COALESCE(SUM(is_valid),0) as valid "
@@ -700,7 +717,7 @@ def get_stats() -> dict:
             "       COALESCE(SUM(CASE WHEN is_validated=1 THEN 1 ELSE 0 END), 0) AS valid "
             "FROM infra_findings GROUP BY cred_type ORDER BY total DESC"
         ).fetchall()]
-        return {
+        result = {
             "repos_scanned":   c.execute("SELECT COUNT(*) FROM scanned_repos").fetchone()[0],
             "files_scanned":   c.execute("SELECT COUNT(*) FROM scanned_files").fetchone()[0],
             "keys_found":      c.execute("SELECT COUNT(*) FROM found_keys").fetchone()[0],
@@ -711,6 +728,9 @@ def get_stats() -> dict:
             "kaggle_valid":    kaggle_valid,
             "infra_by_type":   infra_by_type,
         }
+        _STATS_CACHE["ts"]   = now
+        _STATS_CACHE["data"] = result
+        return result
 
 
 def get_keys_since(since_iso: str) -> list[dict]:
