@@ -1008,18 +1008,51 @@ async def validate_openrouter(key: str) -> bool:
 
 
 async def validate_aimlapi(key: str) -> bool:
-    """AIMLAPI — GET /v1/models returns model list. 401 = dead, 200 = alive."""
+    """AIMLAPI — GET /v1/billing/balance.
+
+    HISTORICAL BUG: previously used /v1/models which is PUBLIC (returns 200
+    even with no/fake auth) — produced 100% false-positive validation rate.
+    All ~54 'valid' aimlapi keys collected before fix may be dead and need
+    revalidation. Fix: /v1/billing/balance requires real auth (401 on fake).
+
+    Optional balance gate: response is JSON with usage/limit fields. When
+    available, return True only if remaining > 0; otherwise return True on
+    200 (some accounts return ambiguous structure)."""
     try:
         async with _client() as c:
             r = await c.get(
-                "https://api.aimlapi.com/v1/models",
+                "https://api.aimlapi.com/v1/billing/balance",
                 headers={"Authorization": f"Bearer {key}"},
             )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
+        if r.status_code == 401 or r.status_code == 403:
             return False
-        return r.status_code == 429
+        if r.status_code != 200:
+            return r.status_code == 429   # rate-limited = key alive
+        # 200 — try to gate on balance fields if present
+        try:
+            body = r.json()
+            for fld in ("balance", "remaining", "credit_remaining",
+                        "available", "current_balance"):
+                v = body.get(fld) if isinstance(body, dict) else None
+                if v is not None:
+                    try:
+                        return float(v) > 0
+                    except (TypeError, ValueError):
+                        return True
+            # Nested data envelope
+            data = body.get("data") if isinstance(body, dict) else None
+            if isinstance(data, dict):
+                for fld in ("balance", "remaining", "current_balance"):
+                    v = data.get(fld)
+                    if v is not None:
+                        try:
+                            return float(v) > 0
+                        except (TypeError, ValueError):
+                            return True
+        except Exception:
+            pass
+        # 200 with unparseable body → conservative: mark alive
+        return True
     except Exception as e:
         log.debug("aimlapi validate err: %s", e)
         return False
