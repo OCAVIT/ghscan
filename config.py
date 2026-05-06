@@ -162,11 +162,13 @@ elif _kaggle_single:
 else:
     KAGGLE_TOKENS = []
 
-KAGGLE_SCAN_INTERVAL = int(os.environ.get("KAGGLE_SCAN_INTERVAL", "600"))   # 10min — 5+5 workers per
-                                                                             # mirror finish a cycle in ~5-10min,
-                                                                             # so 1h sleep wastes 80% idle. Short
-                                                                             # interval also means LLM-themer's
-                                                                             # fresh queries get picked up quickly.
+KAGGLE_SCAN_INTERVAL = int(os.environ.get("KAGGLE_SCAN_INTERVAL", "1800"))  # 30min — was 10min but
+                                                                             # Kaggle started rate-limiting
+                                                                             # accounts (404 instead of 200)
+                                                                             # at high scan frequency. 30min
+                                                                             # gives accounts time to "cool down"
+                                                                             # between cycles. Adjust via env if
+                                                                             # we add more accounts (more headroom).
 
 # ── HuggingFace token ──────────────────────────────────────────────────────
 # HF_TOKEN — read-scope token for HuggingFace Spaces API.

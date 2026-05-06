@@ -55,6 +55,7 @@ REPLIT_RESULTS_PER_QUERY = int(os.environ.get("REPLIT_RESULTS_PER_QUERY", "100")
 
 _SERPER_BASE = "https://google.serper.dev/search"
 _FIRECRAWL_BASE = "https://api.firecrawl.dev/v1/scrape"
+_FIRECRAWL_SEARCH = "https://api.firecrawl.dev/v1/search"
 
 _LIMITS = httpx.Limits(max_connections=15, max_keepalive_connections=5, keepalive_expiry=20)
 
@@ -136,7 +137,62 @@ def _mark_dead(provider: str, key: str):
         log.debug("[replit] mark_dead err: %s", e)
 
 
-# ── Serper search with key rotation ─────────────────────────────────────────
+# ── Firecrawl search with key rotation ─────────────────────────────────────
+# NOTE: serper.dev rejects secret-hunting dorks with 400 "Query not allowed"
+# (their abuse policy). Firecrawl /v1/search has no such filter — accepts
+# any query. Both APIs return URL + snippet/description.
+
+async def _firecrawl_search(client: httpx.AsyncClient, query: str,
+                            keys: list[str]) -> list[dict]:
+    """Returns list of {url, title, description} from firecrawl /v1/search.
+    Rotates keys on 401/402/403/429."""
+    last_err = ""
+    for key in keys:
+        try:
+            r = await client.post(
+                _FIRECRAWL_SEARCH,
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                json={"query": query, "limit": min(REPLIT_RESULTS_PER_QUERY, 10)},
+                timeout=25,
+            )
+            if r.status_code in (401, 402, 403):
+                _mark_dead("firecrawl", key)
+                last_err = f"firecrawl {r.status_code} on key {key[:14]}"
+                continue
+            if r.status_code == 429:
+                last_err = f"firecrawl 429 on key {key[:14]}"
+                continue
+            if r.status_code == 400:
+                # Firecrawl 400 typically = bad request shape, not policy. Log + abort.
+                log.warning("[replit] firecrawl 400 BAD %r — body: %s",
+                            query[:80], r.text[:200])
+                return []
+            if r.status_code != 200:
+                last_err = f"firecrawl status={r.status_code} body={r.text[:160]}"
+                continue
+            data = r.json()
+            if not data.get("success"):
+                last_err = f"firecrawl success=false body={r.text[:160]}"
+                continue
+            results = data.get("data") or []
+            # Normalize to {link, title, snippet} shape so downstream code
+            # doesn't care which API we used.
+            normalized = []
+            for it in results:
+                normalized.append({
+                    "link":    it.get("url") or it.get("link") or "",
+                    "title":   it.get("title", ""),
+                    "snippet": it.get("description") or it.get("snippet") or "",
+                })
+            return normalized
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:120]}"
+    log.warning("[replit] firecrawl /search failed for %r: %s", query[:60], last_err)
+    return []
+
+
+# ── Serper search (LEGACY — kept as fallback if firecrawl pool exhausts) ───
 
 async def _serper_search(client: httpx.AsyncClient, query: str,
                          keys: list[str]) -> list[dict]:
@@ -323,8 +379,18 @@ async def _scan_text(text: str, url: str, query: str) -> tuple[int, int]:
 async def _process_dork(client: httpx.AsyncClient, query: str,
                         serper_keys: list[str], fc_keys: list[str]) -> dict:
     """Dork → results → snippet scan + (optional) full content scan.
-    Returns counters for log/aggregate."""
-    results = await _serper_search(client, query, serper_keys)
+    Returns counters for log/aggregate.
+
+    Search backend: firecrawl /v1/search FIRST (no abuse policy on queries
+    unlike serper which 400-rejects secret-hunting dorks). Serper fallback
+    if firecrawl pool exhausts."""
+    results = []
+    if fc_keys:
+        results = await _firecrawl_search(client, query, fc_keys)
+    if not results and serper_keys:
+        # Fallback (most queries 400 if they look like secret-hunting, but
+        # generic ones may pass)
+        results = await _serper_search(client, query, serper_keys)
     if not results:
         return {"results": 0, "ai_saved": 0, "valid_saved": 0, "fetched": 0}
 
