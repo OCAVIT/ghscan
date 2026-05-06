@@ -1114,6 +1114,54 @@ async def admin_source_breakdown(
     }
 
 
+@app.get("/admin/source_full")
+async def admin_source_full(
+    hours: int = 8760, authorization: str | None = Header(default=None)
+):
+    """Full provenance breakdown — by file_type AND by extracted URL domain.
+    Captures non-GitHub sources (codeberg/gitee/hf/kaggle/postman/trufflehog)
+    that source_breakdown buckets into 'search_code' because their file_url
+    doesn't match GitHub-specific patterns."""
+    _check_admin(authorization)
+    hours = max(1, min(hours, 24 * 365))
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    with db._conn() as c:
+        # by file_type — captures explicit scanner tags
+        by_type = c.execute(
+            "SELECT COALESCE(NULLIF(file_type,''),'(empty)') AS t, "
+            "       COUNT(*) AS total, COALESCE(SUM(is_valid),0) AS valid "
+            "FROM found_keys WHERE discovered_at >= ? "
+            "GROUP BY t ORDER BY valid DESC, total DESC",
+            (cutoff,),
+        ).fetchall()
+        # by file_url domain — pulls hostname between :// and next /
+        by_domain = c.execute(
+            """
+            SELECT
+              CASE
+                WHEN instr(substr(file_url, instr(file_url,'://')+3), '/') > 0
+                  THEN substr(substr(file_url, instr(file_url,'://')+3),
+                              1,
+                              instr(substr(file_url, instr(file_url,'://')+3),'/')-1)
+                ELSE substr(file_url, instr(file_url,'://')+3)
+              END AS domain,
+              COUNT(*) AS total, COALESCE(SUM(is_valid),0) AS valid
+            FROM found_keys
+            WHERE discovered_at >= ? AND file_url != ''
+            GROUP BY domain
+            ORDER BY valid DESC, total DESC
+            LIMIT 30
+            """,
+            (cutoff,),
+        ).fetchall()
+    return {
+        "window_hours": hours,
+        "since":        cutoff,
+        "by_file_type": [dict(r) for r in by_type],
+        "by_domain":    [dict(r) for r in by_domain],
+    }
+
+
 @app.post("/admin/test_llm_pipelines")
 async def admin_test_llm_pipelines(
     body: dict, authorization: str | None = Header(default=None)
