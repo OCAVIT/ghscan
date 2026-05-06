@@ -38,7 +38,21 @@ _SYSTEM_PROMPT = (
     "patterns before they auto-revoke (24h SS Partner window).\n\n"
     "Output JSON only:\n"
     '{"queries":[{"q":"...","provider":"openai|...|multi","file_type":"env|config|notebook|code","theme":"reactive,..."}]}\n\n'
-    "Each query: <240 chars, GitHub search syntax, MUST quote env-var names."
+    "STRICT RULES for q field:\n"
+    '  • ALWAYS WRAP env-var names in DOUBLE QUOTES — GitHub treats UPPER_SNAKE_CASE\n'
+    '    without quotes as case-insensitive substring (false-positive prone). With\n'
+    '    quotes it becomes literal token match. Example:\n'
+    '       BAD:  DEEPSEEK_API_KEY extension:py\n'
+    '       GOOD: "DEEPSEEK_API_KEY" extension:py\n'
+    '  • For multi-provider OR-combos:\n'
+    '       BAD:  CHATGLM_API_KEY OR ZHIPU_API_KEY filename:.env\n'
+    '       GOOD: ("CHATGLM_API_KEY" OR "ZHIPU_API_KEY") filename:.env\n'
+    '  • For key-prefix searches: ALSO quote prefix.\n'
+    '       GOOD: "sk-or-v1-" filename:.env\n'
+    '  • Each query <240 chars total length.\n'
+    '  • At least one operator (filename:/language:/path:/extension:/pushed:/'
+    'created:/size:) OR quoted literal — bare prefix searches without anchor '
+    'return >1M results, useless.\n'
 )
 
 
@@ -80,6 +94,27 @@ def _build_user_prompt(cycle_stats: dict, recent_finds: list[dict]) -> str:
 _VALID_FILE_TYPES = {"env", "config", "notebook", "docker", "ci", "code", "sa_json"}
 _VALID_PROVIDERS = set(PROVIDER_AXES.keys()) | {"multi", "google", "gemini"}
 
+# Matches UPPER_SNAKE_CASE tokens with at least 2 underscores OR 8+ chars —
+# typical env-var names (OPENAI_API_KEY, DEEPSEEK_API_KEY, X_API_KEY). The
+# negative-lookbehind/-lookahead avoid double-wrapping already-quoted tokens
+# and matching tokens inside operator clauses (filename:NAME).
+_UNQUOTED_ENV_RE = re.compile(
+    r'(?<!["\w:])'                         # not preceded by " or word-char or :
+    r'([A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,5})' # UPPER_SNAKE pattern (1-5 underscores)
+    r'(?!["\w])'                           # not followed by " or word-char
+)
+
+
+def _auto_quote_env_names(q: str) -> str:
+    """Post-process LLM output: wrap unquoted UPPER_SNAKE_CASE env names in
+    double quotes. LLMs sometimes drop quotes despite explicit instructions;
+    this is a belt-and-suspenders fix.
+
+    Skips if the token is part of a GitHub operator (filename:NAME,
+    extension:NAME) or already inside quotes.
+    """
+    return _UNQUOTED_ENV_RE.sub(r'"\1"', q)
+
 
 def _parse_response(text: str | None) -> list[dict]:
     if not text:
@@ -110,6 +145,11 @@ def _validate_queries(raw: list[dict]) -> list[dict]:
     for qd in raw:
         q = (qd.get("q") or "").strip()
         if not q or len(q) > _QUERY_LEN_CAP:
+            continue
+        # Auto-quote unquoted UPPER_SNAKE_CASE env names — belt-and-suspenders
+        # against LLM occasionally dropping quotes despite explicit prompt.
+        q = _auto_quote_env_names(q)
+        if len(q) > _QUERY_LEN_CAP:   # re-check after auto-quote may grow length
             continue
         if q in seen_qs:
             continue

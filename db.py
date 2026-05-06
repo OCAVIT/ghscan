@@ -109,6 +109,30 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_treewalk_at ON tree_walked_repos(walked_at DESC);
 
+        -- Org members walk dedup — orgs whose member list was already
+        -- enumerated. Prevents re-walking when multiple authors from the
+        -- same org get promoted to watched. members_walked counts how many
+        -- new author entries the walk inserted.
+        CREATE TABLE IF NOT EXISTS walked_orgs (
+            org             TEXT PRIMARY KEY,
+            walked_at       TEXT NOT NULL,
+            members_listed  INTEGER DEFAULT 0,
+            members_new     INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_walked_orgs_at ON walked_orgs(walked_at DESC);
+
+        -- Gist walk dedup — per-author last gist-walk timestamp.
+        -- author-level granular dedup of walked gists is via
+        -- scanned_files (the SHA of the gist file content).
+        CREATE TABLE IF NOT EXISTS walked_gists_authors (
+            login           TEXT PRIMARY KEY,
+            walked_at       TEXT NOT NULL,
+            gists_listed    INTEGER DEFAULT 0,
+            files_scanned   INTEGER DEFAULT 0,
+            keys_found      INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_walked_gists_at ON walked_gists_authors(walked_at DESC);
+
         -- Dynamic AI/combinatorial queries — rotating pool generated every 8h.
         -- 15-day non-repeat is enforced at insert time via query_hash dedup.
         -- Per-query yield is tracked so the generator can prioritize productive
@@ -444,6 +468,17 @@ def mark_author_walked(login: str, platform: str = "github"):
         )
 
 
+def is_author_watched(login: str, platform: str = "github") -> bool:
+    """Returns True if author is currently in the watchlist (is_watched=1).
+    Used by walk_org_members to skip already-watched coworkers."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT is_watched FROM watched_authors WHERE login = ? AND platform = ?",
+            (login, platform),
+        ).fetchone()
+    return bool(row) and bool(row["is_watched"])
+
+
 # ── Tree-walk dedup ────────────────────────────────────────────────────────────
 
 def try_claim_repo_tree(repo_full_name: str) -> bool:
@@ -475,6 +510,78 @@ def mark_repo_walked(repo_full_name: str, files_scanned: int, keys_found: int):
                SET walked_at=?, files_scanned=?, keys_found=?
                WHERE repo_full_name=?""",
             (_now(), files_scanned, keys_found, repo_full_name),
+        )
+
+
+def try_claim_org_walk(org: str, max_age_hours: int = 24 * 7) -> bool:
+    """Atomic claim-or-skip for org-member walks. Returns True if THIS caller
+    is the first to walk this org within max_age_hours window — caller should
+    proceed to enumerate org members. Returns False if recently walked.
+
+    Default 7 days: org membership rarely changes faster than that, no point
+    re-walking sooner. Caller updates stats via mark_org_walked() after.
+    """
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    now = _now()
+    with _conn() as c:
+        # If recent row exists → skip
+        row = c.execute(
+            "SELECT walked_at FROM walked_orgs WHERE org = ?", (org,)
+        ).fetchone()
+        if row and row["walked_at"] >= cutoff:
+            return False
+        # Upsert: claim this org for current cycle
+        c.execute(
+            """INSERT INTO walked_orgs(org, walked_at, members_listed, members_new)
+               VALUES(?, ?, 0, 0)
+               ON CONFLICT(org) DO UPDATE SET walked_at=excluded.walked_at""",
+            (org, now),
+        )
+    return True
+
+
+def mark_org_walked(org: str, members_listed: int, members_new: int):
+    """Update stats after walk_org_members() completes."""
+    with _conn() as c:
+        c.execute(
+            """UPDATE walked_orgs
+               SET walked_at=?, members_listed=?, members_new=?
+               WHERE org=?""",
+            (_now(), members_listed, members_new, org),
+        )
+
+
+def try_claim_gist_walk(login: str, max_age_hours: int = 24) -> bool:
+    """Atomic claim-or-skip for per-author gist walks. Returns True if not
+    walked within max_age_hours."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    now = _now()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT walked_at FROM walked_gists_authors WHERE login = ?", (login,)
+        ).fetchone()
+        if row and row["walked_at"] >= cutoff:
+            return False
+        c.execute(
+            """INSERT INTO walked_gists_authors(login, walked_at, gists_listed, files_scanned, keys_found)
+               VALUES(?, ?, 0, 0, 0)
+               ON CONFLICT(login) DO UPDATE SET walked_at=excluded.walked_at""",
+            (login, now),
+        )
+    return True
+
+
+def mark_gist_walk(login: str, gists_listed: int, files_scanned: int,
+                    keys_found: int):
+    """Stats update after walk_user_gists() completes."""
+    with _conn() as c:
+        c.execute(
+            """UPDATE walked_gists_authors
+               SET walked_at=?, gists_listed=?, files_scanned=?, keys_found=?
+               WHERE login=?""",
+            (_now(), gists_listed, files_scanned, keys_found, login),
         )
 
 

