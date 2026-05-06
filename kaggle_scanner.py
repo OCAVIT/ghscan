@@ -166,7 +166,15 @@ def _extract_notebook_text(ipynb_content: str) -> str:
 async def _search_kernels(client: httpx.AsyncClient,
                           token: str, query: str, page: int,
                           language: str = "python") -> list[dict]:
-    """Search Kaggle kernels by keyword. Returns list of kernel refs."""
+    """Search Kaggle kernels by keyword. Returns list of kernel refs.
+
+    Empirical (2026-05-06): passing language=python|r filter returns
+    0 results from /api/v1/kernels/list (probably wrong expected value
+    e.g. expects 'Python' capitalized, or filter isn't supported on this
+    endpoint). Same query without `language` returns 20 results. So we
+    drop the language filter — content extractors handle both .ipynb
+    (Python) and .Rmd (R) cells uniformly.
+    """
     try:
         r = await client.get(
             f"{_BASE}/kernels/list",
@@ -176,7 +184,6 @@ async def _search_kernels(client: httpx.AsyncClient,
                 "page":      page,
                 "pageSize":  20,
                 "sortBy":    "hotness",
-                "language":  language,
             },
             timeout=20,
         )
@@ -267,31 +274,33 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
         scanned: set[str] = set()
 
         for query in queries:
-            for lang in _LANGUAGES:
-                for page in range(1, _MAX_PAGES + 1):
-                    kernels = await _search_kernels(client, token, query, page, lang)
-                    if not kernels:
-                        break
+            # Single search per query — language filter dropped (Kaggle returns
+            # 0 results when language is set). Content extractors handle both
+            # .ipynb (Python) and .Rmd (R) uniformly.
+            for page in range(1, _MAX_PAGES + 1):
+                kernels = await _search_kernels(client, token, query, page)
+                if not kernels:
+                    break
 
-                    for k in kernels:
-                        ref = k.get("ref", "")
-                        if not ref or ref in scanned:
-                            continue
+                for k in kernels:
+                    ref = k.get("ref", "")
+                    if not ref or ref in scanned:
+                        continue
 
-                        ck = _claim_key(ref)
-                        if not db.try_claim_file(ck):
-                            continue
+                    ck = _claim_key(ref)
+                    if not db.try_claim_file(ck):
+                        continue
 
-                        scanned.add(ref)
-                        content = await _fetch_kernel_source(token, ref)
-                        if content:
-                            await _scan_notebook(ref, content)
+                    scanned.add(ref)
+                    content = await _fetch_kernel_source(token, ref)
+                    if content:
+                        await _scan_notebook(ref, content)
 
-                        await asyncio.sleep(_PULL_SLEEP)
+                    await asyncio.sleep(_PULL_SLEEP)
 
-                    if len(kernels) < 20:
-                        break
-                    await asyncio.sleep(_SEARCH_SLEEP)
+                if len(kernels) < 20:
+                    break
+                await asyncio.sleep(_SEARCH_SLEEP)
 
             await asyncio.sleep(_SEARCH_SLEEP)
 
