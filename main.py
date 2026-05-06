@@ -1295,19 +1295,44 @@ async def admin_probe_external_apis(authorization: str | None = Header(default=N
         KAGGLE_TOKENS = []
     bearer_results = []
     if KAGGLE_TOKENS:
+        # Test KGAT against multiple Kaggle endpoint variants — Kaggle's old
+        # /api/v1 is Basic-auth only; KGAT bearer may need new paths.
+        endpoints_to_try = [
+            ("v1_kernels_list",       "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5&language=python"),
+            ("v1_users_currentuser",  "https://www.kaggle.com/api/v1/users/current"),
+            ("v1_datasets_list",      "https://www.kaggle.com/api/v1/datasets/list?search=test&pageSize=5"),
+            ("internal_kernels_list", "https://www.kaggle.com/api/i/kernels.KernelsService/ListKernels"),
+            ("oauth_userinfo",        "https://www.kaggle.com/api/v1/oauth/userinfo"),
+            ("v2_kernels_list",       "https://www.kaggle.com/api/v2/kernels/list?search=langchain&pageSize=5"),
+        ]
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            for tok in KAGGLE_TOKENS[:3]:  # just first 3
-                e = {"prefix": tok[:14]}
+            tok = KAGGLE_TOKENS[0]
+            prefix = tok[:14]
+            for label, url in endpoints_to_try:
+                e = {"endpoint": label}
                 try:
                     r = await client.get(
-                        "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5&language=python",
+                        url,
                         headers={**UA, "Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
                     )
                     e["status"] = r.status_code
-                    e["body"] = r.text[:200]
+                    ct = r.headers.get("content-type","")
+                    e["content_type"] = ct[:60]
+                    if "json" in ct:
+                        try:
+                            j = r.json()
+                            if isinstance(j, dict):
+                                e["json_keys"] = list(j.keys())[:8]
+                            elif isinstance(j, list):
+                                e["json_kind"] = f"list[{len(j)}]"
+                        except Exception:
+                            e["body_head"] = r.text[:120]
+                    else:
+                        e["body_head"] = r.text[:120].replace("\n"," ")
                 except Exception as ex:
                     e["err"] = f"{type(ex).__name__}: {str(ex)[:200]}"
                 bearer_results.append(e)
+            kaggle_auth_result["token_prefix_used"] = prefix
     kaggle_auth_result["bearer_kgat"] = bearer_results
 
     return {
