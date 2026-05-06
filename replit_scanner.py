@@ -45,7 +45,12 @@ from notifier import notify_found, notify_infra_found
 
 log = logging.getLogger(__name__)
 
-REPLIT_SCAN_INTERVAL = int(os.environ.get("REPLIT_SCAN_INTERVAL", "10800"))  # 3h
+REPLIT_SCAN_INTERVAL = int(os.environ.get("REPLIT_SCAN_INTERVAL", "900"))   # 15min
+                                                                             # 36 dorks × ~1 call = 36-50 serper
+                                                                             # calls/cycle. With 150 keys × 2500/mo
+                                                                             # free tier = 375K query budget,
+                                                                             # 36×96=3456/day = 0.9% budget — plenty
+                                                                             # of headroom for fast iteration.
 REPLIT_RESULTS_PER_QUERY = int(os.environ.get("REPLIT_RESULTS_PER_QUERY", "100"))
 
 _SERPER_BASE = "https://google.serper.dev/search"
