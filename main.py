@@ -1240,10 +1240,60 @@ async def admin_probe_external_apis(authorization: str | None = Header(default=N
                 entry["err"] = f"{type(e).__name__}: {str(e)[:200]}"
             results.append(entry)
 
+    # Extra: probe each configured GITEE_TOKEN against /user (auth check)
+    gitee_token_results = []
+    try:
+        from config import GITEE_TOKENS
+    except Exception:
+        GITEE_TOKENS = []
+    if GITEE_TOKENS:
+        async with httpx.AsyncClient(headers=UA, timeout=timeout, follow_redirects=True) as client:
+            for tok in GITEE_TOKENS:
+                entry = {"token_prefix": tok[:8]}
+                try:
+                    r = await client.get(
+                        "https://gitee.com/api/v5/user",
+                        headers={**UA, "Authorization": f"token {tok}"},
+                    )
+                    entry["status_token_header"] = r.status_code
+                    entry["body_head"] = r.text[:120]
+                except Exception as e:
+                    entry["err_token"] = f"{type(e).__name__}: {str(e)[:120]}"
+                # also try with access_token query param
+                try:
+                    r = await client.get(
+                        f"https://gitee.com/api/v5/user?access_token={tok}",
+                    )
+                    entry["status_query_param"] = r.status_code
+                except Exception as e:
+                    entry["err_query"] = f"{type(e).__name__}: {str(e)[:120]}"
+                gitee_token_results.append(entry)
+
+    # Extra: probe Kaggle with KAGGLE_USERNAME + KAGGLE_KEY env if set
+    import os, base64
+    ku = os.environ.get("KAGGLE_USERNAME", "")
+    kk = os.environ.get("KAGGLE_KEY", "")
+    kaggle_auth_result = None
+    if ku and kk:
+        try:
+            auth = base64.b64encode(f"{ku}:{kk}".encode()).decode()
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                r = await client.get(
+                    "https://www.kaggle.com/api/v1/kernels/list?search=test&pageSize=5",
+                    headers={**UA, "Authorization": f"Basic {auth}"},
+                )
+                kaggle_auth_result = {"status": r.status_code, "body_head": r.text[:200]}
+        except Exception as e:
+            kaggle_auth_result = {"err": f"{type(e).__name__}: {str(e)[:200]}"}
+    else:
+        kaggle_auth_result = {"note": "KAGGLE_USERNAME/KAGGLE_KEY env not set"}
+
     return {
         "server_egress_note": "Probes run from Railway server IP, same egress as scanners",
         "evomi_proxy_configured": bool(evomi_proxy),
         "results": results,
+        "gitee_token_probe": gitee_token_results,
+        "kaggle_auth_probe": kaggle_auth_result,
     }
 
 
