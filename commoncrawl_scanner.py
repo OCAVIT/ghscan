@@ -115,19 +115,31 @@ def _claim_key(url: str, digest: str) -> str:
 
 
 async def _get_latest_crawl(client: httpx.AsyncClient) -> str | None:
-    """Fetch list of crawls and return the most recent crawl ID."""
-    try:
-        r = await client.get(f"{_CDX_BASE}/collinfo.json", timeout=15)
-        if r.status_code != 200:
-            return None
-        crawls = r.json()
-        if not isinstance(crawls, list) or not crawls:
-            return None
-        # Most recent crawl is typically first
-        return crawls[0].get("id", "")
-    except Exception as e:
-        log.debug("cc collinfo err: %s", e)
-        return None
+    """Fetch list of crawls and return the most recent crawl ID.
+
+    Retries 3 times with exp backoff — CDN occasionally returns 503 / TLS
+    errors. Logs at WARNING so we see the actual cause in production logs
+    (debug was suppressed → year-long silent failure).
+    """
+    last_err = ""
+    for attempt in range(3):
+        try:
+            r = await client.get(f"{_CDX_BASE}/collinfo.json", timeout=20)
+            if r.status_code != 200:
+                last_err = f"http {r.status_code}"
+                await asyncio.sleep(2 ** attempt)
+                continue
+            crawls = r.json()
+            if not isinstance(crawls, list) or not crawls:
+                last_err = f"unexpected body type={type(crawls).__name__} len={len(crawls) if hasattr(crawls,'__len__') else '?'}"
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return crawls[0].get("id", "")
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(2 ** attempt)
+    log.warning("cc collinfo failed after 3 attempts: %s", last_err)
+    return None
 
 
 async def _search_cdx(client: httpx.AsyncClient,
@@ -349,9 +361,12 @@ async def _scan_record(client: httpx.AsyncClient,
         await _scan_content(url, body)
 
 
-async def run_cc_cycle():
+async def run_cc_cycle() -> bool:
+    """Returns True if cycle reached the actual scanning phase, False if it
+    aborted early (e.g. collinfo unreachable). Caller uses this to decide
+    short-retry (1h) vs full interval (24h)."""
     if not CC_ENABLED:
-        return
+        return False
 
     sem = asyncio.Semaphore(_CONCURRENT)
 
@@ -360,8 +375,8 @@ async def run_cc_cycle():
 
         crawl_id = await _get_latest_crawl(client)
         if not crawl_id:
-            log.error("commoncrawl: failed to fetch latest crawl id")
-            return
+            log.error("commoncrawl: failed to fetch latest crawl id (will retry in 1h)")
+            return False
 
         log.info("=== commoncrawl cycle start | crawl=%s | %d patterns | cap=%d/pat ===",
                  crawl_id, len(_URL_PATTERNS), CC_PER_PATTERN_CAP)
@@ -386,6 +401,7 @@ async def run_cc_cycle():
             await asyncio.sleep(_PATTERN_SLEEP)
 
     log.info("=== commoncrawl cycle done | %d records total ===", total_records)
+    return True
 
 
 async def cc_loop():
@@ -397,9 +413,14 @@ async def cc_loop():
              len(_URL_PATTERNS), CC_SCAN_INTERVAL)
 
     while True:
+        ok = False
         try:
-            await run_cc_cycle()
+            ok = await run_cc_cycle()
         except Exception as e:
             log.error("commoncrawl cycle crashed: %s", e)
-        log.info("commoncrawl sleeping %ds until next cycle", CC_SCAN_INTERVAL)
-        await asyncio.sleep(CC_SCAN_INTERVAL)
+        # If cycle never reached the actual scan (e.g. collinfo unreachable),
+        # retry in 1h instead of waiting CC_SCAN_INTERVAL (default 24h) —
+        # otherwise a transient CDN failure costs us a whole day.
+        sleep_s = CC_SCAN_INTERVAL if ok else min(3600, CC_SCAN_INTERVAL)
+        log.info("commoncrawl sleeping %ds until next cycle (ok=%s)", sleep_s, ok)
+        await asyncio.sleep(sleep_s)
