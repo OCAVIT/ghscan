@@ -43,12 +43,18 @@ _BASE         = "https://www.kaggle.com/api/v1"
 # Legacy Basic auth (KAGGLE_USERNAME + KAGGLE_KEY from kaggle.json) takes
 # precedence — Kaggle's REST API endpoints (/api/v1/*) require Basic auth,
 # the new "KGAT_*" tokens are for the SDK only and return 404 against /api/v1.
-# When both are configured, Basic auth path is used (works reliably).
-_KAGGLE_USER = os.environ.get("KAGGLE_USERNAME", "").strip()
-_KAGGLE_KEY  = os.environ.get("KAGGLE_KEY", "").strip()
-_BASIC_AUTH: str | None = None
-if _KAGGLE_USER and _KAGGLE_KEY:
-    _BASIC_AUTH = "Basic " + base64.b64encode(f"{_KAGGLE_USER}:{_KAGGLE_KEY}".encode()).decode()
+#
+# Multi-account: KAGGLE_USERNAME and KAGGLE_KEY can each be a comma-separated
+# list of equal length — pairwise zip into multiple Basic-auth strings. Each
+# worker picks its own credentials round-robin → distributes search rate across
+# accounts and lets us scan more queries per cycle without hitting per-account
+# rate limits.
+_kg_users = [u.strip() for u in os.environ.get("KAGGLE_USERNAME", "").split(",") if u.strip()]
+_kg_keys  = [k.strip() for k in os.environ.get("KAGGLE_KEY",      "").split(",") if k.strip()]
+_BASIC_AUTHS: list[str] = []
+if _kg_users and _kg_keys and len(_kg_users) == len(_kg_keys):
+    for u, k in zip(_kg_users, _kg_keys):
+        _BASIC_AUTHS.append("Basic " + base64.b64encode(f"{u}:{k}".encode()).decode())
 _PULL_SLEEP   = 1.5   # seconds between pulls per token
 _SEARCH_SLEEP = 2.0   # seconds between search queries
 _MAX_PAGES    = 3     # search pages per query (20 results/page = 60 notebooks)
@@ -98,9 +104,22 @@ _AI_TRIGGER = AI_TRIGGER
 def _headers(token: str) -> dict:
     """Build Authorization header. Prefers KAGGLE_USERNAME+KAGGLE_KEY Basic
     auth (the only scheme accepted by /api/v1 endpoints); falls back to
-    Bearer KGAT for backwards compat (will likely 404 but won't crash)."""
-    if _BASIC_AUTH:
-        return {"Authorization": _BASIC_AUTH, "Content-Type": "application/json"}
+    Bearer KGAT for backwards compat (will likely 404 but won't crash).
+
+    `token` is repurposed: when Basic auths are configured, it's interpreted
+    as the index hint to pick a Basic-auth string (round-robin per worker).
+    Otherwise it's the literal Bearer token.
+    """
+    if _BASIC_AUTHS:
+        # Worker token is "basic:<idx>:<username>" — parse idx for stable
+        # per-worker assignment (each worker uses its own account end-to-end).
+        idx = 0
+        if token and token.startswith("basic:"):
+            try:
+                idx = int(token.split(":", 2)[1]) % len(_BASIC_AUTHS)
+            except Exception:
+                idx = 0
+        return {"Authorization": _BASIC_AUTHS[idx], "Content-Type": "application/json"}
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -280,20 +299,35 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
              worker_id, len(scanned))
 
 
+def _worker_tokens() -> list[str]:
+    """Pick the per-worker auth identity list. Prefers Basic-auth pairs
+    (KAGGLE_USERNAME/KAGGLE_KEY) since /api/v1 only accepts Basic; falls
+    back to KGAT KAGGLE_TOKENS otherwise. Each entry maps to one worker
+    that uses that account's auth via _headers()."""
+    if _BASIC_AUTHS:
+        # Use a stable, distinct synthetic token per Basic-auth pair.
+        # _headers() hashes this to select the right auth string.
+        return [f"basic:{i}:{_kg_users[i]}" for i in range(len(_BASIC_AUTHS))]
+    return list(KAGGLE_TOKENS)
+
+
 async def run_kaggle_cycle():
-    if not KAGGLE_TOKENS:
+    workers_auth = _worker_tokens()
+    if not workers_auth:
         return
 
-    n = len(KAGGLE_TOKENS)
+    n = len(workers_auth)
     chunks: list[list[str]] = [[] for _ in range(n)]
     for i, q in enumerate(_QUERIES):
         chunks[i % n].append(q)
 
-    log.info("=== kaggle cycle start | %d tokens | %d queries ===", n, len(_QUERIES))
+    auth_kind = "basic" if _BASIC_AUTHS else "kgat"
+    log.info("=== kaggle cycle start | %d %s accounts | %d queries ===",
+             n, auth_kind, len(_QUERIES))
 
     workers = [
         asyncio.create_task(
-            _run_worker(KAGGLE_TOKENS[i], chunks[i], i),
+            _run_worker(workers_auth[i], chunks[i], i),
             name=f"kaggle_w{i}",
         )
         for i in range(n)
@@ -308,12 +342,14 @@ async def run_kaggle_cycle():
 
 
 async def kaggle_loop():
-    if not KAGGLE_TOKENS:
-        log.info("kaggle: no KAGGLE_TOKENS configured — skipping")
+    if not KAGGLE_TOKENS and not _BASIC_AUTHS:
+        log.info("kaggle: no KAGGLE_TOKENS or KAGGLE_USERNAME/KEY configured — skipping")
         return
 
-    log.info("kaggle scanner started | %d tokens | %d queries | interval=%ds",
-             len(KAGGLE_TOKENS), len(_QUERIES), KAGGLE_SCAN_INTERVAL)
+    n_accounts = len(_BASIC_AUTHS) if _BASIC_AUTHS else len(KAGGLE_TOKENS)
+    auth_kind  = "basic" if _BASIC_AUTHS else "kgat"
+    log.info("kaggle scanner started | %d %s accounts | %d queries | interval=%ds",
+             n_accounts, auth_kind, len(_QUERIES), KAGGLE_SCAN_INTERVAL)
 
     while True:
         try:
