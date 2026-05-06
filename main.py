@@ -58,6 +58,7 @@ from issues_scanner import issues_loop
 from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
 from query_themer import generate_themed_batch
 from kaggle_themer import generate_kaggle_themed_batch
+from web_dork_scanner import web_dork_loop, run_web_dork_cycle
 # replit_scanner Phase 2 dropped 2026-05-06 — Replit blocks anonymous bot
 # access to /@user/repl pages (404/403), and Google/firecrawl don't index
 # actual Repl source code (only docs.replit.com/blog.replit.com — no
@@ -420,6 +421,9 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_themer_loop(),         name="query_themer"),
             asyncio.create_task(_kaggle_themer_loop(),  name="kaggle_themer"),
             # replit_loop dropped — see replit_scanner import-block comment.
+            # Generic web-dork scanner: dev.to / GitLab / StackOverflow / Pastebin
+            # via firecrawl /v1/search (serper rejects secret-hunting dorks).
+            asyncio.create_task(web_dork_loop(), name="web_dork_scanner"),
             asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
             asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
             asyncio.create_task(_active_learner_loop(),  name="active_learner"),
@@ -1166,6 +1170,14 @@ async def admin_source_breakdown(
         "since":        cutoff,
         "by_source":    [dict(r) for r in rows],
     }
+
+
+@app.post("/admin/run_web_dork_cycle")
+async def admin_run_web_dork_cycle(authorization: str | None = Header(default=None)):
+    """Manually trigger one web_dork cycle (skip 30min wait). Slow ~5-15min."""
+    _check_admin(authorization)
+    await run_web_dork_cycle()
+    return {"ok": True, "msg": "cycle done — check /admin/source_full for new file_types"}
 
 
 @app.post("/admin/probe_firecrawl_search")
