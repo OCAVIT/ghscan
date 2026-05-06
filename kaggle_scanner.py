@@ -353,17 +353,20 @@ async def _fetch_kernel_source(token: str, ref: str) -> str | None:
         return await asyncio.to_thread(_pull_kernel_sync, token, ref, tmpdir)
 
 
-async def _scan_notebook(ref: str, content: str):
-    """Run extractors on notebook content and persist findings."""
+async def _scan_notebook(ref: str, content: str) -> tuple[int, int]:
+    """Run extractors on notebook content and persist findings.
+    Returns (keys_saved, valid_keys_saved) for per-query yield tracking."""
     text = _extract_notebook_text(content)
     text = _deobf_expand(text)
     if not any(t in text for t in _AI_TRIGGER):
-        return
+        return 0, 0
 
     owner, slug = (ref.split("/", 1) + [""])[:2]
     file_url = f"https://www.kaggle.com/{ref}"
     repo_label = ref  # use ref as repo identifier in DB
 
+    keys_saved = 0
+    valid_saved = 0
     for prov, fn in EXTRACTORS.items():
         for key in fn(text):
             if db.key_exists(key):
@@ -374,12 +377,16 @@ async def _scan_notebook(ref: str, content: str):
                 0, "", "kaggle", is_valid,
             )
             if saved:
+                keys_saved += 1
+                if is_valid:
+                    valid_saved += 1
                 await notify_found(
                     prov, key, repo_label, "notebook.ipynb", file_url,
                     0, "", "kaggle", is_valid,
                 )
                 log.info("[kaggle %s] %s from %s",
                          "VALID" if is_valid else "found", prov, ref)
+    return keys_saved, valid_saved
 
 
 async def _run_worker(token: str, queries: list[str], worker_id: int):
@@ -404,6 +411,10 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
         scanned: set[str] = set()
 
         for query in queries:
+            # Per-query yield counters for kaggle_themer feedback loop.
+            q_kernels_seen   = 0
+            q_keys_saved     = 0
+            q_valid_saved    = 0
             # Single search per query — language filter dropped (Kaggle returns
             # 0 results when language is set). Content extractors handle both
             # .ipynb (Python) and .Rmd (R) uniformly.
@@ -411,6 +422,7 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
                 kernels = await _search_kernels(client, token, query, page)
                 if not kernels:
                     break
+                q_kernels_seen += len(kernels)
 
                 for k in kernels:
                     ref = k.get("ref", "")
@@ -428,13 +440,24 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
                     db.kaggle_mark_scanned(ref)
                     content = await _fetch_kernel_source(token, ref)
                     if content:
-                        await _scan_notebook(ref, content)
+                        ks, vs = await _scan_notebook(ref, content)
+                        q_keys_saved  += ks
+                        q_valid_saved += vs
 
                     await asyncio.sleep(_PULL_SLEEP)
 
                 if len(kernels) < 20:
                     break
                 await asyncio.sleep(_SEARCH_SLEEP)
+
+            # Per-query yield update — only matters for dynamic queries
+            # (static queries aren't in kaggle_dynamic_queries so the
+            # UPDATE is a silent no-op for them; matches GitHub pattern).
+            try:
+                db.kaggle_record_query_yield(query, q_kernels_seen,
+                                             q_keys_saved, q_valid_saved)
+            except Exception as e:
+                log.debug("kaggle yield update failed: %s", e)
 
             await asyncio.sleep(_SEARCH_SLEEP)
 
