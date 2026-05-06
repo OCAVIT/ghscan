@@ -1269,11 +1269,12 @@ async def admin_probe_external_apis(authorization: str | None = Header(default=N
                     entry["err_query"] = f"{type(e).__name__}: {str(e)[:120]}"
                 gitee_token_results.append(entry)
 
-    # Extra: probe Kaggle with KAGGLE_USERNAME + KAGGLE_KEY env if set
+    # Extra: probe Kaggle with KAGGLE_USERNAME+KAGGLE_KEY (Basic) AND with
+    # KAGGLE_TOKENS (Bearer KGAT_*) — what scanner actually does
     import os, base64
     ku = os.environ.get("KAGGLE_USERNAME", "")
     kk = os.environ.get("KAGGLE_KEY", "")
-    kaggle_auth_result = None
+    kaggle_auth_result = {}
     if ku and kk:
         try:
             auth = base64.b64encode(f"{ku}:{kk}".encode()).decode()
@@ -1282,11 +1283,32 @@ async def admin_probe_external_apis(authorization: str | None = Header(default=N
                     "https://www.kaggle.com/api/v1/kernels/list?search=test&pageSize=5",
                     headers={**UA, "Authorization": f"Basic {auth}"},
                 )
-                kaggle_auth_result = {"status": r.status_code, "body_head": r.text[:200]}
+                kaggle_auth_result["basic"] = {"status": r.status_code, "body": r.text[:200]}
         except Exception as e:
-            kaggle_auth_result = {"err": f"{type(e).__name__}: {str(e)[:200]}"}
+            kaggle_auth_result["basic"] = {"err": f"{type(e).__name__}: {str(e)[:200]}"}
     else:
-        kaggle_auth_result = {"note": "KAGGLE_USERNAME/KAGGLE_KEY env not set"}
+        kaggle_auth_result["basic"] = "KAGGLE_USERNAME/KAGGLE_KEY env not set"
+
+    try:
+        from config import KAGGLE_TOKENS
+    except Exception:
+        KAGGLE_TOKENS = []
+    bearer_results = []
+    if KAGGLE_TOKENS:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            for tok in KAGGLE_TOKENS[:3]:  # just first 3
+                e = {"prefix": tok[:14]}
+                try:
+                    r = await client.get(
+                        "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5&language=python",
+                        headers={**UA, "Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+                    )
+                    e["status"] = r.status_code
+                    e["body"] = r.text[:200]
+                except Exception as ex:
+                    e["err"] = f"{type(ex).__name__}: {str(ex)[:200]}"
+                bearer_results.append(e)
+    kaggle_auth_result["bearer_kgat"] = bearer_results
 
     return {
         "server_egress_note": "Probes run from Railway server IP, same egress as scanners",
