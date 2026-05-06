@@ -454,19 +454,44 @@ def _worker_tokens() -> list[str]:
     return list(KAGGLE_TOKENS)
 
 
+def _all_queries() -> list[str]:
+    """Static queries + LLM-generated dynamic queries (sorted by yield).
+    Dynamic queries come from kaggle_dynamic_queries table populated by
+    kaggle_themer.py. Static queries always run; dynamics give 5-10× more
+    coverage and adapt over time."""
+    static = list(_QUERIES)
+    try:
+        dynamic = db.kaggle_active_queries(limit=300)
+    except Exception as e:
+        log.debug("kaggle: dynamic query fetch failed: %s", e)
+        dynamic = []
+    # Dedup preserving order: dynamics first (theme-tuned, higher yield), then statics
+    seen = set()
+    out = []
+    for q in dynamic + static:
+        if q in seen:
+            continue
+        seen.add(q)
+        out.append(q)
+    return out
+
+
 async def run_kaggle_cycle():
     workers_auth = _worker_tokens()
     if not workers_auth:
         return
 
+    queries = _all_queries()
+    n_static  = len(_QUERIES)
+    n_dynamic = len(queries) - n_static
     n = len(workers_auth)
     chunks: list[list[str]] = [[] for _ in range(n)]
-    for i, q in enumerate(_QUERIES):
+    for i, q in enumerate(queries):
         chunks[i % n].append(q)
 
     auth_kind = "basic" if _BASIC_AUTHS else "kgat"
-    log.info("=== kaggle cycle start | %d %s accounts | %d queries ===",
-             n, auth_kind, len(_QUERIES))
+    log.info("=== kaggle cycle start | %d %s accounts | %d queries (%d static + %d dynamic) ===",
+             n, auth_kind, len(queries), n_static, n_dynamic)
 
     workers = [
         asyncio.create_task(

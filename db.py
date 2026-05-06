@@ -162,6 +162,25 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_dq_yield        ON dynamic_queries(valid_keys_found DESC, keys_found DESC);
         CREATE INDEX IF NOT EXISTS idx_dq_active       ON dynamic_queries(blacklisted_until, generated_at DESC);
 
+        -- Kaggle-specific dynamic queries (LLM-generated, kept separate from
+        -- GitHub dynamic_queries because Kaggle search syntax differs:
+        -- no filename:/language:/path: operators, only free-text relevance).
+        -- Same yield-tracking pattern → kaggle_themer can prioritize what works.
+        CREATE TABLE IF NOT EXISTS kaggle_dynamic_queries (
+            query_hash        TEXT PRIMARY KEY,
+            query_str         TEXT NOT NULL,
+            theme             TEXT DEFAULT '',
+            generated_at      TEXT NOT NULL,
+            last_used_at      TEXT,
+            times_used        INTEGER DEFAULT 0,
+            kernels_returned  INTEGER DEFAULT 0,
+            keys_found        INTEGER DEFAULT 0,
+            valid_keys_found  INTEGER DEFAULT 0,
+            blacklisted_until TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_kdq_yield  ON kaggle_dynamic_queries(valid_keys_found DESC, keys_found DESC);
+        CREATE INDEX IF NOT EXISTS idx_kdq_active ON kaggle_dynamic_queries(blacklisted_until, generated_at DESC);
+
         -- Axis extensions discovered by the AI vocabulary expander.
         -- The combinatorial generator merges these on top of the static
         -- PROVIDER_AXES dict in query_axes.py — so DeepSeek-discovered names
@@ -866,6 +885,72 @@ def get_recent_query_hashes(days: int = 15) -> set[str]:
             (cutoff,),
         ).fetchall()
     return {r["query_hash"] for r in rows}
+
+
+def kaggle_get_recent_query_hashes(days: int = 15) -> set[str]:
+    """Hashes of Kaggle dynamic queries generated within the last N days —
+    used by kaggle_themer to avoid duplicate generation."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT query_hash FROM kaggle_dynamic_queries WHERE generated_at > ?",
+            (cutoff,),
+        ).fetchall()
+    return {r["query_hash"] for r in rows}
+
+
+def kaggle_register_queries(items: list[dict]) -> int:
+    """Bulk insert Kaggle dynamic queries. items: [{query_str, theme}].
+    Returns count of NEW rows inserted (INSERT OR IGNORE on hash)."""
+    if not items:
+        return 0
+    now = _now()
+    rows = []
+    for it in items:
+        q = it["query_str"]
+        h = _query_hash(q)
+        rows.append((h, q, it.get("theme", ""), now))
+    with _conn() as c:
+        cur = c.executemany(
+            """INSERT OR IGNORE INTO kaggle_dynamic_queries
+                 (query_hash, query_str, theme, generated_at)
+               VALUES (?, ?, ?, ?)""",
+            rows,
+        )
+        return cur.rowcount
+
+
+def kaggle_active_queries(limit: int = 200) -> list[str]:
+    """Return up to `limit` non-blacklisted Kaggle dynamic queries, sorted
+    by yield (valid+total) desc, then recency. Used by kaggle_scanner each
+    cycle alongside the static _QUERIES list."""
+    now = _now()
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT query_str FROM kaggle_dynamic_queries
+               WHERE blacklisted_until IS NULL OR blacklisted_until < ?
+               ORDER BY valid_keys_found DESC, keys_found DESC, generated_at DESC
+               LIMIT ?""",
+            (now, limit),
+        ).fetchall()
+    return [r["query_str"] for r in rows]
+
+
+def kaggle_record_query_yield(query_str: str, kernels_returned: int,
+                              keys_found: int, valid_keys: int):
+    """Update yield counters for a Kaggle dynamic query so kaggle_themer can
+    learn what works."""
+    h = _query_hash(query_str)
+    with _conn() as c:
+        c.execute(
+            """UPDATE kaggle_dynamic_queries
+               SET last_used_at=?, times_used=times_used+1,
+                   kernels_returned=kernels_returned+?,
+                   keys_found=keys_found+?,
+                   valid_keys_found=valid_keys_found+?
+               WHERE query_hash=?""",
+            (_now(), kernels_returned, keys_found, valid_keys, h),
+        )
 
 
 def register_dynamic_queries(items: list[dict]) -> int:

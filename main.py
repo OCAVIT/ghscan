@@ -57,6 +57,7 @@ from tg_bot import bot_loop
 from issues_scanner import issues_loop
 from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
 from query_themer import generate_themed_batch
+from kaggle_themer import generate_kaggle_themed_batch
 from vocab_expander import run_expansion_cycle
 from archetype_miner import run_archetype_cycle
 
@@ -187,6 +188,31 @@ async def _themer_loop():
         except Exception as e:
             log.error("themer crashed: %s", e)
         await asyncio.sleep(8 * 3600)   # 8h
+
+
+async def _kaggle_themer_loop():
+    """
+    DeepSeek-driven Kaggle query generator — runs every 6h.
+
+    Mirrors _themer_loop but for Kaggle search. Generates 30 fresh queries
+    per batch using LLM knowledge of: notebook title patterns, niche
+    providers (kling/ark/glm), course/hackathon signatures, new 2026
+    model names, RAG/agent framework leaks. Yield-feedback driven —
+    top-yielding queries from prior cycles fed back as positive examples.
+
+    Stored in kaggle_dynamic_queries table; kaggle_scanner picks up the
+    top-yielding rows each cycle (interval=1h) alongside the 112 static
+    queries. Cumulative effect: query pool grows continuously.
+    """
+    # Stagger 2h offset from kaggle scan cycles
+    await asyncio.sleep(2 * 3600)
+    while True:
+        try:
+            inserted = await generate_kaggle_themed_batch()
+            log.info("kaggle_themer: +%d kaggle queries inserted", inserted)
+        except Exception as e:
+            log.error("kaggle_themer crashed: %s", e)
+        await asyncio.sleep(6 * 3600)   # 6h
 
 
 async def _auto_jackpot_loop():
@@ -377,6 +403,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(author_walk_loop(),     name="author_walk"),
             asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
             asyncio.create_task(_themer_loop(),         name="query_themer"),
+            asyncio.create_task(_kaggle_themer_loop(),  name="kaggle_themer"),
             asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
             asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
             asyncio.create_task(_active_learner_loop(),  name="active_learner"),
@@ -1123,6 +1150,15 @@ async def admin_source_breakdown(
         "since":        cutoff,
         "by_source":    [dict(r) for r in rows],
     }
+
+
+@app.post("/admin/run_kaggle_themer")
+async def admin_run_kaggle_themer(authorization: str | None = Header(default=None)):
+    """Manually trigger one kaggle_themer batch (for testing without
+    waiting 6h for next scheduled run). Returns count of new queries."""
+    _check_admin(authorization)
+    n = await generate_kaggle_themed_batch()
+    return {"ok": True, "inserted": n}
 
 
 @app.get("/admin/kaggle_breakdown")
