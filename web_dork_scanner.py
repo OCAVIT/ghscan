@@ -9,7 +9,9 @@ Architecture (lessons learned from replit_scanner Phase 2):
     → use single-token unquoted format
   - Replit blocks bots so source code isn't searchable; THESE platforms
     don't have that issue:
-      * dev.to       — open API, tutorials with hardcoded keys, mid yield
+      * rentry.co    — anonymous markdown paste, NO sanitization
+                       (replaced dev.to: 47 dorks × 0 valid finds because
+                        dev.to articles always placeholder real keys)
       * gitlab.com   — public repos, no Partner Program revoke, mid-high
       * stackoverflow.com — error traces with raw keys, mid yield
       * pastebin.com — devs dump .env, raw text indexed, high yield
@@ -48,7 +50,7 @@ from notifier import notify_found, notify_infra_found
 
 log = logging.getLogger(__name__)
 
-WEB_DORK_SCAN_INTERVAL = int(os.environ.get("WEB_DORK_SCAN_INTERVAL", "1800"))  # 30 min
+WEB_DORK_SCAN_INTERVAL = int(os.environ.get("WEB_DORK_SCAN_INTERVAL", "3600"))  # 1h (cycle ~40min with expanded providers)
 WEB_DORK_RESULTS_PER_QUERY = int(os.environ.get("WEB_DORK_RESULTS_PER_QUERY", "10"))
 
 _FIRECRAWL_SEARCH = "https://api.firecrawl.dev/v1/search"
@@ -61,18 +63,28 @@ _LIMITS = httpx.Limits(max_connections=15, max_keepalive_connections=5, keepaliv
 # Per-provider dorks generated automatically from PROVIDER_TOKENS list.
 
 PROVIDER_TOKENS = [
-    # AI providers (env-var literals)
+    # AI providers (env-var literals) — all match an EXTRACTORS entry in patterns.py
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
     "DEEPSEEK_API_KEY", "GROQ_API_KEY", "XAI_API_KEY", "MISTRAL_API_KEY",
     "PERPLEXITY_API_KEY", "OPENROUTER_API_KEY", "TOGETHER_API_KEY",
     "FIREWORKS_API_KEY", "REPLICATE_API_TOKEN", "HF_TOKEN", "HUGGINGFACE_TOKEN",
     "ELEVENLABS_API_KEY", "STABILITY_API_KEY", "FAL_KEY",
+    # AI Image / Video providers we have extractors for
+    "LUMA_API_KEY", "PIKA_API_KEY", "TWELVELABS_API_KEY",
+    "KREA_API_KEY", "HEDRA_API_KEY", "WAVESPEED_API_KEY", "PIXVERSE_API_KEY",
+    "HIGGSFIELD_API_KEY", "HAPPYHORSE_API_KEY", "INWORLD_API_KEY",
     # CN providers
     "ZHIPUAI_API_KEY", "MOONSHOT_API_KEY", "ARK_API_KEY", "DASHSCOPE_API_KEY",
     "QWEN_API_KEY", "SILICONFLOW_API_KEY", "KLING_ACCESS_KEY",
     # Aggregators
     "AIMLAPI_API_KEY", "DEEPINFRA_TOKEN", "HYPERBOLIC_API_KEY", "PORTKEY_API_KEY",
-    "NOVITA_API_KEY",
+    "NOVITA_API_KEY", "COMMONSTACK_API_KEY",
+    # Web-scrape / agent search keys (we use them ourselves via pool reuse)
+    "FIRECRAWL_API_KEY", "SERPER_API_KEY",
+    # Literal key prefixes — catch raw dumps that DON'T mention env-var name
+    "sk-proj-",        # OpenAI project keys (very specific)
+    "sk-ant-",         # Anthropic
+    "AIzaSy",          # Google API keys
     # Replit (passive coverage)
     "REPLIT_DB_URL", "REPLIT_API_TOKEN",
     # Infra critical
@@ -87,13 +99,53 @@ PROVIDER_TOKENS = [
     "TWILIO_AUTH_TOKEN", "SENDGRID_API_KEY",
 ]
 
+# ── Blocklist: known fake-secret repos / pages ─────────────────────────────
+# These URLs/paths host EXAMPLE secrets (used for unit-testing secret scanners,
+# detection rules, regex tutorials). They pollute findings with patterns that
+# look like real AKIA*/LTAI*/sk_live_* but aren't valid credentials.
+#
+# Add new entries here when polluted finds are observed in logs.
+_URL_BLOCKLIST = (
+    # GitLab's own secret-detection analyzer — has tests/test_data/*.txt full of
+    # fake AWS/Aliyun/Stripe keys for detector unit tests
+    "gitlab-org/security-products/analyzers/secrets",
+    "gitlab-org/security-products/analyzer/secrets",
+    "gitlab-org/secrets-detection",
+    # trufflehog / gitleaks / detect-secrets test corpora
+    "trufflesecurity/trufflehog/blob/main/pkg/detectors",
+    "trufflesecurity/trufflehog/-/tree",
+    "gitleaks/gitleaks/blob",
+    "Yelp/detect-secrets/blob",
+    # Common public regex/pattern tutorial paths
+    "/blob/main/test_data/",
+    "/blob/master/test_data/",
+    "/-/blob/main/test/",
+    "/-/blob/master/test/",
+    "/fixtures/",
+    "/testdata/",
+    # Public CTF / wargame / honeypot repos sometimes used to demo leaks
+    "honeypot",
+    "ctf-writeups",
+    # OWASP juice-shop & bWAPP demo apps with fake creds
+    "juice-shop/juice-shop",
+    "bWAPP",
+)
+
+
+def _is_blocked_url(url: str) -> bool:
+    if not url:
+        return True
+    u = url.lower()
+    return any(b.lower() in u for b in _URL_BLOCKLIST)
+
+
 PLATFORMS = [
     {
-        "name":       "devto",
-        "site":       "dev.to",
-        "file_type":  "devto",
-        # Tutorial articles often have inline code with keys
-        "extra":      ["api key tutorial", "rag pipeline langchain", ".env file"],
+        "name":       "rentry",
+        "site":       "rentry.co",
+        "file_type":  "rentry",
+        # Anonymous markdown paste — heavily used by AI hobbyists for SD prompt
+        "extra":      ["sk-", ".env", "API_KEY", "chatbot config", "model api"],
     },
     {
         "name":       "gitlab",
@@ -321,9 +373,14 @@ async def _process_dork(client: httpx.AsyncClient, query: str, plat: dict,
         return {"results": 0, "ai_saved": 0, "valid_saved": 0, "fetched": 0}
 
     ai_saved = valid_saved = fetched = 0
+    blocked = 0
     for r in results:
         url = r.get("url", "")
         if site not in url:
+            continue
+        if _is_blocked_url(url):
+            blocked += 1
+            log.debug("[web_dork] skip blocklisted url: %s", url[:120])
             continue
         snippet = (r.get("snippet") or "") + " " + (r.get("title") or "")
 
