@@ -139,6 +139,9 @@ _QUERIES: list[str] = [
     # Search/agent tools
     "FIRECRAWL_API_KEY",
     "SERPER_API_KEY",
+    # Aggregator misc
+    "COMMONSTACK_API_KEY",
+    "commonstack ai",
     # xAI / Grok
     "XAI_API_KEY",
     "GROK_API_KEY",
