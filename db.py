@@ -1017,6 +1017,68 @@ def kaggle_active_queries(limit: int = 200) -> list[str]:
     return [r["query_str"] for r in rows]
 
 
+def get_kaggle_dynamic_queries_for_export(max_age_days: int = 15) -> list[dict]:
+    """Master-side: full dump of recent kaggle_dynamic_queries for mirror sync.
+    Mirrors call /admin/kaggle_dynamic_queries_export periodically and merge
+    via import_kaggle_dynamic_queries_from_master(). Bypasses the
+    `blacklisted_until IS NULL` filter so mirrors also receive blacklist
+    decisions from master (instead of re-discovering dead queries themselves)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            """SELECT query_hash, query_str, theme, generated_at,
+                      blacklisted_until, times_used, kernels_returned,
+                      keys_found, valid_keys_found
+               FROM kaggle_dynamic_queries
+               WHERE generated_at >= ?
+               ORDER BY generated_at DESC""",
+            (cutoff,),
+        ).fetchall()]
+
+
+def import_kaggle_dynamic_queries_from_master(items: list[dict]) -> tuple[int, int]:
+    """Mirror-side bulk upsert of master's kaggle_dynamic_queries dump.
+    Same semantics as import_dynamic_queries_from_master():
+      - INSERT OR IGNORE preserves master's generated_at + blacklisted_until
+      - existing rows: only update blacklisted_until from master (yield
+        counters are mirror-local and reflect mirror's own work)
+    Returns (n_inserted, n_blacklist_updated)."""
+    if not items:
+        return 0, 0
+    n_ins = n_bl = 0
+    with _conn() as c:
+        for it in items:
+            h = it.get("query_hash") or _query_hash(it["query_str"])
+            cur = c.execute(
+                """INSERT OR IGNORE INTO kaggle_dynamic_queries
+                       (query_hash, query_str, theme, generated_at,
+                        blacklisted_until, times_used, kernels_returned,
+                        keys_found, valid_keys_found)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (h, it["query_str"], it.get("theme", ""),
+                 it.get("generated_at", _now()),
+                 it.get("blacklisted_until"),
+                 it.get("times_used", 0),
+                 it.get("kernels_returned", 0),
+                 it.get("keys_found", 0),
+                 it.get("valid_keys_found", 0)),
+            )
+            if cur.rowcount:
+                n_ins += 1
+            else:
+                bl = it.get("blacklisted_until")
+                if bl:
+                    cur2 = c.execute(
+                        """UPDATE kaggle_dynamic_queries SET blacklisted_until = ?
+                           WHERE query_hash = ?
+                             AND (blacklisted_until IS NULL OR blacklisted_until < ?)""",
+                        (bl, h, bl),
+                    )
+                    if cur2.rowcount:
+                        n_bl += 1
+    return n_ins, n_bl
+
+
 def kaggle_record_query_yield(query_str: str, kernels_returned: int,
                               keys_found: int, valid_keys: int):
     """Update yield counters for a Kaggle dynamic query so kaggle_themer can

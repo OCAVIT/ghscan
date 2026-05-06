@@ -276,24 +276,63 @@ async def _pull_master_queries(client: httpx.AsyncClient) -> bool:
         return False
 
 
-async def query_sync_loop() -> None:
-    """Background task — fetch master's dynamic_queries every
-    MIRROR_QUERY_SYNC_SEC on success, or RETRY_SEC on failure. Started
-    by main.py only when is_active() AND MIRROR_QUERY_SYNC_SEC > 0.
+async def _pull_master_kaggle_queries(client: httpx.AsyncClient) -> bool:
+    """Same as _pull_master_queries but for kaggle_dynamic_queries pool.
+    kaggle_themer runs ONLY on master (uses DeepSeek for theme generation),
+    so without this sync mirrors are stuck on the 114 static queries baked
+    into kaggle_scanner — every cycle yields 0 unique notebooks because the
+    static corpus was exhausted weeks ago.
 
-    Failure-fast retry exists for the master-not-yet-redeployed-with-the-
-    /admin/dynamic_queries_export-endpoint case: without it, a 404 on first
-    attempt would force mirror to wait the full MIRROR_QUERY_SYNC_SEC=3600s
-    before retrying — meaning ~1h of running on the static baseline only."""
+    Returns True on success (200 + non-empty body parsed)."""
+    if not is_active():
+        return False
+    try:
+        r = await client.get(
+            f"{MASTER_API_URL}/admin/kaggle_dynamic_queries_export",
+            headers={"Authorization": f"Bearer {MASTER_API_TOKEN}"},
+            params={"max_age_days": 15},
+            timeout=120,
+        )
+        if r.status_code != 200:
+            log.warning("mirror kaggle-query-sync: master returned %d: %s",
+                        r.status_code, r.text[:200])
+            return False
+        body = r.json()
+        items = body.get("queries", [])
+        if not items:
+            return False
+        import db
+        n_ins, n_bl = db.import_kaggle_dynamic_queries_from_master(items)
+        log.info("mirror kaggle-query-sync: pulled %d queries (new=%d, blacklist updated=%d)",
+                 len(items), n_ins, n_bl)
+        return True
+    except Exception as e:
+        log.warning("mirror kaggle-query-sync failed: %s", e)
+        return False
+
+
+async def query_sync_loop() -> None:
+    """Background task — fetch master's dynamic_queries (GitHub + Kaggle)
+    every MIRROR_QUERY_SYNC_SEC on success, or RETRY_SEC on failure.
+    Started by main.py only when is_active() AND MIRROR_QUERY_SYNC_SEC > 0.
+
+    Failure-fast retry exists for the master-not-yet-redeployed case:
+    without it, a 404 on first attempt would force mirror to wait the full
+    MIRROR_QUERY_SYNC_SEC=3600s before retrying — meaning ~1h of running
+    on the static baseline only.
+
+    Both pools share the same retry cadence — if master is up, both endpoints
+    will succeed; if down, both will retry."""
     if not is_active() or MIRROR_QUERY_SYNC_SEC <= 0:
         return
     RETRY_SEC = 60   # tight loop until first success
-    log.info("mirror_relay: query-sync started — pulling from %s every %ds (retry %ds on fail)",
+    log.info("mirror_relay: query-sync started — pulling github+kaggle from %s every %ds (retry %ds on fail)",
              MASTER_API_URL, MIRROR_QUERY_SYNC_SEC, RETRY_SEC)
     async with httpx.AsyncClient() as client:
         while True:
-            ok = await _pull_master_queries(client)
-            await asyncio.sleep(MIRROR_QUERY_SYNC_SEC if ok else RETRY_SEC)
+            ok_gh = await _pull_master_queries(client)
+            ok_kg = await _pull_master_kaggle_queries(client)
+            await asyncio.sleep(MIRROR_QUERY_SYNC_SEC if (ok_gh or ok_kg) else RETRY_SEC)
 
 
 def queue_stats() -> dict:

@@ -1078,6 +1078,24 @@ async def admin_dynamic_queries_export(
     }
 
 
+@app.get("/admin/kaggle_dynamic_queries_export")
+async def admin_kaggle_dq_export(
+    max_age_days: int = 15, authorization: str | None = Header(default=None)
+):
+    """Export master's kaggle_dynamic_queries (LLM-generated themed queries)
+    for mirror sync. Mirrors run kaggle_loop but kaggle_themer runs ONLY on
+    master — without this endpoint mirrors stay limited to the 114 static
+    queries baked into kaggle_scanner. Mirror calls this on the same cadence
+    as /admin/dynamic_queries_export and INSERT-OR-IGNOREs locally.
+
+    Includes blacklist + yield stats so mirrors skip master's known dead
+    queries (mirror's own per-IP yield diverges slightly — informational)."""
+    _check_admin(authorization)
+    max_age_days = max(1, min(max_age_days, 60))
+    items = db.get_kaggle_dynamic_queries_for_export(max_age_days=max_age_days)
+    return {"count": len(items), "queries": items}
+
+
 @app.get("/admin/mirror_stats")
 async def admin_mirror_stats(
     hours: int = 24, authorization: str | None = Header(default=None)
