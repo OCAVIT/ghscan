@@ -1722,6 +1722,39 @@ async def validate_infra_token(cred: str) -> bool:
     return False
 
 
+async def validate_replit(cred: str) -> bool:
+    """Replit creds:
+      - REPLIT_DB_URL: https://kv.replit.com/v0/<token>. Anyone with URL has
+        full read+write to that Repl's K/V store. Validate via GET <URL>?
+        prefix= → 200 (possibly empty body) = alive, 401/404 = revoked.
+      - REPLIT_API_TOKEN: repl_<32+ chars>. Validate via /api/v0/users/current
+        Bearer auth → 200 with user JSON = alive, 401 = dead.
+    """
+    try:
+        async with _client() as c:
+            if cred.startswith("https://kv.replit.com/v0/"):
+                r = await c.get(cred + "?prefix=")
+                if r.status_code == 200:
+                    return True
+                if r.status_code in (401, 403, 404):
+                    return False
+                return False
+            if cred.startswith("repl_"):
+                r = await c.get(
+                    "https://replit.com/api/v0/users/current",
+                    headers={"Authorization": f"Bearer {cred}"},
+                )
+                if r.status_code == 200:
+                    return True
+                if r.status_code in (401, 403):
+                    return False
+                return False
+            return False
+    except Exception as e:
+        log.debug("replit validate err: %s", e)
+        return False
+
+
 INFRA_VALIDATORS: dict[str, callable] = {
     "database": validate_database,
     "ssh":      validate_ssh,
@@ -1730,4 +1763,5 @@ INFRA_VALIDATORS: dict[str, callable] = {
     "azure":    validate_azure,
     "infra":    validate_infra_token,
     "gcp":      validate_infra_token,
+    "replit":   validate_replit,
 }

@@ -625,7 +625,46 @@ INFRA_EXTRACTORS: dict[str, callable] = {
     "alibaba":  extract_alibaba,
     "azure":    extract_azure,
     "infra":    extract_infra,
+    "replit":   None,  # placeholder, actual function defined below + reassigned
 }
+
+
+# ── Replit DB URL ─────────────────────────────────────────────────────────────
+# REPLIT_DB_URL = https://kv.replit.com/v0/<long-token>. Anyone with this URL
+# has full read+write to the Repl's K/V store — credentials, sessions,
+# whatever the project caches there. Security through obscurity, no auth
+# beyond URL itself. GitHub Secret Scanning Partner Program revokes these
+# within 24h on github.com, but Kaggle/Gitee/Codeberg DON'T trigger
+# auto-revoke → leaks persist for years there.
+_REPLIT_DB_URL = re.compile(
+    r'https://kv\.replit\.com/v0/[A-Za-z0-9_\-]{40,200}',
+)
+# REPLIT_API_TOKEN — Replit user API token. Format `repl_` prefix + ~32 chars.
+_REPLIT_API_TOKEN = re.compile(
+    r'(?:REPLIT_(?:API_)?TOKEN|REPL_API_TOKEN)\s*[=:]\s*["\']?'
+    r'(repl_[A-Za-z0-9_\-]{20,128})',
+)
+
+
+def extract_replit(content: str) -> list[str]:
+    """Extract Replit DB URLs (anon credentials to a Repl K/V store) and
+    REPLIT_API_TOKEN values (user-level API auth)."""
+    if "replit.com" not in content and "REPLIT_" not in content and "repl_" not in content:
+        return []
+    found = []
+    for m in _REPLIT_DB_URL.finditer(content):
+        url = m.group(0)
+        if not _is_fake(url):
+            found.append(url)
+    for m in _REPLIT_API_TOKEN.finditer(content):
+        tok = m.group(1)
+        if not _is_fake(tok):
+            found.append(tok)
+    # Dedup preserving order
+    return list(dict.fromkeys(found))
+
+
+INFRA_EXTRACTORS["replit"] = extract_replit
 
 INFRA_PROVIDERS = set(INFRA_EXTRACTORS.keys())
 
@@ -738,6 +777,24 @@ def assess_risk(content: str, file_path: str,
 # ══════════════════════════════════════════════════════════════════════════════
 
 INFRA_QUERIES: list[tuple[str, str, str]] = [
+
+    # ── Replit DB URLs / API tokens ────────────────────────────────────────
+    # Anyone with REPLIT_DB_URL has full read+write to that Repl's K/V store.
+    # GitHub Secret Scanning Partner Program revokes these on github.com but
+    # NOT on Kaggle/Gitee/Codeberg — leaks persist there. Also catches
+    # REPLIT_API_TOKEN (repl_ prefix) for user-level Replit auth.
+    ('"kv.replit.com/v0"',                                    "replit", "code"),
+    ('"REPLIT_DB_URL" filename:.env',                         "replit", "env"),
+    ('"REPLIT_DB_URL" filename:.env.local',                   "replit", "env"),
+    ('"REPLIT_DB_URL" filename:.env.production',              "replit", "env"),
+    ('"REPLIT_DB_URL" language:python',                       "replit", "code"),
+    ('"REPLIT_DB_URL" language:javascript',                   "replit", "code"),
+    ('"REPLIT_DB_URL" language:typescript',                   "replit", "code"),
+    ('"REPLIT_DB_URL" extension:ipynb',                       "replit", "notebook"),
+    ('"REPLIT_API_TOKEN" filename:.env',                      "replit", "env"),
+    ('"repl_" "REPLIT_API_TOKEN"',                            "replit", "code"),
+    ('"kv.replit.com" filename:.replit',                      "replit", "config"),
+    ('"REPLIT_DB_URL" filename:replit.nix',                   "replit", "config"),
 
     # ── DATABASE_URL / connection strings ─────────────────────────────────
     ('"DATABASE_URL" filename:.env',                          "database", "env"),
