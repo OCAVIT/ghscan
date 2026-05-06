@@ -31,10 +31,12 @@ import httpx
 
 import db
 from config import KAGGLE_TOKENS, KAGGLE_SCAN_INTERVAL, evomi_proxy_url
-from patterns import EXTRACTORS, AI_TRIGGER
+from patterns import EXTRACTORS, AI_TRIGGER, INFRA_TRIGGER
+from infra_patterns import INFRA_EXTRACTORS
+from infra_jackpot import extract_destination, assess_risk
 from deobfuscate import expand as _deobf_expand
 from validators import validate
-from notifier import notify_found
+from notifier import notify_found, notify_infra_found
 
 # Kaggle Cloudflare layer datacenter-fingerprints Railway egress IPs.
 # Empirical (2026-05-06):
@@ -365,11 +367,14 @@ async def _fetch_kernel_source(token: str, ref: str) -> str | None:
 
 
 async def _scan_notebook(ref: str, content: str) -> tuple[int, int]:
-    """Run extractors on notebook content and persist findings.
-    Returns (keys_saved, valid_keys_saved) for per-query yield tracking."""
+    """Run AI + infra extractors on notebook content and persist findings.
+    Returns (keys_saved, valid_keys_saved) for per-query yield tracking
+    (AI keys only — infra creds tracked separately in infra_findings)."""
     text = _extract_notebook_text(content)
     text = _deobf_expand(text)
-    if not any(t in text for t in _AI_TRIGGER):
+    has_ai    = any(t in text for t in _AI_TRIGGER)
+    has_infra = any(t in text for t in INFRA_TRIGGER)
+    if not has_ai and not has_infra:
         return 0, 0
 
     owner, slug = (ref.split("/", 1) + [""])[:2]
@@ -378,25 +383,53 @@ async def _scan_notebook(ref: str, content: str) -> tuple[int, int]:
 
     keys_saved = 0
     valid_saved = 0
-    for prov, fn in EXTRACTORS.items():
-        for key in fn(text):
-            if db.key_exists(key):
-                continue
-            is_valid = await validate(prov, key)
-            saved = db.save_key(
-                prov, key, repo_label, "notebook.ipynb", file_url,
-                0, "", "kaggle", is_valid,
-            )
-            if saved:
-                keys_saved += 1
-                if is_valid:
-                    valid_saved += 1
-                await notify_found(
+    if has_ai:
+        for prov, fn in EXTRACTORS.items():
+            for key in fn(text):
+                if db.key_exists(key):
+                    continue
+                is_valid = await validate(prov, key)
+                saved = db.save_key(
                     prov, key, repo_label, "notebook.ipynb", file_url,
                     0, "", "kaggle", is_valid,
                 )
-                log.info("[kaggle %s] %s from %s",
-                         "VALID" if is_valid else "found", prov, ref)
+                if saved:
+                    keys_saved += 1
+                    if is_valid:
+                        valid_saved += 1
+                    await notify_found(
+                        prov, key, repo_label, "notebook.ipynb", file_url,
+                        0, "", "kaggle", is_valid,
+                    )
+                    log.info("[kaggle %s] %s from %s",
+                             "VALID" if is_valid else "found", prov, ref)
+
+    # Infra credentials — DB URLs, SSH keys, AWS, Azure, Alibaba, Replit etc.
+    # Mirrors codeberg_scanner._scan_file pattern.
+    if has_infra:
+        risk_cache = None
+        for iprov, ifn in INFRA_EXTRACTORS.items():
+            creds = ifn(text)
+            if not creds:
+                continue
+            if risk_cache is None:
+                risk_cache = assess_risk(text, "notebook.ipynb", 0, "")
+            risk_level, risk_reasons = risk_cache
+            for cred in creds:
+                if db.infra_exists(cred):
+                    continue
+                destination = extract_destination(cred) if "://" in cred else ""
+                db.save_infra(
+                    iprov, cred, repo_label, "notebook.ipynb", file_url,
+                    0, "", "kaggle", destination, risk_level, risk_reasons,
+                )
+                await notify_infra_found(
+                    iprov, cred, repo_label, "notebook.ipynb", file_url,
+                    0, "", "kaggle", destination, risk_level, risk_reasons,
+                )
+                log.info("[kaggle infra/%s] %s from %s",
+                         iprov, destination[:60] or cred[:30], ref)
+
     return keys_saved, valid_saved
 
 
