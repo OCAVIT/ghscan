@@ -1163,6 +1163,39 @@ async def admin_source_breakdown(
     }
 
 
+@app.post("/admin/probe_firecrawl_search")
+async def admin_probe_firecrawl_search(
+    body: dict | None = Body(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Quick probe: hits firecrawl /v1/search with a configured query
+    using a valid pooled key. Returns raw response so we can debug what
+    firecrawl actually returns vs what scanner sees as 0 results."""
+    _check_admin(authorization)
+    import httpx
+    query = (body or {}).get("query", 'site:replit.com REPLIT_DB_URL')
+    rows = db.get_valid_keys_by_provider("firecrawl")
+    if not rows:
+        return {"error": "no firecrawl keys in pool"}
+    key = rows[0]["key_full"]
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                "https://api.firecrawl.dev/v1/search",
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                json={"query": query, "limit": 10},
+            )
+        return {
+            "key_prefix":  key[:14],
+            "status":      r.status_code,
+            "content_type": r.headers.get("content-type",""),
+            "raw_body":    r.text[:3000],
+        }
+    except Exception as e:
+        return {"err": f"{type(e).__name__}: {str(e)}"}
+
+
 @app.post("/admin/run_replit_cycle")
 async def admin_run_replit_cycle(authorization: str | None = Header(default=None)):
     """Manually trigger one replit_scanner cycle (skip 3h wait). Returns
