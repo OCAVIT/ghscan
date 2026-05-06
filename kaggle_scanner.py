@@ -36,13 +36,21 @@ from deobfuscate import expand as _deobf_expand
 from validators import validate
 from notifier import notify_found
 
-# Kaggle's Cloudflare layer datacenter-blocks Railway egress IPs (returns
-# 404 even for valid Basic auth). Empirical probe (2026-05-06) showed
-# Evomi US/GB/JP residential exits return 401 (auth challenge — i.e. the
-# request reaches Kaggle), while Evomi CN exits get disconnected. We
-# route Kaggle through Evomi US to bypass the IP filter.
+# Kaggle Cloudflare layer datacenter-fingerprints Railway egress IPs.
+# Empirical (2026-05-06):
+#   master Railway IP (EU) → 404 (blocked)
+#   m1 Railway IP    (SG) → 401 (passes Cloudflare, asks for auth)
+#   m2 Railway IP        → 401 (passes Cloudflare)
+# So mirrors can hit Kaggle DIRECTLY. Master needs Evomi US.
+#
+# Default: direct (no proxy). Opt into Evomi via KAGGLE_USE_EVOMI=1.
+# Country override via KAGGLE_PROXY_COUNTRY (default 'us').
 import re as _re_country
+
 def _kaggle_proxy_url() -> str | None:
+    """Return Evomi proxy URL ONLY if KAGGLE_USE_EVOMI=1. Default direct."""
+    if os.environ.get("KAGGLE_USE_EVOMI", "0") != "1":
+        return None
     base = evomi_proxy_url()
     if not base:
         return None
@@ -396,8 +404,9 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
     """Search + pull worker for one Kaggle token."""
     log.info("[kaggle w%d token=%s...] %d queries", worker_id, token[:12], len(queries))
 
-    # Route only kaggle.com traffic through Evomi US residential proxy.
-    # Validator calls (openai, deepseek, etc) go direct — saves bandwidth.
+    # Default: direct (mirrors' Railway IPs pass Cloudflare). Opt into
+    # Evomi via KAGGLE_USE_EVOMI=1 — needed only on master Railway IP
+    # which Cloudflare blocks. Validator calls always go direct.
     proxy = _kaggle_proxy_url()
     mounts = (
         {
@@ -406,8 +415,9 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
         }
         if proxy else {}
     )
-    if proxy and worker_id == 0:
-        log.info("kaggle: routing kaggle.com via Evomi proxy (kaggle.com only)")
+    if worker_id == 0:
+        log.info("kaggle: routing %s",
+                 "kaggle.com via Evomi proxy" if proxy else "DIRECT (no proxy)")
 
     async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS,
                                  mounts=mounts) as client:

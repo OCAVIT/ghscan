@@ -45,16 +45,24 @@ def is_active() -> bool:
 
 
 def enqueue_ai_find(provider: str, key: str, repo: str,
-                    file_path: str, file_url: str) -> None:
-    """Queue an AI-key find for relay to master. Non-blocking."""
+                    file_path: str, file_url: str,
+                    file_type: str = "") -> None:
+    """Queue an AI-key find for relay to master. Non-blocking.
+
+    file_type carries the original scanner surface (kaggle/gitee/code/env/
+    notebook/etc) so master can record provenance instead of lumping all
+    relayed finds under 'mirror'. Empty string falls back to legacy
+    'mirror' bucket on master side.
+    """
     if not is_active():
         return
     _AI_QUEUE.append({
-        "provider": provider,
-        "key":      key,
-        "repo":     repo,
-        "path":     file_path,
-        "file_url": file_url,
+        "provider":  provider,
+        "key":       key,
+        "repo":      repo,
+        "path":      file_path,
+        "file_url":  file_url,
+        "file_type": file_type,
     })
 
 

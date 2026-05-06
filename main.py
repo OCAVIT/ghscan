@@ -365,7 +365,7 @@ async def lifespan(app: FastAPI):
         # Earlier comment claimed events/gists/issues use "different rate-limit
         # pools" — that was wrong. All eat the same `core` quota. Gist content
         # fetches were the heavy part, not the polling itself.
-        log.info("=== MIRROR_MODE active — scan + events + issues + npm/pypi/cc + relay (gist disabled) ===")
+        log.info("=== MIRROR_MODE active — scan + events + issues + kaggle + gitee + relay ===")
         from mirror_relay import flush_loop as _mirror_flush, query_sync_loop as _mirror_query_sync
         tasks = [
             asyncio.create_task(_scan_loop(),         name="scan_loop"),
@@ -377,9 +377,16 @@ async def lifespan(app: FastAPI):
             # Public registries — no auth, no rate-limit overlap with GitHub
             asyncio.create_task(npm_loop(),           name="npm_scanner"),
             asyncio.create_task(pypi_loop(),          name="pypi_scanner"),
-            # cc_loop dropped — Railway IP blocked
             # Author-walk uses GITHUB_TOKENS but on a different surface
             asyncio.create_task(author_walk_loop(),   name="author_walk"),
+            # Kaggle + Gitee — moved here from master because mirror Railway
+            # IPs pass Cloudflare's data-center filter direct (master IP is
+            # blocked → was paying Evomi proxy). Empirical: m1/m2 → 401
+            # auth-challenge on Kaggle direct vs master 404. Same for Gitee.
+            # Mirror saves with file_type='kaggle' / file_type='gitee' which
+            # mirror_relay now ships to master verbatim (file_type preserved).
+            asyncio.create_task(kaggle_loop(),        name="kaggle_scanner"),
+            asyncio.create_task(gitee_loop(),         name="gitee_scanner"),
         ]
     else:
         tasks = [
@@ -387,13 +394,11 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_cleanup_loop(),        name="db_cleanup"),
             asyncio.create_task(_revalidation_loop(),   name="revalidation"),
             asyncio.create_task(trufflehog_loop(),      name="trufflehog"),
-            asyncio.create_task(gitee_loop(),           name="gitee_scanner"),
+            # kaggle + gitee MOVED to mirrors (their Railway IPs pass
+            # Cloudflare DC filter direct; master IP is blocked → was
+            # paying Evomi). See MIRROR_MODE branch above.
             asyncio.create_task(events_loop(),          name="events_scanner"),
             asyncio.create_task(gists_loop(),           name="gists_scanner"),
-            # kaggle_scanner: routes kaggle.com via Evomi US residential
-            # proxy (Kaggle Cloudflare blocks Railway DC IPs but accepts
-            # residential US/GB/JP IPs). Empirical probe 2026-05-06.
-            asyncio.create_task(kaggle_loop(), name="kaggle_scanner"),
             asyncio.create_task(hf_loop(),              name="hf_scanner"),
             asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
             # postman_loop dropped — see import-block comment
@@ -1675,7 +1680,12 @@ async def admin_validate_keys(
         repo = (entry.get("repo")     or "manual")[:200]
         path = (entry.get("path")     or "")[:200]
         url  = (entry.get("file_url") or entry.get("url") or "")[:500]
-        saved = db.save_key(prov, key, repo, path, url, 0, "", src_lbl, is_valid)
+        # Prefer per-item file_type (preserves provenance: kaggle/gitee/code/
+        # env/etc when relayed from a mirror); fall back to body-level source
+        # label for manual ingest.
+        item_ft = (entry.get("file_type") or "").strip()[:30]
+        ft = item_ft if item_ft else src_lbl
+        saved = db.save_key(prov, key, repo, path, url, 0, "", ft, is_valid)
         if saved:
             n_saved += 1
             if is_valid:

@@ -24,6 +24,7 @@ import base64
 import hashlib
 import logging
 import math
+import os
 
 import httpx
 
@@ -578,9 +579,11 @@ async def run_gitee_cycle():
 
     sem = asyncio.Semaphore(_CONCURRENT_ITEMS)
 
-    # Route only gitee.com traffic through Evomi CN residential proxy.
-    # Validator calls (moonshot, openai, glm…) go direct — saves proxy bandwidth.
-    proxy = evomi_proxy_url()
+    # Default: direct (mirrors' Railway IPs hit Gitee successfully).
+    # Opt into Evomi via GITEE_USE_EVOMI=1 — needed only on master IP
+    # which Gitee rate-limits at 403. Validator calls always direct.
+    use_evomi = os.environ.get("GITEE_USE_EVOMI", "0") == "1"
+    proxy = evomi_proxy_url() if use_evomi else None
     mounts = (
         {
             "https://gitee.com": httpx.AsyncHTTPTransport(proxy=proxy),
@@ -588,8 +591,8 @@ async def run_gitee_cycle():
         }
         if proxy else {}
     )
-    if proxy:
-        log.info("gitee: routing via Evomi CN proxy (gitee.com only)")
+    log.info("gitee: routing %s",
+             "via Evomi CN proxy" if proxy else "DIRECT (no proxy)")
 
     async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS,
                                  mounts=mounts) as client:

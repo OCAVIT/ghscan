@@ -344,9 +344,11 @@ def save_key(provider: str, key: str, repo: str, file_path: str,
             pass
         # Mirror mode: relay this find to master DB. No-op if MIRROR_MODE=0.
         # Import lazily to avoid circular config dependency at module load.
+        # Pass file_type so master preserves provenance (kaggle/gitee/etc)
+        # instead of bucketing all relayed finds under generic 'mirror'.
         try:
             from mirror_relay import enqueue_ai_find as _mirror_ai
-            _mirror_ai(provider, key, repo, file_path, file_url)
+            _mirror_ai(provider, key, repo, file_path, file_url, file_type)
         except Exception:
             pass
         return True
