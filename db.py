@@ -847,10 +847,14 @@ def record_query_usage(query_hash: str, items_returned: int = 0,
         )
 
 
-def auto_blacklist_dead_queries(min_uses: int = 5, blacklist_days: int = 30) -> int:
+def auto_blacklist_dead_queries(min_uses: int = 3, blacklist_days: int = 30) -> int:
     """Blacklist queries that have been run >= min_uses times AND found zero
     keys. Skipped for `blacklist_days` then auto-returned to rotation by
-    get_active_dynamic_queries (blacklisted_until < now)."""
+    get_active_dynamic_queries (blacklisted_until < now).
+
+    Threshold lowered 5→3: dead patterns waste ~3-5s per use across all
+    workers. Killing them after 3 uses (vs 5) frees scan-budget by ~40%
+    on long-tail garbage, redirected to yielders + newcomers."""
     cutoff = (datetime.now(timezone.utc) + timedelta(days=blacklist_days)).isoformat()
     with _conn() as c:
         cur = c.execute(

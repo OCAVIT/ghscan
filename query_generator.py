@@ -340,9 +340,10 @@ def generate_batch(batch_size: int = BATCH_SIZE, seed: int | None = None) -> int
 
 def auto_blacklist_dead() -> int:
     """Convenience wrapper — call at the end of each 8h rotation cycle so
-    queries that have been tried 5+ times with zero yield drop out of
-    rotation for 30 days."""
-    n = db.auto_blacklist_dead_queries(min_uses=5, blacklist_days=30)
+    queries that have been tried 3+ times with zero yield drop out of
+    rotation for 30 days. Lowered from 5 → 3: dead patterns waste worker
+    time, and after 3 attempts the verdict is statistically reliable."""
+    n = db.auto_blacklist_dead_queries(min_uses=3, blacklist_days=30)
     if n:
-        log.info("query_gen: auto-blacklisted %d dead queries (5+ uses, 0 yield)", n)
+        log.info("query_gen: auto-blacklisted %d dead queries (3+ uses, 0 yield)", n)
     return n

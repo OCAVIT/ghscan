@@ -80,13 +80,18 @@ def select_queries_for_cycle(max_queries: int = SCAN_MAX_QUERIES_PER_CYCLE,
     From the remainder (dynamic, times_used >= 3, valid_keys_found = 0,
     keys_found may or may not be 0), randomly sample `long_tail_sample`
     fraction. Across ~4 cycles each long-tail query gets at least one turn;
-    if 5+ uses still produce 0 keys, auto_blacklist_dead_queries pulls them
+    if 3+ uses still produce 0 keys, auto_blacklist_dead_queries pulls them
     out for 30 days.
 
     Total cap: max_queries (0 = disabled, fall back to full list).
 
-    Returns 4-tuples (query_str, provider, file_type, query_hash) shuffled
-    so workers don't all hammer the same provider in lockstep.
+    Returns 4-tuples (query_str, provider, file_type, query_hash). YIELDERS
+    are placed FIRST in the returned list (sorted by conversion rate DESC)
+    so workers pulling from a FIFO shared queue process highest-value queries
+    first. If a worker burns out mid-cycle (primary 403 with distant reset),
+    the gold queries already got harvested. Lower-yield buckets (static,
+    newcomers, long-tail sample) are shuffled internally to avoid clustering
+    one provider on one worker.
     """
     static_part: list[tuple] = [
         (q[0], q[1], q[2], None) for q in QUERIES
@@ -109,51 +114,66 @@ def select_queries_for_cycle(max_queries: int = SCAN_MAX_QUERIES_PER_CYCLE,
         else:
             long_tail.append(r)
 
-    # Mandatory dynamic portion
-    mandatory_dyn = yielders + newcomers
+    # YIELD-PRIORITY: sort yielders by conversion rate (valid_keys_found
+    # per times_used) DESCENDING. Best-converting queries pulled by workers
+    # FIRST so if a token burns out mid-cycle the gold is already harvested.
+    yielders.sort(
+        key=lambda r: r["valid_keys_found"] / max(r["times_used"], 1),
+        reverse=True,
+    )
+
     # Sample from long-tail
     sample_n = int(len(long_tail) * max(0.0, min(1.0, long_tail_sample)))
     sampled = random.sample(long_tail, sample_n) if sample_n else []
 
-    dyn_part: list[tuple] = [
+    # Build buckets — yielders preserve their conversion-sorted order;
+    # other buckets shuffled to avoid one provider clustering on one worker.
+    yielders_part: list[tuple] = [
         (r["query_str"], r["provider"], r["file_type"], r["query_hash"])
-        for r in mandatory_dyn + sampled
+        for r in yielders
     ]
+    newcomers_part: list[tuple] = [
+        (r["query_str"], r["provider"], r["file_type"], r["query_hash"])
+        for r in newcomers
+    ]
+    sampled_part: list[tuple] = [
+        (r["query_str"], r["provider"], r["file_type"], r["query_hash"])
+        for r in sampled
+    ]
+    static_part_shuffled = list(static_part)
+    random.shuffle(static_part_shuffled)
+    random.shuffle(newcomers_part)
+    random.shuffle(sampled_part)
 
-    combined = static_part + dyn_part
+    # Order: yielders first (priority), then static (proven baseline),
+    # then newcomers (untested but might be gold), then long-tail (likely dead).
+    combined = yielders_part + static_part_shuffled + newcomers_part + sampled_part
 
     if max_queries and len(combined) > max_queries:
-        # Over budget: keep ALL static (baseline), fit as many yielders
-        # as possible, then newcomers, then sampled long-tail. Cut the
-        # rest. Static portion is sacrosanct — the existing 196 valid/24h
-        # baseline is built on it.
-        budget = max_queries - len(static_part)
+        # Over budget: keep ALL yielders + ALL static (baseline) — these are
+        # mandatory. Then fit newcomers, then sampled long-tail. Cut the rest.
+        # Static portion is sacrosanct: the existing baseline is built on it.
+        mandatory = yielders_part + static_part_shuffled
+        budget = max_queries - len(mandatory)
         if budget <= 0:
             log.warning(
-                "select_queries: static (%d) exceeds cap (%d) — running static only",
-                len(static_part), max_queries,
+                "select_queries: yielders+static (%d) exceeds cap (%d) — running mandatory only",
+                len(mandatory), max_queries,
             )
-            return static_part
-        ranked: list[tuple] = (
-            [(r["query_str"], r["provider"], r["file_type"], r["query_hash"])
-             for r in yielders]
-            + [(r["query_str"], r["provider"], r["file_type"], r["query_hash"])
-               for r in newcomers]
-            + [(r["query_str"], r["provider"], r["file_type"], r["query_hash"])
-               for r in sampled]
-        )[:budget]
-        combined = static_part + ranked
+            return mandatory
+        combined = mandatory + (newcomers_part + sampled_part)[:budget]
 
     log.info(
         "select_queries: %d total = %d static + %d dyn "
-        "(%d yielders + %d newcomers + %d sampled from %d long-tail; cap=%d)",
-        len(combined), len(static_part), len(combined) - len(static_part),
+        "(%d yielders [priority-sorted] + %d newcomers + %d sampled from %d long-tail; cap=%d)",
+        len(combined), len(static_part_shuffled), len(combined) - len(static_part_shuffled),
         len(yielders), len(newcomers), len(sampled), len(long_tail),
         max_queries,
     )
 
-    # Shuffle so chunks don't cluster all of one provider on one worker
-    random.shuffle(combined)
+    # NB: do NOT random.shuffle(combined) — that would destroy the yield-
+    # priority ordering. Per-bucket shuffling above is sufficient for
+    # provider-clustering avoidance.
     return combined
 
 
