@@ -30,11 +30,24 @@ import tempfile
 import httpx
 
 import db
-from config import KAGGLE_TOKENS, KAGGLE_SCAN_INTERVAL
+from config import KAGGLE_TOKENS, KAGGLE_SCAN_INTERVAL, evomi_proxy_url
 from patterns import EXTRACTORS, AI_TRIGGER
 from deobfuscate import expand as _deobf_expand
 from validators import validate
 from notifier import notify_found
+
+# Kaggle's Cloudflare layer datacenter-blocks Railway egress IPs (returns
+# 404 even for valid Basic auth). Empirical probe (2026-05-06) showed
+# Evomi US/GB/JP residential exits return 401 (auth challenge — i.e. the
+# request reaches Kaggle), while Evomi CN exits get disconnected. We
+# route Kaggle through Evomi US to bypass the IP filter.
+import re as _re_country
+def _kaggle_proxy_url() -> str | None:
+    base = evomi_proxy_url()
+    if not base:
+        return None
+    target = os.environ.get("KAGGLE_PROXY_COUNTRY", "us")
+    return _re_country.sub(r'_country-[A-Za-z]{2}', f'_country-{target}', base)
 
 log = logging.getLogger(__name__)
 
@@ -270,7 +283,21 @@ async def _run_worker(token: str, queries: list[str], worker_id: int):
     """Search + pull worker for one Kaggle token."""
     log.info("[kaggle w%d token=%s...] %d queries", worker_id, token[:12], len(queries))
 
-    async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS) as client:
+    # Route only kaggle.com traffic through Evomi US residential proxy.
+    # Validator calls (openai, deepseek, etc) go direct — saves bandwidth.
+    proxy = _kaggle_proxy_url()
+    mounts = (
+        {
+            "https://www.kaggle.com": httpx.AsyncHTTPTransport(proxy=proxy),
+            "http://www.kaggle.com":  httpx.AsyncHTTPTransport(proxy=proxy),
+        }
+        if proxy else {}
+    )
+    if proxy and worker_id == 0:
+        log.info("kaggle: routing kaggle.com via Evomi proxy (kaggle.com only)")
+
+    async with httpx.AsyncClient(follow_redirects=True, limits=_LIMITS,
+                                 mounts=mounts) as client:
         scanned: set[str] = set()
 
         for query in queries:
