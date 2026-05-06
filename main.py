@@ -360,7 +360,15 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(gitee_loop(),           name="gitee_scanner"),
             asyncio.create_task(events_loop(),          name="events_scanner"),
             asyncio.create_task(gists_loop(),           name="gists_scanner"),
-            asyncio.create_task(kaggle_loop(),          name="kaggle_scanner"),
+            # kaggle_loop dropped 2026-05-06: Kaggle's /api/v1 is fronted by
+            # Cloudflare which datacenter-blocks Railway IPs (returns 404).
+            # Evomi CN proxy also doesn't work — Kaggle returns
+            # RemoteProtocolError (connection rejected). No cheap fix path
+            # without dedicated residential proxy. Local tests work fine
+            # but production-side requests are blocked.
+            # Code preserved in kaggle_scanner.py for future re-enable
+            # if proxy strategy changes.
+            # asyncio.create_task(kaggle_loop(), name="kaggle_scanner"),
             asyncio.create_task(hf_loop(),              name="hf_scanner"),
             asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
             # postman_loop dropped — see import-block comment
