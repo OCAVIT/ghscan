@@ -1191,21 +1191,18 @@ async def admin_probe_external_apis(authorization: str | None = Header(default=N
         # gitee — direct (no proxy)
         ("gitee_direct_orgs",     "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      None),
         ("gitee_direct_search",   "https://gitee.com/api/v5/search/repositories?q=python&per_page=5", None),
-        ("gitee_direct_repo",     "https://gitee.com/api/v5/repos/paddlepaddle/Paddle",               None),
         # gitee — through Evomi CN proxy (current scanner setup)
         ("gitee_evomi_orgs",      "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      evomi_proxy),
-        ("gitee_evomi_search",    "https://gitee.com/api/v5/search/repositories?q=python&per_page=5", evomi_proxy),
-        # kaggle — public API (no auth)
-        ("kaggle_kernels_list",   "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   None),
-        ("kaggle_kernels_search", "https://www.kaggle.com/kernels.json?search=openai_api_key&pageSize=5",     None),
-        ("kaggle_search_html",    "https://www.kaggle.com/search?q=OPENAI_API_KEY",                            None),
-        # postman — confirm dead
-        ("postman_profile",       "https://www.postman.com/_api/profile/postman",                              None),
-        ("postman_search",        "https://www.postman.com/_api/ws/proxy/search?query=API_KEY",                None),
-        # codeberg — confirm alive (control)
+        # kaggle — direct (Railway IP blocked by Cloudflare datacenter filter)
+        ("kaggle_direct",         "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   None),
+        # kaggle — through Evomi (test if proxy IP is accepted)
+        ("kaggle_evomi",          "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   evomi_proxy),
+        # codeberg — control
         ("codeberg_search",       "https://codeberg.org/api/v1/repos/search?q=docker-compose&limit=5",         None),
-        # commoncrawl — independent verification of master's failure
+        # commoncrawl — independent verification
         ("commoncrawl_collinfo",  "https://index.commoncrawl.org/collinfo.json",                               None),
+        # commoncrawl — try via Evomi (probably too expensive in production)
+        ("commoncrawl_evomi",     "https://index.commoncrawl.org/collinfo.json",                               evomi_proxy),
     ]
 
     results = []
