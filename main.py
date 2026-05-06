@@ -192,7 +192,7 @@ async def _themer_loop():
 
 async def _kaggle_themer_loop():
     """
-    DeepSeek-driven Kaggle query generator — runs every 6h.
+    DeepSeek-driven Kaggle query generator — runs every 2h.
 
     Mirrors _themer_loop but for Kaggle search. Generates 30 fresh queries
     per batch using LLM knowledge of: notebook title patterns, niche
@@ -201,18 +201,22 @@ async def _kaggle_themer_loop():
     top-yielding queries from prior cycles fed back as positive examples.
 
     Stored in kaggle_dynamic_queries table; kaggle_scanner picks up the
-    top-yielding rows each cycle (interval=1h) alongside the 112 static
-    queries. Cumulative effect: query pool grows continuously.
+    top-yielding rows every 10min (KAGGLE_SCAN_INTERVAL) alongside the
+    114 static queries. Cumulative effect: query pool grows continuously.
+
+    Cost: ~$0.015 per batch × 12/day = $5.40/mo. Acceptable for the
+    adaptive coverage Kaggle gives us (25%+ conversion).
     """
-    # Stagger 2h offset from kaggle scan cycles
-    await asyncio.sleep(2 * 3600)
+    # Quick first run — 5 min after boot — so we don't wait 6+ hours for
+    # the first batch of LLM-generated queries on a fresh deploy.
+    await asyncio.sleep(5 * 60)
     while True:
         try:
             inserted = await generate_kaggle_themed_batch()
             log.info("kaggle_themer: +%d kaggle queries inserted", inserted)
         except Exception as e:
             log.error("kaggle_themer crashed: %s", e)
-        await asyncio.sleep(6 * 3600)   # 6h
+        await asyncio.sleep(2 * 3600)   # 2h
 
 
 async def _auto_jackpot_loop():
