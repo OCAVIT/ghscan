@@ -1125,6 +1125,27 @@ async def admin_source_breakdown(
     }
 
 
+@app.get("/admin/kaggle_breakdown")
+async def admin_kaggle_breakdown(authorization: str | None = Header(default=None)):
+    """All-time Kaggle finds by provider — diagnostic for tuning queries."""
+    _check_admin(authorization)
+    with db._conn() as c:
+        rows = c.execute(
+            "SELECT provider, COUNT(*) AS total, COALESCE(SUM(is_valid),0) AS valid "
+            "FROM found_keys WHERE file_type='kaggle' "
+            "GROUP BY provider ORDER BY valid DESC, total DESC"
+        ).fetchall()
+        recent = c.execute(
+            "SELECT provider, repo, file_url, is_valid, discovered_at "
+            "FROM found_keys WHERE file_type='kaggle' "
+            "ORDER BY discovered_at DESC LIMIT 30"
+        ).fetchall()
+    return {
+        "by_provider": [dict(r) for r in rows],
+        "recent": [dict(r) for r in recent],
+    }
+
+
 @app.get("/admin/source_full")
 async def admin_source_full(
     hours: int = 8760, authorization: str | None = Header(default=None)
