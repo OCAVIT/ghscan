@@ -58,7 +58,12 @@ from issues_scanner import issues_loop
 from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
 from query_themer import generate_themed_batch
 from kaggle_themer import generate_kaggle_themed_batch
-from replit_scanner import replit_loop
+# replit_scanner Phase 2 dropped 2026-05-06 — Replit blocks anonymous bot
+# access to /@user/repl pages (404/403), and Google/firecrawl don't index
+# actual Repl source code (only docs.replit.com/blog.replit.com — no
+# secrets there). Level 1 (extract_replit in infra_patterns + validator)
+# is RETAINED — catches REPLIT_DB_URL when it leaks into other content
+# (Kaggle notebooks, GitHub repos, etc) via the regular scanner pipeline.
 from vocab_expander import run_expansion_cycle
 from archetype_miner import run_archetype_cycle
 
@@ -414,7 +419,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
             asyncio.create_task(_themer_loop(),         name="query_themer"),
             asyncio.create_task(_kaggle_themer_loop(),  name="kaggle_themer"),
-            asyncio.create_task(replit_loop(),          name="replit_scanner"),
+            # replit_loop dropped — see replit_scanner import-block comment.
             asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
             asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
             asyncio.create_task(_active_learner_loop(),  name="active_learner"),
@@ -1194,16 +1199,6 @@ async def admin_probe_firecrawl_search(
         }
     except Exception as e:
         return {"err": f"{type(e).__name__}: {str(e)}"}
-
-
-@app.post("/admin/run_replit_cycle")
-async def admin_run_replit_cycle(authorization: str | None = Header(default=None)):
-    """Manually trigger one replit_scanner cycle (skip 3h wait). Returns
-    when cycle completes — slow endpoint (~5 min), use with care."""
-    _check_admin(authorization)
-    from replit_scanner import run_replit_cycle
-    await run_replit_cycle()
-    return {"ok": True, "msg": "cycle done — check /admin/source_full for replit row"}
 
 
 @app.post("/admin/run_kaggle_themer")
