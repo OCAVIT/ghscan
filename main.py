@@ -40,7 +40,11 @@ from gist_scanner import gists_loop
 from kaggle_scanner import kaggle_loop
 from hf_scanner import hf_loop
 from codeberg_scanner import codeberg_loop
-from postman_scanner import postman_loop
+# postman_scanner dropped 2026-05-06: postman.com closed public profile
+# scraping endpoints (/_api/profile, /api/profile, etc all return 404).
+# 0 valid keys all-time; cannot be fixed without writing a new scraper
+# against undocumented endpoints. Per-server probe of all known endpoints
+# confirmed each returns 404. Dead branch.
 from npm_scanner import npm_loop
 from pypi_scanner import pypi_loop
 from commoncrawl_scanner import cc_loop
@@ -359,7 +363,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(kaggle_loop(),          name="kaggle_scanner"),
             asyncio.create_task(hf_loop(),              name="hf_scanner"),
             asyncio.create_task(codeberg_loop(),        name="codeberg_scanner"),
-            asyncio.create_task(postman_loop(),         name="postman_scanner"),
+            # postman_loop dropped — see import-block comment
             asyncio.create_task(npm_loop(),             name="npm_scanner"),
             asyncio.create_task(pypi_loop(),            name="pypi_scanner"),
             asyncio.create_task(cc_loop(),              name="commoncrawl_scanner"),
@@ -1159,6 +1163,87 @@ async def admin_source_full(
         "since":        cutoff,
         "by_file_type": [dict(r) for r in by_type],
         "by_domain":    [dict(r) for r in by_domain],
+    }
+
+
+@app.get("/admin/probe_external_apis")
+async def admin_probe_external_apis(authorization: str | None = Header(default=None)):
+    """One-shot probe of external scanner endpoints from THIS server's IP.
+    Used to triage why scanners produce 0 finds — distinguishes between
+    'API broken' / 'proxy broken' / 'auth required' / 'IP blocked'.
+
+    Tests Gitee (with + without Evomi proxy), Kaggle (auth + non-auth),
+    Postman (confirm dead), Codeberg (confirm alive)."""
+    _check_admin(authorization)
+    import httpx
+    UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) ghscan-probe/1.0"}
+    timeout = httpx.Timeout(15.0)
+
+    # Build proxy options
+    evomi_proxy = None
+    try:
+        from config import evomi_proxy_url
+        evomi_proxy = evomi_proxy_url()
+    except Exception:
+        pass
+
+    targets = [
+        # gitee — direct (no proxy)
+        ("gitee_direct_orgs",     "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      None),
+        ("gitee_direct_search",   "https://gitee.com/api/v5/search/repositories?q=python&per_page=5", None),
+        ("gitee_direct_repo",     "https://gitee.com/api/v5/repos/paddlepaddle/Paddle",               None),
+        # gitee — through Evomi CN proxy (current scanner setup)
+        ("gitee_evomi_orgs",      "https://gitee.com/api/v5/orgs/paddlepaddle/repos?per_page=5",      evomi_proxy),
+        ("gitee_evomi_search",    "https://gitee.com/api/v5/search/repositories?q=python&per_page=5", evomi_proxy),
+        # kaggle — public API (no auth)
+        ("kaggle_kernels_list",   "https://www.kaggle.com/api/v1/kernels/list?search=langchain&pageSize=5",   None),
+        ("kaggle_kernels_search", "https://www.kaggle.com/kernels.json?search=openai_api_key&pageSize=5",     None),
+        ("kaggle_search_html",    "https://www.kaggle.com/search?q=OPENAI_API_KEY",                            None),
+        # postman — confirm dead
+        ("postman_profile",       "https://www.postman.com/_api/profile/postman",                              None),
+        ("postman_search",        "https://www.postman.com/_api/ws/proxy/search?query=API_KEY",                None),
+        # codeberg — confirm alive (control)
+        ("codeberg_search",       "https://codeberg.org/api/v1/repos/search?q=docker-compose&limit=5",         None),
+        # commoncrawl — independent verification of master's failure
+        ("commoncrawl_collinfo",  "https://index.commoncrawl.org/collinfo.json",                               None),
+    ]
+
+    results = []
+    async with httpx.AsyncClient(headers=UA, timeout=timeout, follow_redirects=True) as client:
+        for label, url, proxy in targets:
+            entry = {"label": label, "url": url, "proxy": "evomi_cn" if proxy else "direct"}
+            try:
+                if proxy:
+                    async with httpx.AsyncClient(headers=UA, timeout=timeout, follow_redirects=True, proxy=proxy) as pc:
+                        r = await pc.get(url)
+                else:
+                    r = await client.get(url)
+                entry["status"] = r.status_code
+                entry["bytes"] = len(r.content)
+                # Parse JSON if obvious; else first 200 chars of body
+                ct = r.headers.get("content-type", "")
+                if "json" in ct:
+                    try:
+                        body = r.json()
+                        if isinstance(body, list):
+                            entry["json_kind"] = f"list[{len(body)}]"
+                            entry["json_first"] = str(body[0])[:200] if body else "(empty)"
+                        elif isinstance(body, dict):
+                            entry["json_kind"] = f"dict(keys={list(body.keys())[:5]})"
+                        else:
+                            entry["json_kind"] = type(body).__name__
+                    except Exception as e:
+                        entry["json_err"] = str(e)[:120]
+                else:
+                    entry["body_head"] = r.text[:200].replace("\n", " ")
+            except Exception as e:
+                entry["err"] = f"{type(e).__name__}: {str(e)[:200]}"
+            results.append(entry)
+
+    return {
+        "server_egress_note": "Probes run from Railway server IP, same egress as scanners",
+        "evomi_proxy_configured": bool(evomi_proxy),
+        "results": results,
     }
 
 
