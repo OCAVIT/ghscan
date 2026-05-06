@@ -308,44 +308,45 @@ async def lifespan(app: FastAPI):
     if MIRROR_MODE:
         # Mirror service: scans GitHub from a different IP, ships finds to
         # master via mirror_relay. We KEEP additional GitHub-surface scanners
-        # (events/gists/issues — different rate-limit pools than /search/code,
-        # so they don't compete with main scan) and PUBLIC-only scanners
-        # (npm/pypi/commoncrawl) that need no extra tokens. Their finds go
-        # through db.save_key() which automatically relays to master via
-        # mirror_relay — same dedup, same Telegram digest path.
+        # (events/issues) and PUBLIC-only scanners (npm/pypi/commoncrawl).
+        # Their finds go through db.save_key() which automatically relays to
+        # master via mirror_relay — same dedup, same Telegram digest path.
         #
         # Disabled: telegram bot, deepseek pipelines (run only on master where
         # the canonical DB lives), per-platform scanners that need their own
         # tokens (gitee/codeberg/hf/kaggle/postman/trufflehog) — saves env
         # complexity on mirror, master already covers them.
-        # Per /admin/source_breakdown audit (2026-05-06):
-        #   gist scanner all-time: 0 valid keys → cut from mirrors entirely
-        #   issues scanner all-time: 22 valid (2.9% of pool) → cut from mirrors,
-        #     master already covers it
-        #   events scanner all-time: 486 valid (63% of pool!) → KEEP, but
-        #     opt-in per mirror via ENABLE_MIRROR_EVENTS=1 (master always runs
-        #     it; one mirror as backup is enough since /events is global feed)
-        # Comment in earlier code claimed events/gists/issues use "different
-        # rate-limit pools" — that was wrong. They eat the same `core` quota
-        # as content fetches in scan_loop. On m2 that contention starved
-        # main scanner: tokens at core=0, files_scanned ticking +1/20min.
-        log.info("=== MIRROR_MODE active — scan + npm/pypi/cc + relay (events optional) ===")
+        #
+        # Per /admin/source_breakdown audit (2026-05-06) + revision:
+        #   gist scanner all-time: 0 valid keys → CUT from mirrors entirely.
+        #     /gists/public is a global feed; if master saw 0 in a year,
+        #     mirrors would see ~the same. Removing this freed enough core on
+        #     m2 to unstick scan_loop (was: +0 files/20min → +552 files/min).
+        #   issues scanner all-time: 22 valid (light core cost) → KEPT on
+        #     mirrors. Mirror-side redundancy may double yield to ~40/year.
+        #   events scanner all-time: 486 valid (63% of pool!) → KEPT on
+        #     mirrors. /events is a global feed but the firehose moves fast;
+        #     extra IPs catch race-window keys master may miss between polls.
+        #     Polling cost is light (~1 call/min/token) and well-spent.
+        # Earlier comment claimed events/gists/issues use "different rate-limit
+        # pools" — that was wrong. All eat the same `core` quota. Gist content
+        # fetches were the heavy part, not the polling itself.
+        log.info("=== MIRROR_MODE active — scan + events + issues + npm/pypi/cc + relay (gist disabled) ===")
         from mirror_relay import flush_loop as _mirror_flush, query_sync_loop as _mirror_query_sync
-        _enable_events = os.environ.get("ENABLE_MIRROR_EVENTS", "0") == "1"
         tasks = [
             asyncio.create_task(_scan_loop(),         name="scan_loop"),
             asyncio.create_task(_mirror_flush(),      name="mirror_relay_flush"),
             asyncio.create_task(_mirror_query_sync(), name="mirror_relay_query_sync"),
-            # Public registries — no auth, no rate-limit overlap with GitHub ─
+            # GitHub-surface scanners with provable yield (per source_breakdown)
+            asyncio.create_task(events_loop(),        name="events_scanner"),
+            asyncio.create_task(issues_loop(),        name="issues_scanner"),
+            # Public registries — no auth, no rate-limit overlap with GitHub
             asyncio.create_task(npm_loop(),           name="npm_scanner"),
             asyncio.create_task(pypi_loop(),          name="pypi_scanner"),
             asyncio.create_task(cc_loop(),            name="commoncrawl_scanner"),
-            # Author-walk uses GITHUB_TOKENS but on a different surface ─────
+            # Author-walk uses GITHUB_TOKENS but on a different surface
             asyncio.create_task(author_walk_loop(),   name="author_walk"),
         ]
-        if _enable_events:
-            log.info("  + events_scanner enabled on this mirror (ENABLE_MIRROR_EVENTS=1)")
-            tasks.append(asyncio.create_task(events_loop(), name="events_scanner"))
     else:
         tasks = [
             asyncio.create_task(_scan_loop(),           name="scan_loop"),
