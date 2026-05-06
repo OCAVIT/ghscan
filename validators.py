@@ -591,34 +591,41 @@ async def validate_grok(key: str) -> bool:
         return False
 
 
-async def validate_suno(key: str) -> bool:
+async def validate_higgsfield(key: str) -> bool:
     """
-    Suno AI music generation — GET /api/get_limit checks credits.
-    Uses the community API wrapper at api.sunoapi.org (mirrors official Suno API).
-    401 = invalid key, 200 with credits_left=0 = exhausted, otherwise valid.
+    Higgsfield AI — POST /v1/balance on platform.higgsfield.ai.
+    Empirical curl probe (2026-05-06):
+      - no auth        → 401
+      - Bearer fake    → 401
+      - Bearer real    → expected 200 with balance JSON
+    All v1 read-style endpoints (/v1/me /v1/account /v1/balance) gate on Bearer
+    auth, so we use /v1/balance which is the cheapest read.
     """
     try:
         async with _client() as c:
-            r = await c.get(
-                "https://api.sunoapi.org/api/get_limit",
-                headers={"Authorization": f"Bearer {key}"},
+            r = await c.post(
+                "https://platform.higgsfield.ai/v1/balance",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={},
             )
-        if r.status_code == 401:
+        if r.status_code in (401, 403):
             return False
-        if r.status_code == 429:
-            return True
         if r.status_code == 200:
             try:
                 body = r.json() or {}
-                credits = body.get("credits_left", body.get("remaining", -1))
-                if credits == 0:
+                bal = body.get("balance", body.get("credits", body.get("remaining", -1)))
+                if isinstance(bal, (int, float)) and float(bal) <= 0:
                     return False
             except Exception:
                 pass
             return True
+        # 5xx may indicate transient or wrong-format key — treat as not-valid
         return False
     except Exception as e:
-        log.debug("suno validate err: %s", e)
+        log.debug("higgsfield validate err: %s", e)
         return False
 
 
@@ -893,30 +900,6 @@ async def validate_perplexity(key: str) -> bool:
         return r.status_code in (429, 500, 502, 503)
     except Exception as e:
         log.debug("perplexity validate err: %s", e)
-        return False
-
-
-async def validate_runway(key: str) -> bool:
-    """
-    Runway ML Gen-3 — GET /v1/organizations: 200 = live key.
-    API requires X-Runway-Version header (date string).
-    """
-    try:
-        async with _client() as c:
-            r = await c.get(
-                "https://api.dev.runwayml.com/v1/organizations",
-                headers={
-                    "Authorization":   f"Bearer {key}",
-                    "X-Runway-Version": "2024-11-06",
-                },
-            )
-        if r.status_code == 200:
-            return True
-        if r.status_code in (401, 403):
-            return False
-        return r.status_code == 429
-    except Exception as e:
-        log.debug("runway validate err: %s", e)
         return False
 
 
@@ -1448,14 +1431,13 @@ VALIDATORS: dict[str, callable] = {
     "ark":          validate_ark,         # Seedance 2.0-standard — higher value, first
     "ark_fast":     validate_ark_fast,   # Seedance 2.0-fast
     "happyhorse":   validate_happyhorse,
+    "higgsfield":   validate_higgsfield,
     "grok":         validate_grok,
-    "suno":         validate_suno,
     "inworld":      validate_inworld,
     "replicate":    validate_replicate,
     "fal":          validate_fal,
     "huggingface":  validate_huggingface,
     "perplexity":   validate_perplexity,
-    "runway":       validate_runway,
     "kimi":         validate_kimi,
     "glm":          validate_glm,
     "kling":        validate_kling,

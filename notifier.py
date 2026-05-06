@@ -46,7 +46,7 @@ def _ai_rarity(provider: str, key: str, is_valid: bool) -> str:
         return "rare"
     if provider in ("ark", "ark_fast", "grok"):
         return "rare"
-    if provider in ("happyhorse", "suno", "inworld", "replicate", "fal"):
+    if provider in ("happyhorse", "higgsfield", "inworld", "replicate", "fal"):
         return "uncommon"
     return "common"
 
@@ -77,15 +77,14 @@ _PROVIDER_EMOJI = {
     "ark_fast":      "🚀",   # Seedance 2.0-fast
     "ark":           "🔴",   # Seedance 2.0-standard
     "happyhorse":    "🐴",
+    "higgsfield":    "🌌",
     "grok":          "✖️",
-    "suno":          "🎵",
     "inworld":       "🗣️",
     "replicate":     "🔁",
     "fal":           "⚗️",
     "kimi":          "🌙",
     "glm":           "💜",
     "kling":         "🎞️",
-    "runway":        "✈️",
     "perplexity":    "🔮",
     "huggingface":   "🤗",
     "fireworks":     "🎆",

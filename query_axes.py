@@ -246,14 +246,14 @@ PROVIDER_AXES: dict[str, dict[str, list[str]]] = {
         "model_names": ["llama-3.1-sonar", "sonar-large", "sonar-pro"],
     },
 
-    "runway": {
+    "higgsfield": {
         "env_names": [
-            "RUNWAYML_API_SECRET", "RUNWAY_API_KEY", "RUNWAY_API_SECRET",
-            "RUNWAY_TOKEN", "RUNWAYML_KEY", "RUNWAY_KEY",
+            "HIGGSFIELD_API_KEY", "HIGGSFIELD_KEY", "HIGGSFIELD_TOKEN",
+            "HIGGSFIELD_SECRET",
         ],
-        "key_prefixes": ["key_"],   # shape gated by runway context
-        "domains": ["api.dev.runwayml.com", "api.runwayml.com"],
-        "model_names": ["gen-3-alpha", "gen-3", "gen-4"],
+        "key_prefixes": [],   # opaque token, gated by higgsfield context
+        "domains": ["platform.higgsfield.ai", "cloud.higgsfield.ai", "higgsfield.ai"],
+        "model_names": ["soul", "dop", "lite", "turbo"],
     },
 
     "happyhorse": {
@@ -297,15 +297,6 @@ PROVIDER_AXES: dict[str, dict[str, list[str]]] = {
         "key_prefixes": ["xai-"],
         "domains": ["api.x.ai"],
         "model_names": ["grok-2", "grok-3", "grok-4"],
-    },
-
-    "suno": {
-        "env_names": [
-            "SUNO_API_KEY", "SUNO_KEY", "SUNO_SECRET", "SUNO_TOKEN",
-        ],
-        "key_prefixes": [],
-        "domains": ["suno.ai", "sunoapi.org", "api.suno.com"],
-        "model_names": ["chirp-v3-5", "chirp-v4"],
     },
 
     "inworld": {

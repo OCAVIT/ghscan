@@ -318,16 +318,24 @@ async def lifespan(app: FastAPI):
         # the canonical DB lives), per-platform scanners that need their own
         # tokens (gitee/codeberg/hf/kaggle/postman/trufflehog) — saves env
         # complexity on mirror, master already covers them.
-        log.info("=== MIRROR_MODE active — scan + events/gists/issues + npm/pypi/cc + relay ===")
+        # Per /admin/source_breakdown audit (2026-05-06):
+        #   gist scanner all-time: 0 valid keys → cut from mirrors entirely
+        #   issues scanner all-time: 22 valid (2.9% of pool) → cut from mirrors,
+        #     master already covers it
+        #   events scanner all-time: 486 valid (63% of pool!) → KEEP, but
+        #     opt-in per mirror via ENABLE_MIRROR_EVENTS=1 (master always runs
+        #     it; one mirror as backup is enough since /events is global feed)
+        # Comment in earlier code claimed events/gists/issues use "different
+        # rate-limit pools" — that was wrong. They eat the same `core` quota
+        # as content fetches in scan_loop. On m2 that contention starved
+        # main scanner: tokens at core=0, files_scanned ticking +1/20min.
+        log.info("=== MIRROR_MODE active — scan + npm/pypi/cc + relay (events optional) ===")
         from mirror_relay import flush_loop as _mirror_flush, query_sync_loop as _mirror_query_sync
+        _enable_events = os.environ.get("ENABLE_MIRROR_EVENTS", "0") == "1"
         tasks = [
             asyncio.create_task(_scan_loop(),         name="scan_loop"),
             asyncio.create_task(_mirror_flush(),      name="mirror_relay_flush"),
             asyncio.create_task(_mirror_query_sync(), name="mirror_relay_query_sync"),
-            # Extra GitHub-surface scanners (separate rate-limit pools) ─────
-            asyncio.create_task(events_loop(),        name="events_scanner"),
-            asyncio.create_task(gists_loop(),         name="gists_scanner"),
-            asyncio.create_task(issues_loop(),        name="issues_scanner"),
             # Public registries — no auth, no rate-limit overlap with GitHub ─
             asyncio.create_task(npm_loop(),           name="npm_scanner"),
             asyncio.create_task(pypi_loop(),          name="pypi_scanner"),
@@ -335,6 +343,9 @@ async def lifespan(app: FastAPI):
             # Author-walk uses GITHUB_TOKENS but on a different surface ─────
             asyncio.create_task(author_walk_loop(),   name="author_walk"),
         ]
+        if _enable_events:
+            log.info("  + events_scanner enabled on this mirror (ENABLE_MIRROR_EVENTS=1)")
+            tasks.append(asyncio.create_task(events_loop(), name="events_scanner"))
     else:
         tasks = [
             asyncio.create_task(_scan_loop(),           name="scan_loop"),
@@ -1995,13 +2006,19 @@ async def admin_purge_happyhorse_fake(authorization: str | None = Header(default
 
 
 @app.post("/admin/purge_providers")
-async def admin_purge_providers(authorization: str | None = Header(default=None)):
-    """One-time purge of providers we've decided not to track:
-    cerebras, groq, mistral, cohere, together. Removes from found_keys
-    AND axis_extensions AND dynamic_queries (where provider matches).
-    Safe to run multiple times — idempotent."""
+async def admin_purge_providers(
+    body: dict | None = Body(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Purge given providers from found_keys + axis_extensions + dynamic_queries.
+    Default targets (when body omitted): cerebras, groq, mistral, cohere, together.
+    Override via body: {"providers": ["suno", "runway", ...]}.
+    Idempotent — safe to run multiple times."""
     _check_admin(authorization)
-    targets = ("cerebras", "groq", "mistral", "cohere", "together")
+    if body and isinstance(body.get("providers"), list) and body["providers"]:
+        targets = tuple(str(p) for p in body["providers"])
+    else:
+        targets = ("cerebras", "groq", "mistral", "cohere", "together")
     placeholders = ",".join("?" for _ in targets)
 
     def _do() -> dict:

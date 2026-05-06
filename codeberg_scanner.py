@@ -112,7 +112,7 @@ _SEARCH_QUERIES: list[str] = [
     "DEEPSEEK_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
-    "RUNWAYML_API_SECRET",
+    "HIGGSFIELD_API_KEY",
     "ELEVENLABS_API_KEY",
     "XI_API_KEY",
     # Aggregator providers (one key → many models)

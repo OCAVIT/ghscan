@@ -50,8 +50,6 @@ _DETECTOR_MAP: dict[str, str] = {
     "HuggingFaceToken": "huggingface",
     "Perplexity":      "perplexity",
     "PerplexityAI":    "perplexity",
-    "RunwayML":        "runway",
-    "Runway":          "runway",
     "Moonshot":        "kimi",
     "MoonshotAI":      "kimi",
     "ZhipuAI":         "glm",
@@ -69,7 +67,7 @@ _DETECTOR_MAP: dict[str, str] = {
 
 # Providers we care most about (always notify regardless of verification status)
 _PRIORITY = {"openai", "anthropic", "google", "deepseek", "elevenlabs", "ark",
-             "huggingface", "perplexity", "runway",
+             "huggingface", "perplexity",
              "kimi", "glm", "kling"}
 
 

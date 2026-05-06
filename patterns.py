@@ -306,38 +306,51 @@ def extract_perplexity(content: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-# ── Runway ML ─────────────────────────────────────────────────────────────────
-# Keys have "key_" prefix + 64-200 hex chars (real keys 128 chars observed in
-# iafactory leak 2026-05). Previous regex had {32,120} WITHOUT the `key_` prefix
-# → captured only trailing 32 chars of a 128-char key, validator rejected it.
-_RUNWAY_PREFIXED = re.compile(r'(?<![A-Za-z0-9_\-])(key_[a-fA-F0-9]{60,200})(?![A-Za-z0-9])')
-_RUNWAY_DIRECT = re.compile(
-    r'(?:RUNWAYML_API_SECRET|RUNWAY_API_KEY|RUNWAY_API_SECRET|RUNWAY_TOKEN)'
-    r'\s*[=:]\s*["\']?(key_[a-fA-F0-9]{60,200})',
+# ── Higgsfield AI ─────────────────────────────────────────────────────────────
+# AI video/image generator; v1 API uses Bearer token auth at platform.higgsfield.ai.
+# No unique key prefix — keys are opaque tokens (32-128 chars, base64/hex/alnum).
+# v2 SDK uses `key_id:key_secret` paired format (HF_KEY env), but v1 Bearer is
+# what most leaked .env will carry. Also recognise the paired form near HF_KEY.
+# Note: HF_ prefix collides with HuggingFace's HF_TOKEN convention, so we anchor
+# on Higgsfield-specific markers (higgsfield, platform.higgsfield.ai, HIGGSFIELD_*).
+_HIGGSFIELD_DIRECT = re.compile(
+    # Direct env-style assignment — anchors on `=` or `:` separator so we don't
+    # need a 200-char window and don't get greedy-matched to a tail substring.
+    r'(?:HIGGSFIELD_API_KEY|HIGGSFIELD_KEY|HIGGSFIELD_TOKEN|HIGGSFIELD_SECRET)'
+    r'\s*[=:]\s*["\']?'
+    r'([A-Za-z0-9_\-]{32,128}(?::[A-Za-z0-9_\-]{16,128})?)',
     re.IGNORECASE,
 )
-_RUNWAY_CTX = re.compile(
-    r'(?:RUNWAYML_API_SECRET|RUNWAY_API_KEY|RUNWAY_API_SECRET|RUNWAY_TOKEN'
-    r'|api\.dev\.runwayml\.com|api\.runwayml\.com)'
-    r'[\s\S]{0,200}'
-    r'(key_[a-fA-F0-9]{60,200})',
+_HIGGSFIELD_CTX = re.compile(
+    # Lazy 0-200 window so the {32,128} group captures the FIRST 32-128 chars
+    # after the marker, not a 32-char tail of a longer string.
+    r'(?:HIGGSFIELD_API_KEY|HIGGSFIELD_KEY|HIGGSFIELD_TOKEN|HIGGSFIELD_SECRET'
+    r'|higgsfield\.ai|platform\.higgsfield\.ai|cloud\.higgsfield\.ai)'
+    r'[\s\S]{0,200}?'
+    r'([A-Za-z0-9_\-]{32,128}(?::[A-Za-z0-9_\-]{16,128})?)',
     re.IGNORECASE,
+)
+_HIGGSFIELD_HFKEY = re.compile(
+    # HF_KEY paired format (key_id:key_secret) — gated by higgsfield context
+    # elsewhere in file (checked in extract_higgsfield()).
+    r'(?:HF_KEY|HF_API_KEY)\s*[=:]\s*["\']?'
+    r'([A-Za-z0-9_\-]{16,80}:[A-Za-z0-9_\-]{16,128})',
 )
 
 
-def extract_runway(content: str) -> list[str]:
-    if not re.search(r'(?i)runwayml|RUNWAY_API|runway\.ml|runwayml\.com', content):
+def extract_higgsfield(content: str) -> list[str]:
+    if not re.search(r'(?i)higgsfield', content):
         return []
     found = []
-    for m in _RUNWAY_DIRECT.finditer(content):
+    for m in _HIGGSFIELD_DIRECT.finditer(content):
         key = m.group(1)
         if not _FAKE.search(key):
             found.append(key)
-    for m in _RUNWAY_CTX.finditer(content):
+    for m in _HIGGSFIELD_CTX.finditer(content):
         key = m.group(1)
-        if key not in found and not _FAKE.search(key):
+        if key not in found and len(key) >= 32 and not _FAKE.search(key):
             found.append(key)
-    for m in _RUNWAY_PREFIXED.finditer(content):
+    for m in _HIGGSFIELD_HFKEY.finditer(content):
         key = m.group(1)
         if key not in found and not _FAKE.search(key):
             found.append(key)
@@ -451,27 +464,6 @@ def extract_grok(content: str) -> list[str]:
     for m in _GROK_STANDALONE.finditer(content):
         key = m.group(1)
         if key not in found and not _FAKE.search(key):
-            found.append(key)
-    return list(dict.fromkeys(found))
-
-
-# ── Suno AI ───────────────────────────────────────────────────────────────────
-# No unique key prefix — context-only extraction near SUNO_API_KEY / suno.com.
-_SUNO_CTX = re.compile(
-    r'(?:SUNO_API_KEY|SUNO_SECRET|SUNO_TOKEN|suno\.ai|sunoapi\.org|api\.suno\.com)'
-    r'[\s\S]{0,200}'
-    r'([A-Za-z0-9_\-]{32,120})',
-    re.IGNORECASE,
-)
-
-
-def extract_suno(content: str) -> list[str]:
-    if not re.search(r'(?i)suno', content):
-        return []
-    found = []
-    for m in _SUNO_CTX.finditer(content):
-        key = m.group(1)
-        if len(key) >= 32 and not _FAKE.search(key):
             found.append(key)
     return list(dict.fromkeys(found))
 
@@ -1113,14 +1105,13 @@ EXTRACTORS: dict[str, callable] = {
     "ark":           extract_ark,        # Seedance 2.0-standard — BEFORE ark_fast (higher value)
     "ark_fast":      extract_ark_fast,   # Seedance 2.0-fast
     "happyhorse":    extract_happyhorse,
+    "higgsfield":    extract_higgsfield,
     "grok":          extract_grok,
-    "suno":          extract_suno,
     "inworld":       extract_inworld,
     "replicate":     extract_replicate,
     "fal":           extract_fal,
     "huggingface":   extract_huggingface,
     "perplexity":    extract_perplexity,
-    "runway":        extract_runway,
     "kimi":          extract_kimi,
     "glm":           extract_glm,
     "kling":         extract_kling,
@@ -1209,9 +1200,9 @@ AI_TRIGGER: tuple[str, ...] = (
     "PERPLEXITY_API_KEY", "PPLX_API_KEY", "PPLX_KEY",
     "perplexity", "api.perplexity.ai",
 
-    # ── Runway ──────────────────────────────────────────────────────────
-    "RUNWAYML_API_SECRET", "RUNWAY_API_KEY", "RUNWAY_TOKEN",
-    "runway", "runwayml",
+    # ── Higgsfield ──────────────────────────────────────────────────────
+    "HIGGSFIELD_API_KEY", "HIGGSFIELD_KEY", "HIGGSFIELD_TOKEN",
+    "HIGGSFIELD_SECRET", "higgsfield", "platform.higgsfield.ai",
 
     # ── Happyhorse / RunHappyHorse ──────────────────────────────────────
     "HAPPY_HORSE_API_KEY", "HAPPYHORSE_API_KEY", "RUNHAPPYHORSE_API_KEY",
@@ -1228,10 +1219,6 @@ AI_TRIGGER: tuple[str, ...] = (
     # ── xAI / Grok ──────────────────────────────────────────────────────
     "XAI_API_KEY", "GROK_API_KEY", "xAI_KEY",
     "api.x.ai", "grok-2", "grok-3", "grok_api",
-
-    # ── Suno ────────────────────────────────────────────────────────────
-    "SUNO_API_KEY", "SUNO_SECRET", "SUNO_TOKEN",
-    "suno.ai", "sunoapi.org", "api.suno.com",
 
     # ── Inworld ─────────────────────────────────────────────────────────
     "INWORLD_BASE64", "INWORLD_AUTH", "INWORLD_KEY_SECRET",
@@ -1738,27 +1725,28 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"GROK_API_KEY" path:.github/workflows',             "grok", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
-    # SUNO AI  (music generation — no prefix, context-only)
+    # HIGGSFIELD AI  (video/image generator, Bearer auth, platform.higgsfield.ai)
     # ═══════════════════════════════════════════════════════════════════════
 
-    ('"SUNO_API_KEY" filename:.env',                      "suno", "env"),
-    ('"SUNO_API_KEY" filename:.env.local',                "suno", "env"),
-    ('"SUNO_API_KEY" filename:.env.example',              "suno", "env"),
-    ('"SUNO_API_KEY" filename:.env.production',           "suno", "env"),
-    ('"suno" "api_key" filename:.env',                    "suno", "env"),
+    ('"HIGGSFIELD_API_KEY" filename:.env',                "higgsfield", "env"),
+    ('"HIGGSFIELD_API_KEY" filename:.env.local',          "higgsfield", "env"),
+    ('"HIGGSFIELD_API_KEY" filename:.env.example',        "higgsfield", "env"),
+    ('"HIGGSFIELD_KEY" filename:.env',                    "higgsfield", "env"),
+    ('"HIGGSFIELD_TOKEN" filename:.env',                  "higgsfield", "env"),
+    ('"higgsfield" "api_key" filename:.env',              "higgsfield", "env"),
 
-    ('"SUNO_API_KEY" language:python',                    "suno", "code"),
-    ('"SUNO_API_KEY" language:javascript',                "suno", "code"),
-    ('"SUNO_API_KEY" language:typescript',                "suno", "code"),
-    ('"sunoapi.org" language:python',                     "suno", "code"),
-    ('"sunoapi.org" language:javascript',                 "suno", "code"),
-    ('"sunoapi.org" language:typescript',                 "suno", "code"),
-    ('"api.suno.com" language:python',                    "suno", "code"),
-    ('"api.suno.com" language:javascript',                "suno", "code"),
-    ('"SUNO_API_KEY" extension:ipynb',                    "suno", "notebook"),
-    ('"SUNO_API_KEY" filename:config.py',                 "suno", "config"),
-    ('"SUNO_API_KEY" filename:config.ts',                 "suno", "config"),
-    ('"SUNO_API_KEY" path:.github/workflows',             "suno", "ci"),
+    ('"HIGGSFIELD_API_KEY" language:python',              "higgsfield", "code"),
+    ('"HIGGSFIELD_API_KEY" language:javascript',          "higgsfield", "code"),
+    ('"HIGGSFIELD_API_KEY" language:typescript',          "higgsfield", "code"),
+    ('"platform.higgsfield.ai" language:python',          "higgsfield", "code"),
+    ('"platform.higgsfield.ai" language:javascript',      "higgsfield", "code"),
+    ('"platform.higgsfield.ai" language:typescript',      "higgsfield", "code"),
+    ('"higgsfield-client" language:python',               "higgsfield", "code"),
+    ('"higgsfield-js" language:javascript',               "higgsfield", "code"),
+    ('"HIGGSFIELD_API_KEY" extension:ipynb',              "higgsfield", "notebook"),
+    ('"HIGGSFIELD_API_KEY" filename:config.py',           "higgsfield", "config"),
+    ('"HIGGSFIELD_API_KEY" filename:config.ts',           "higgsfield", "config"),
+    ('"HIGGSFIELD_API_KEY" path:.github/workflows',       "higgsfield", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # INWORLD AI TTS  (Basic auth base64 key:secret pair)
@@ -1909,29 +1897,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"pplx-" extension:ipynb',                           "perplexity", "notebook"),
     ('"PERPLEXITY_API_KEY" filename:config.py',           "perplexity", "config"),
     ('"PERPLEXITY_API_KEY" path:.github/workflows',       "perplexity", "ci"),
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUNWAY ML  (context-only — RUNWAYML_API_SECRET, no unique key prefix)
-    # ═══════════════════════════════════════════════════════════════════════
-
-    ('"RUNWAYML_API_SECRET" filename:.env',               "runway", "env"),
-    ('"RUNWAY_API_KEY" filename:.env',                    "runway", "env"),
-    ('"RUNWAY_API_SECRET" filename:.env',                 "runway", "env"),
-    ('"RUNWAY_TOKEN" filename:.env',                      "runway", "env"),
-    ('"RUNWAYML_API_SECRET" filename:.env.local',         "runway", "env"),
-
-    ('"RUNWAYML_API_SECRET" language:python',             "runway", "code"),
-    ('"RUNWAYML_API_SECRET" language:javascript',         "runway", "code"),
-    ('"RUNWAYML_API_SECRET" language:typescript',         "runway", "code"),
-    ('"api.dev.runwayml.com" language:python',            "runway", "code"),
-    ('"api.dev.runwayml.com" language:javascript',        "runway", "code"),
-    ('"api.dev.runwayml.com" language:typescript',        "runway", "code"),
-    ('"runwayml" "gen-3" language:python',                "runway", "code"),
-    ('"runwayml" "gen-3" language:javascript',            "runway", "code"),
-    ('"RUNWAYML_API_SECRET" extension:ipynb',             "runway", "notebook"),
-    ('"RUNWAYML_API_SECRET" filename:config.py',          "runway", "config"),
-    ('"RUNWAYML_API_SECRET" filename:docker-compose.yml', "runway", "docker"),
-    ('"RUNWAYML_API_SECRET" path:.github/workflows',      "runway", "ci"),
 
     # ═══════════════════════════════════════════════════════════════════════
     # KIMI / MOONSHOT AI  (sk- prefix, context-only)
@@ -2349,14 +2314,14 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"XAI_API_KEY" filename:.claude/settings.json',	"grok",	"claude_code"),
     ('"XAI_API_KEY" filename:claude_desktop_config.json',	"grok",	"mcp_config"),
     ('"XAI_API_KEY" filename:mcp.json',	"grok",	"mcp_config"),
-    ('"RUNWAYML_API_SECRET" filename:.cursor/mcp.json',	"runway",	"cursor_mcp"),
-    ('"RUNWAYML_API_SECRET" filename:.continue/config.json',	"runway",	"continue_cfg"),
-    ('"RUNWAYML_API_SECRET" filename:.continue/config.yaml',	"runway",	"continue_cfg"),
-    ('"RUNWAYML_API_SECRET" filename:.aider.conf.yml',	"runway",	"aider_cfg"),
-    ('"RUNWAYML_API_SECRET" filename:.claude/settings.local.json',	"runway",	"claude_code"),
-    ('"RUNWAYML_API_SECRET" filename:.claude/settings.json',	"runway",	"claude_code"),
-    ('"RUNWAYML_API_SECRET" filename:claude_desktop_config.json',	"runway",	"mcp_config"),
-    ('"RUNWAYML_API_SECRET" filename:mcp.json',	"runway",	"mcp_config"),
+    ('"HIGGSFIELD_API_KEY" filename:.cursor/mcp.json',	"higgsfield",	"cursor_mcp"),
+    ('"HIGGSFIELD_API_KEY" filename:.continue/config.json',	"higgsfield",	"continue_cfg"),
+    ('"HIGGSFIELD_API_KEY" filename:.continue/config.yaml',	"higgsfield",	"continue_cfg"),
+    ('"HIGGSFIELD_API_KEY" filename:.aider.conf.yml',	"higgsfield",	"aider_cfg"),
+    ('"HIGGSFIELD_API_KEY" filename:.claude/settings.local.json',	"higgsfield",	"claude_code"),
+    ('"HIGGSFIELD_API_KEY" filename:.claude/settings.json',	"higgsfield",	"claude_code"),
+    ('"HIGGSFIELD_API_KEY" filename:claude_desktop_config.json',	"higgsfield",	"mcp_config"),
+    ('"HIGGSFIELD_API_KEY" filename:mcp.json',	"higgsfield",	"mcp_config"),
     ('"ELEVENLABS_API_KEY" filename:.cursor/mcp.json',	"elevenlabs",	"cursor_mcp"),
     ('"ELEVENLABS_API_KEY" filename:.continue/config.json',	"elevenlabs",	"continue_cfg"),
     ('"ELEVENLABS_API_KEY" filename:.continue/config.yaml',	"elevenlabs",	"continue_cfg"),
@@ -2421,14 +2386,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"NOVITA_API_KEY" filename:.claude/settings.json',	"novita",	"claude_code"),
     ('"NOVITA_API_KEY" filename:claude_desktop_config.json',	"novita",	"mcp_config"),
     ('"NOVITA_API_KEY" filename:mcp.json',	"novita",	"mcp_config"),
-    ('"SUNO_API_KEY" filename:.cursor/mcp.json',	"suno",	"cursor_mcp"),
-    ('"SUNO_API_KEY" filename:.continue/config.json',	"suno",	"continue_cfg"),
-    ('"SUNO_API_KEY" filename:.continue/config.yaml',	"suno",	"continue_cfg"),
-    ('"SUNO_API_KEY" filename:.aider.conf.yml',	"suno",	"aider_cfg"),
-    ('"SUNO_API_KEY" filename:.claude/settings.local.json',	"suno",	"claude_code"),
-    ('"SUNO_API_KEY" filename:.claude/settings.json',	"suno",	"claude_code"),
-    ('"SUNO_API_KEY" filename:claude_desktop_config.json',	"suno",	"mcp_config"),
-    ('"SUNO_API_KEY" filename:mcp.json',	"suno",	"mcp_config"),
     ('"OPENAI_API_KEY" filename:litellm_config.yaml',	"openai",	"litellm"),
     ('"OPENAI_API_KEY" filename:litellm.yaml',	"openai",	"litellm"),
     ('"OPENAI_API_KEY" filename:litellm_config.json',	"openai",	"litellm"),
@@ -2468,9 +2425,9 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"XAI_API_KEY" filename:litellm_config.yaml',	"grok",	"litellm"),
     ('"XAI_API_KEY" filename:litellm.yaml',	"grok",	"litellm"),
     ('"XAI_API_KEY" filename:litellm_config.json',	"grok",	"litellm"),
-    ('"RUNWAYML_API_SECRET" filename:litellm_config.yaml',	"runway",	"litellm"),
-    ('"RUNWAYML_API_SECRET" filename:litellm.yaml',	"runway",	"litellm"),
-    ('"RUNWAYML_API_SECRET" filename:litellm_config.json',	"runway",	"litellm"),
+    ('"HIGGSFIELD_API_KEY" filename:litellm_config.yaml',	"higgsfield",	"litellm"),
+    ('"HIGGSFIELD_API_KEY" filename:litellm.yaml',	"higgsfield",	"litellm"),
+    ('"HIGGSFIELD_API_KEY" filename:litellm_config.json',	"higgsfield",	"litellm"),
     ('"ELEVENLABS_API_KEY" filename:litellm_config.yaml',	"elevenlabs",	"litellm"),
     ('"ELEVENLABS_API_KEY" filename:litellm.yaml',	"elevenlabs",	"litellm"),
     ('"ELEVENLABS_API_KEY" filename:litellm_config.json',	"elevenlabs",	"litellm"),
@@ -2495,9 +2452,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"NOVITA_API_KEY" filename:litellm_config.yaml',	"novita",	"litellm"),
     ('"NOVITA_API_KEY" filename:litellm.yaml',	"novita",	"litellm"),
     ('"NOVITA_API_KEY" filename:litellm_config.json',	"novita",	"litellm"),
-    ('"SUNO_API_KEY" filename:litellm_config.yaml',	"suno",	"litellm"),
-    ('"SUNO_API_KEY" filename:litellm.yaml',	"suno",	"litellm"),
-    ('"SUNO_API_KEY" filename:litellm_config.json',	"suno",	"litellm"),
     ('"OPENAI_API_KEY" filename:vercel.json',	"openai",	"vercel"),
     ('"OPENAI_API_KEY" filename:netlify.toml',	"openai",	"netlify"),
     ('"OPENAI_API_KEY" filename:wrangler.toml',	"openai",	"wrangler"),
@@ -2615,15 +2569,15 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"XAI_API_KEY" filename:serverless.yml',	"grok",	"serverless"),
     ('"XAI_API_KEY" filename:serverless.yaml',	"grok",	"serverless"),
     ('"XAI_API_KEY" filename:app.yaml',	"grok",	"gae"),
-    ('"RUNWAYML_API_SECRET" filename:vercel.json',	"runway",	"vercel"),
-    ('"RUNWAYML_API_SECRET" filename:netlify.toml',	"runway",	"netlify"),
-    ('"RUNWAYML_API_SECRET" filename:wrangler.toml',	"runway",	"wrangler"),
-    ('"RUNWAYML_API_SECRET" filename:railway.toml',	"runway",	"railway"),
-    ('"RUNWAYML_API_SECRET" filename:fly.toml',	"runway",	"fly"),
-    ('"RUNWAYML_API_SECRET" filename:Procfile',	"runway",	"heroku"),
-    ('"RUNWAYML_API_SECRET" filename:serverless.yml',	"runway",	"serverless"),
-    ('"RUNWAYML_API_SECRET" filename:serverless.yaml',	"runway",	"serverless"),
-    ('"RUNWAYML_API_SECRET" filename:app.yaml',	"runway",	"gae"),
+    ('"HIGGSFIELD_API_KEY" filename:vercel.json',	"higgsfield",	"vercel"),
+    ('"HIGGSFIELD_API_KEY" filename:netlify.toml',	"higgsfield",	"netlify"),
+    ('"HIGGSFIELD_API_KEY" filename:wrangler.toml',	"higgsfield",	"wrangler"),
+    ('"HIGGSFIELD_API_KEY" filename:railway.toml',	"higgsfield",	"railway"),
+    ('"HIGGSFIELD_API_KEY" filename:fly.toml',	"higgsfield",	"fly"),
+    ('"HIGGSFIELD_API_KEY" filename:Procfile',	"higgsfield",	"heroku"),
+    ('"HIGGSFIELD_API_KEY" filename:serverless.yml',	"higgsfield",	"serverless"),
+    ('"HIGGSFIELD_API_KEY" filename:serverless.yaml',	"higgsfield",	"serverless"),
+    ('"HIGGSFIELD_API_KEY" filename:app.yaml',	"higgsfield",	"gae"),
     ('"ELEVENLABS_API_KEY" filename:vercel.json',	"elevenlabs",	"vercel"),
     ('"ELEVENLABS_API_KEY" filename:netlify.toml',	"elevenlabs",	"netlify"),
     ('"ELEVENLABS_API_KEY" filename:wrangler.toml',	"elevenlabs",	"wrangler"),
@@ -2696,15 +2650,6 @@ QUERIES: list[tuple[str, str, str]] = [
     ('"NOVITA_API_KEY" filename:serverless.yml',	"novita",	"serverless"),
     ('"NOVITA_API_KEY" filename:serverless.yaml',	"novita",	"serverless"),
     ('"NOVITA_API_KEY" filename:app.yaml',	"novita",	"gae"),
-    ('"SUNO_API_KEY" filename:vercel.json',	"suno",	"vercel"),
-    ('"SUNO_API_KEY" filename:netlify.toml',	"suno",	"netlify"),
-    ('"SUNO_API_KEY" filename:wrangler.toml',	"suno",	"wrangler"),
-    ('"SUNO_API_KEY" filename:railway.toml',	"suno",	"railway"),
-    ('"SUNO_API_KEY" filename:fly.toml',	"suno",	"fly"),
-    ('"SUNO_API_KEY" filename:Procfile',	"suno",	"heroku"),
-    ('"SUNO_API_KEY" filename:serverless.yml',	"suno",	"serverless"),
-    ('"SUNO_API_KEY" filename:serverless.yaml',	"suno",	"serverless"),
-    ('"SUNO_API_KEY" filename:app.yaml',	"suno",	"gae"),
     ('"OPENAI_API_KEY" filename:.envrc',	"openai",	"envrc"),
     ('"OPENAI_API_KEY" filename:.zshrc',	"openai",	"zshrc"),
     ('"OPENAI_API_KEY" filename:.bashrc',	"openai",	"bashrc"),
@@ -3318,16 +3263,13 @@ GITEE_QUERIES: list[tuple[str, str, str]] = [
     ('"REPLICATE_API_TOKEN" "r8_"',                       "replicate",   "env"),
     ('"r8_"',                                             "replicate",   "code"),
 
-    # ── Runway ────────────────────────────────────────────────────────────
-    ('"RUNWAYML_API_SECRET"',                             "runway",      "env"),
-    ('"api.dev.runwayml.com"',                            "runway",      "code"),
+    # ── Higgsfield ────────────────────────────────────────────────────────
+    ('"HIGGSFIELD_API_KEY"',                              "higgsfield",  "env"),
+    ('"platform.higgsfield.ai"',                          "higgsfield",  "code"),
 
     # ── Fal.ai ────────────────────────────────────────────────────────────
     ('"FAL_KEY"',                                         "fal",         "env"),
     ('"fal.run"',                                         "fal",         "code"),
-
-    # ── Suno ──────────────────────────────────────────────────────────────
-    ('"SUNO_API_KEY"',                                    "suno",        "env"),
 
     # ── Perplexity ────────────────────────────────────────────────────────
     ('"PERPLEXITY_API_KEY"',                              "perplexity",  "env"),

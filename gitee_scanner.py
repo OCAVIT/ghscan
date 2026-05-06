@@ -133,7 +133,7 @@ _SEARCH_QUERIES = [
     "COHERE_API_KEY",
     "PERPLEXITY_API_KEY",
     "REPLICATE_API_TOKEN",
-    "RUNWAYML_API_SECRET",
+    "HIGGSFIELD_API_KEY",
     "FAL_KEY",
     # Chinese video / image APIs
     "wan-video",

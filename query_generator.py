@@ -202,7 +202,7 @@ _THEMES = [
 # fresh-indexed content.
 _SS_PARTNER_PROVIDERS = {
     "anthropic", "openai", "openai_image", "google",   # confirmed in program
-    "suno", "perplexity", "huggingface",                # in program
+    "perplexity", "huggingface",                        # in program
     "fireworks",                                         # uncertain but treated similarly
 }
 
@@ -211,7 +211,7 @@ def _maybe_add_modifier(query: str, rnd: random.Random,
                         provider: str = "") -> tuple[str, str]:
     """Roll for time-window or size-bucket modifier.
 
-    For SS-Partner-Program providers (anthropic/openai/suno/perplexity/etc),
+    For SS-Partner-Program providers (anthropic/openai/perplexity/etc),
     auto-revoke happens within 24h. We FORCE pushed:>(yesterday) on these
     queries — without that they'd waste rate-limit on guaranteed-revoked
     keys. The 24h-window catches keys in the pre-revoke race.

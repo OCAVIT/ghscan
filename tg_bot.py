@@ -46,14 +46,13 @@ _PROV: dict[str, dict] = {
     "ark":          {"e": "🔴", "n": "Seedance 2.0 Std"},
     "ark_fast":     {"e": "🚀", "n": "Seedance 2.0 Fast"},
     "happyhorse":   {"e": "🐴", "n": "HappyHorse"},
+    "higgsfield":   {"e": "🌌", "n": "Higgsfield AI"},
     "kling":        {"e": "🎞️",  "n": "Kling AI"},
-    "runway":       {"e": "✈️",  "n": "Runway ML"},
     "fal":          {"e": "⚗️", "n": "fal.ai"},
     "replicate":    {"e": "🔁", "n": "Replicate"},
     "fireworks":    {"e": "🎆", "n": "Fireworks AI"},
     "elevenlabs":   {"e": "🟠", "n": "ElevenLabs"},
     "inworld":      {"e": "🗣️",  "n": "Inworld AI"},
-    "suno":         {"e": "🎵", "n": "Suno Music"},
     # Aggregators (one key → Claude/Gemini/GPT/GPT Image/Nano Banana access)
     "aimlapi":      {"e": "🌀", "n": "AIMLAPI"},
     "deepinfra":    {"e": "🟦", "n": "DeepInfra"},
@@ -83,7 +82,8 @@ _PROV: dict[str, dict] = {
 _CATS: dict[str, dict] = {
     "video": {
         "e": "🎬", "n": "AI Video",
-        "p": ["ark", "ark_fast", "happyhorse", "kling", "runway", "fal", "replicate", "fireworks",
+        "p": ["ark", "ark_fast", "happyhorse", "higgsfield", "kling", "fal",
+              "replicate", "fireworks",
               "luma", "pika", "twelvelabs",
               "pixverse", "hedra", "krea", "wavespeed"],
     },
@@ -107,10 +107,6 @@ _CATS: dict[str, dict] = {
     "voice": {
         "e": "🎙️", "n": "AI Voice",
         "p": ["elevenlabs", "inworld"],
-    },
-    "music": {
-        "e": "🎵", "n": "AI Music",
-        "p": ["suno"],
     },
     "tools": {
         "e": "🛠️", "n": "Search / Agent Tools",
@@ -161,14 +157,15 @@ def _main_text() -> str:
 
 def _main_keyboard(counts: dict[str, int]) -> dict:
     rows = []
-    for cid in ("video", "text", "image", "voice", "music", "tools", "all"):
+    # 'music' category was removed (suno excluded from project)
+    for cid in ("video", "text", "image", "voice", "tools", "all"):
         cat   = _CATS[cid]
-        # 'all' is the headline AI-counter category — exclude serper since
-        # it's a search-tool API, not a general AI provider. Serper is still
-        # accessible via the dedicated 'tools' category button.
+        # 'all' is the headline AI-counter category — exclude serper + firecrawl
+        # since they're search/scraping APIs, not general AI providers. Both are
+        # still accessible via the dedicated 'tools' category button.
         provs = cat["p"]
         if cid == "all":
-            provs = [p for p in provs if p != "serper"]
+            provs = [p for p in provs if p not in ("serper", "firecrawl")]
         total = sum(counts.get(p, 0) for p in provs)
         rows.append([{"text": f"{cat['e']} {cat['n']}  ({total})", "callback_data": f"c:{cid}"}])
     ic = _infra_counts()
@@ -382,15 +379,16 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
         await _api(client, "answerCallbackQuery", callback_query_id=cbq_id)
         s     = db.get_stats()
         ic    = _infra_counts()
-        # Serper.dev is a search-tool API, not a "general AI provider".
-        # Subtract from headline AI-keys counters so the digest reflects
-        # actual AI-API findings; serper still accessible via the
+        # Serper.dev + Firecrawl are search/scraping APIs, not "general AI
+        # providers". Subtract from headline AI-keys counters so the digest
+        # reflects actual AI-API findings; both still accessible via the
         # 🛠️ "Search/Agent Tools" category button.
         by_prov_full = s.get("by_provider", [])
-        serper_total = sum(r["total"] for r in by_prov_full if r["provider"] == "serper")
-        serper_valid = sum(r["valid"] for r in by_prov_full if r["provider"] == "serper")
-        keys_found_ai = s["keys_found"] - serper_total
-        keys_valid_ai = s["keys_valid"] - serper_valid
+        _tools_provs = ("serper", "firecrawl")
+        tools_total = sum(r["total"] for r in by_prov_full if r["provider"] in _tools_provs)
+        tools_valid = sum(r["valid"] for r in by_prov_full if r["provider"] in _tools_provs)
+        keys_found_ai = s["keys_found"] - tools_total
+        keys_valid_ai = s["keys_valid"] - tools_valid
 
         lines = [
             "📊 <b>Database Stats</b>",
@@ -404,8 +402,9 @@ async def _handle_callback(client: httpx.AsyncClient, cbq: dict):
             "<b>By provider:</b>",
         ]
         by_prov = {r["provider"]: r for r in by_prov_full if r["total"] > 0}
-        # Hide serper from main listing — accessible via tools category
+        # Hide serper + firecrawl from main listing — accessible via tools category
         by_prov.pop("serper", None)
+        by_prov.pop("firecrawl", None)
         # Seedance 2.0 — show ark + ark_fast combined
         ark_std  = by_prov.pop("ark",      None)
         ark_fast = by_prov.pop("ark_fast", None)

@@ -69,8 +69,8 @@ _SYSTEM_PROMPT = (
 _VALID_PROVIDERS = {
     "openai", "openai_image", "anthropic", "google", "deepseek", "kimi", "glm",
     "grok", "perplexity", "openrouter", "huggingface", "ark", "ark_fast",
-    "happyhorse", "kling", "runway", "fal", "replicate", "fireworks",
-    "elevenlabs", "inworld", "suno", "aimlapi", "deepinfra", "hyperbolic",
+    "happyhorse", "higgsfield", "kling", "fal", "replicate", "fireworks",
+    "elevenlabs", "inworld", "aimlapi", "deepinfra", "hyperbolic",
     "novita", "commonstack", "serper", "stability", "luma", "pika",
     "twelvelabs", "pixverse", "siliconflow", "firecrawl", "portkey", "krea",
     "hedra", "wavespeed", "generic", "multi",

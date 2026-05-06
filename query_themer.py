@@ -115,7 +115,7 @@ Today is {today}. Mix providers freely.
 PROVIDERS WE CARE ABOUT (priority order):
   openai, anthropic, google/gemini/veo, deepseek, openrouter,
   ark/doubao/seedance (Volcengine), kimi/moonshot, glm/zhipuai,
-  elevenlabs, fal, replicate, runway, suno, kling, fireworks,
+  elevenlabs, fal, replicate, higgsfield, kling, fireworks,
   novita, hyperbolic, deepinfra, aimlapi, perplexity, grok/xai,
   stability, luma, pika, twelvelabs, commonstack, huggingface,
   pixverse, siliconflow, portkey, krea, hedra, wavespeed
@@ -147,7 +147,7 @@ THEMES (mix freely — do NOT cluster all queries on one theme):
   4. RECENT PUSHES — pushed:>{today[:8]}25 (or earlier in last 30 days)
      and created:>{today[:7]}-01 for fresh repos.
 
-     CRITICAL: For openai / anthropic / suno / perplexity / huggingface /
+     CRITICAL: For openai / anthropic / perplexity / huggingface /
      google — these providers REVOKE leaked keys within 24h via GitHub
      Secret Scanning Partner Program. ALWAYS attach pushed:>YYYY-MM-DD
      where YYYY-MM-DD is yesterday. Without this clause, queries against
