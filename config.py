@@ -162,7 +162,11 @@ elif _kaggle_single:
 else:
     KAGGLE_TOKENS = []
 
-KAGGLE_SCAN_INTERVAL = int(os.environ.get("KAGGLE_SCAN_INTERVAL", "3600"))  # 1h default
+KAGGLE_SCAN_INTERVAL = int(os.environ.get("KAGGLE_SCAN_INTERVAL", "600"))   # 10min — 5+5 workers per
+                                                                             # mirror finish a cycle in ~5-10min,
+                                                                             # so 1h sleep wastes 80% idle. Short
+                                                                             # interval also means LLM-themer's
+                                                                             # fresh queries get picked up quickly.
 
 # ── HuggingFace token ──────────────────────────────────────────────────────
 # HF_TOKEN — read-scope token for HuggingFace Spaces API.
