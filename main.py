@@ -466,8 +466,11 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_kaggle_cn_themer_loop(), name="kaggle_cn_themer"),
             asyncio.create_task(_kaggle_mutator_loop(),   name="kaggle_mutator"),
             # replit_loop dropped — see replit_scanner import-block comment.
-            # web-dork: gist/telegra.ph/rentry/pastebin via DDG HTML + direct fetch.
-            asyncio.create_task(web_dork_loop(), name="web_dork_scanner"),
+            # web_dork dropped 2026-05-07 — DDG IP-bans Railway after first cycle.
+            # Firecrawl SERP cached identical results across cycles (0 valid in 8h).
+            # Paste sites (rentry/telegra.ph/pastebin) ended up unproductive vs the
+            # github-code / kaggle / gitee scanners. /admin/run_web_dork_cycle
+            # endpoint remains for manual one-shot tests.
             asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
             asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
             asyncio.create_task(_active_learner_loop(),  name="active_learner"),
