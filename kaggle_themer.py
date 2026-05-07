@@ -49,7 +49,12 @@ _SYSTEM_PROMPT = (
     "model integration patterns ('langchain rag tutorial'), niche providers "
     "('kling video api'), course-style titles ('llm api fine-tuning'). "
     "Bias toward queries that return AI-tutorial notebooks where authors "
-    "often hardcode real keys in code or output cells."
+    "often hardcode real keys in code or output cells. "
+    "PRIORITY PROVIDERS (generate MORE queries for these): OpenAI, Anthropic "
+    "Claude, video-generation APIs (Kling, Pika, Runway, Seedance, Luma, "
+    "Pixverse, Hedra, Wavespeed), audio (ElevenLabs), image-gen (Stability, "
+    "fal.ai). DE-PRIORITIZE HuggingFace Hub tokens — they are already "
+    "over-represented; generate AT MOST 2 HuggingFace queries per batch."
 )
 
 
@@ -326,5 +331,108 @@ async def generate_kaggle_cn_batch(target_count: int = 30) -> int:
 
     inserted = db.kaggle_register_queries(candidates)
     log.info("kaggle_cn_themer: inserted %d/%d queries (raw=%d) — source=%s",
+             inserted, len(candidates), len(raw_items), source)
+    return inserted
+
+
+# ── Premium shard — OpenAI / Anthropic / Video-gen / Audio ───────────────────
+# Focused exclusively on high-value commercial providers that are under-covered
+# by the general themer. Separate LLM call so the 15-day dedup is independent
+# from the main and CN shards — distinct lexical space, minimal hash collision.
+
+_PREMIUM_SYSTEM_PROMPT = (
+    "You generate Kaggle notebook search queries to find leaked API keys for "
+    "high-value commercial AI providers. FREE-TEXT only (no operators). "
+    "Focus EXCLUSIVELY on: OpenAI (gpt-4o, o3, o4-mini), Anthropic Claude "
+    "(claude-3.5-sonnet, claude-4), video-generation (Kling, Pika, Runway ML, "
+    "Seedance/ByteDance, Luma Dream Machine, Pixverse, Hedra, Higgsfield, "
+    "Wavespeed), audio (ElevenLabs, PlayHT, Cartesia), image-gen (Stability AI, "
+    "fal.ai FLUX, Ideogram, Recraft). "
+    "Good queries: env-var literals (OPENAI_API_KEY, ANTHROPIC_API_KEY, "
+    "ELEVENLABS_API_KEY, KLING_ACCESS_KEY), model name patterns (gpt-4o tutorial, "
+    "claude chatbot langchain, runway gen-3 api), tutorial titles (openai "
+    "assistants api notebook, anthropic claude agent python). "
+    "Output JSON: {\"queries\": [{\"q\": \"...\", \"theme\": \"...\"}]}"
+)
+
+
+def _build_premium_prompt(target_count: int) -> str:
+    return f"""\
+Generate {target_count} Kaggle search queries targeting COMMERCIAL AI provider leaks.
+
+PRIORITY PROVIDERS (cover all of them):
+  OpenAI: OPENAI_API_KEY, gpt-4o, o3, o4-mini, openai assistants, openai realtime
+  Anthropic: ANTHROPIC_API_KEY, claude-3.5-sonnet, claude-4, claude haiku tutorial
+  ElevenLabs: ELEVENLABS_API_KEY, elevenlabs voice clone, tts api notebook
+  Kling/Kuaishou: KLING_ACCESS_KEY, KLING_API_KEY, kling-v2, kling text-to-video
+  Pika Labs: PIKA_API_KEY, pika video generation api python
+  Runway ML: RUNWAYML_API_SECRET, runway gen-3 alpha, runway api tutorial
+  Seedance/ByteDance: SEEDANCE_API_KEY, ARK_API_KEY, seedance video api
+  Luma AI: LUMAAI_API_KEY, luma dream machine api, luma video generation
+  Pixverse: PIXVERSE_API_KEY, pixverse text-to-video
+  Hedra: HEDRA_API_KEY, hedra character video api
+  Stability AI: STABILITY_API_KEY, stable diffusion xl api, stability sdxl
+  fal.ai: FAL_KEY, fal flux api, fal ai image generation
+  Cartesia / PlayHT / Suno: CARTESIA_API_KEY, PLAY_HT_API_KEY, SUNO_API_KEY
+
+QUERY THEMES:
+  1. Env-var literals: "OPENAI_API_KEY tutorial", "ANTHROPIC_API_KEY langchain"
+  2. Model patterns: "gpt-4o chatbot python", "claude-3.5-sonnet rag notebook"
+  3. Tutorial titles: "openai assistants api guide", "runway ml api integration"
+  4. Video gen demos: "text to video api python notebook", "kling video generation tutorial"
+  5. Audio demos: "elevenlabs tts python", "voice synthesis api notebook"
+  6. Image gen demos: "stable diffusion sdxl api", "flux image generation fal"
+  7. Multi-modal: "gpt-4o vision tutorial", "claude multimodal notebook"
+  8. Agent frameworks + commercial key: "crewai openai", "autogen anthropic claude"
+
+Output exactly {target_count} queries, free-text only, each under {_QUERY_LEN_CAP} chars.
+JSON: {{"queries": [{{"q": "OPENAI_API_KEY langchain tutorial", "theme": "env_var"}}, ...]}}
+"""
+
+
+async def generate_kaggle_premium_batch(target_count: int = 30) -> int:
+    """Premium shard: OpenAI/Anthropic/video-gen/audio Kaggle queries.
+    Runs every 45min on master, 20min boot offset. Returns new rows inserted."""
+    forbidden = db.kaggle_get_recent_query_hashes(days=15)
+    log.info("kaggle_premium_themer: starting — %d hashes in 15-day window", len(forbidden))
+
+    messages = [
+        {"role": "system", "content": _PREMIUM_SYSTEM_PROMPT},
+        {"role": "user",   "content": _build_premium_prompt(target_count)},
+    ]
+
+    text, source = await call_creative(
+        messages,
+        response_format={"type": "json_object"},
+    )
+    if not text:
+        log.warning("kaggle_premium_themer: LLM returned no content (source=%s)", source)
+        return 0
+
+    raw_items = _parse_response(text)
+    if not raw_items:
+        log.warning("kaggle_premium_themer: failed to parse JSON: %s", text[:300])
+        return 0
+
+    candidates: list[dict] = []
+    seen_in_batch: set[str] = set()
+    for item in raw_items:
+        validated = _validate_query(item)
+        if not validated:
+            continue
+        from db import _query_hash
+        h = _query_hash(validated["query_str"])
+        if h in forbidden or h in seen_in_batch:
+            continue
+        seen_in_batch.add(h)
+        validated["theme"] = f"kaggle_premium:{validated['theme'].split(':', 1)[-1]}"
+        candidates.append(validated)
+
+    if not candidates:
+        log.warning("kaggle_premium_themer: 0 candidates survived dedup (raw=%d)", len(raw_items))
+        return 0
+
+    inserted = db.kaggle_register_queries(candidates)
+    log.info("kaggle_premium_themer: inserted %d/%d queries (raw=%d) — source=%s",
              inserted, len(candidates), len(raw_items), source)
     return inserted

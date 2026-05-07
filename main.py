@@ -57,7 +57,7 @@ from tg_bot import bot_loop
 from issues_scanner import issues_loop
 from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
 from query_themer import generate_themed_batch
-from kaggle_themer import generate_kaggle_themed_batch, generate_kaggle_cn_batch
+from kaggle_themer import generate_kaggle_themed_batch, generate_kaggle_cn_batch, generate_kaggle_premium_batch
 from kaggle_mutator import generate_mutated_batch, generate_cartesian_batch
 from web_dork_scanner import web_dork_loop, run_web_dork_cycle
 # replit_scanner Phase 2 dropped 2026-05-06 — Replit blocks anonymous bot
@@ -241,6 +241,22 @@ async def _kaggle_cn_themer_loop():
             log.info("kaggle_cn_themer: +%d queries inserted", inserted)
         except Exception as e:
             log.error("kaggle_cn_themer crashed: %s", e)
+        await asyncio.sleep(45 * 60)
+
+
+async def _kaggle_premium_loop():
+    """Premium Kaggle shard: OpenAI/Anthropic/video-gen/audio — runs every 45 min.
+
+    Separate LLM call from the general + CN themers. Boot offset 20 min so
+    all three themer loops stagger their LLM calls across the 45-min window.
+    """
+    await asyncio.sleep(20 * 60)   # 20 min boot offset
+    while True:
+        try:
+            inserted = await generate_kaggle_premium_batch()
+            log.info("kaggle_premium_themer: +%d queries inserted", inserted)
+        except Exception as e:
+            log.error("kaggle_premium_themer crashed: %s", e)
         await asyncio.sleep(45 * 60)
 
 
@@ -463,8 +479,9 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
             asyncio.create_task(_themer_loop(),         name="query_themer"),
             asyncio.create_task(_kaggle_themer_loop(),    name="kaggle_themer"),
-            asyncio.create_task(_kaggle_cn_themer_loop(), name="kaggle_cn_themer"),
-            asyncio.create_task(_kaggle_mutator_loop(),   name="kaggle_mutator"),
+            asyncio.create_task(_kaggle_cn_themer_loop(),   name="kaggle_cn_themer"),
+            asyncio.create_task(_kaggle_premium_loop(),     name="kaggle_premium_themer"),
+            asyncio.create_task(_kaggle_mutator_loop(),     name="kaggle_mutator"),
             # replit_loop dropped — see replit_scanner import-block comment.
             # web_dork dropped 2026-05-07 — DDG IP-bans Railway after first cycle.
             # Firecrawl SERP cached identical results across cycles (0 valid in 8h).
@@ -504,7 +521,9 @@ _ROTATION_TOKEN: str = os.environ.get("ROTATION_API_TOKEN", "")
 
 # Only providers used by Hermes are exposed via /api/keys — even with a leaked
 # token, an attacker can't enumerate every provider in the DB this way.
-_ROTATION_ALLOWED_PROVIDERS = frozenset({"deepseek", "kimi", "glm", "firecrawl"})
+_ROTATION_ALLOWED_PROVIDERS = frozenset({
+    "deepseek", "kimi", "glm", "firecrawl", "siliconflow",
+})
 
 
 def _check_rotation(authorization: str | None) -> None:
@@ -864,12 +883,13 @@ def _mirror_queue_stats() -> dict | None:
 # ── Rotation API for hermes-bounty rotation_proxy ─────────────────────────
 # Allows the bounty project's rotation_proxy to pull live valid keys for
 # Hermes-supported providers and report dead keys back. Endpoints are
-# whitelisted to {deepseek, kimi, glm} so this token can't be used to dump
-# every provider's keys.
+# whitelisted to {deepseek, kimi, glm, firecrawl, siliconflow} so this
+# token can't be used to dump every provider's keys.
 
 @app.get("/api/keys")
 async def api_keys_list(
-    provider: str = Query(..., description="One of: deepseek, kimi, glm, firecrawl"),
+    provider: str = Query(..., description=(
+        "One of: deepseek, kimi, glm, firecrawl, siliconflow")),
     authorization: str | None = Header(default=None),
 ):
     _check_rotation(authorization)
@@ -1291,6 +1311,14 @@ async def admin_run_kaggle_cn_themer(authorization: str | None = Header(default=
     """Manually trigger CN-provider kaggle themer batch."""
     _check_admin(authorization)
     n = await generate_kaggle_cn_batch()
+    return {"ok": True, "inserted": n}
+
+
+@app.post("/admin/run_kaggle_premium")
+async def admin_run_kaggle_premium(authorization: str | None = Header(default=None)):
+    """Manually trigger premium Kaggle themer batch (OpenAI/Anthropic/video-gen)."""
+    _check_admin(authorization)
+    n = await generate_kaggle_premium_batch()
     return {"ok": True, "inserted": n}
 
 

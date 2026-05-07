@@ -85,10 +85,10 @@ MASTER_API_TOKEN  = os.environ.get("MASTER_API_TOKEN", "") or os.environ.get("AD
 MIRROR_FLUSH_SEC  = float(os.environ.get("MIRROR_FLUSH_SEC", "30"))   # how often to POST batched finds
 MIRROR_BATCH_MAX  = int(os.environ.get("MIRROR_BATCH_MAX", "200"))    # max items per batch POST
 # Pull master's dynamic_queries (DeepSeek + combinatorial) every N seconds so
-# mirror's scan_cycle benefits from the same long-tail rotation. Default 1h —
-# DeepSeek pipelines run every 8h on master, so 1h sync catches new batches
-# within an hour. Set 0 to disable sync (mirror sticks to static QUERIES only).
-MIRROR_QUERY_SYNC_SEC = int(os.environ.get("MIRROR_QUERY_SYNC_SEC", "3600"))
+# mirror's scan_cycle benefits from the same long-tail rotation. Default 30min —
+# themer runs every 30-45min on master, so 30min sync keeps mirrors within one
+# cycle of the latest queries. Set 0 to disable sync (mirrors use static only).
+MIRROR_QUERY_SYNC_SEC = int(os.environ.get("MIRROR_QUERY_SYNC_SEC", "1800"))
 
 # ── DB maintenance ─────────────────────────────────────────────────────────
 # Low-risk infra findings older than this many days are pruned automatically.

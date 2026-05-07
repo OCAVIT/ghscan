@@ -159,11 +159,12 @@ async def generate_mutated_batch(max_source: int = 30) -> int:
 # Short provider name list — most Kaggle-relevant (free-text search terms)
 _PROVIDERS_SHORT = [
     "openai", "anthropic claude", "gemini", "deepseek", "groq",
-    "elevenlabs", "stability", "huggingface", "openrouter",
-    "replicate", "together ai", "fireworks ai",
+    "elevenlabs", "stability", "openrouter",
+    "replicate", "fireworks ai",
     "zhipuai glm", "moonshot kimi", "ark doubao", "siliconflow",
     "kling video", "luma dream machine", "wavespeed",
     "higgsfield", "fal flux", "grok xai",
+    "seedance bytedance", "pika labs", "pixverse", "hedra", "runway ml",
 ]
 
 _TUTORIAL_STYLES = [
