@@ -26,12 +26,12 @@ main.py). Mirrors pick up via /admin/kaggle_dynamic_queries_export sync.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import random
 from itertools import product
 
 import db
+from db import _query_hash  # canonical hash (whitespace-norm, NO lowercase) — must match db.kaggle_register_queries
 
 log = logging.getLogger(__name__)
 
@@ -62,10 +62,6 @@ _CN_ALIASES = {
 }
 
 _QUERY_LEN_CAP = 120
-
-
-def _query_hash(q: str) -> str:
-    return hashlib.sha256(q.strip().lower().encode()).hexdigest()
 
 
 def _make_variants(query_str: str) -> list[tuple[str, str]]:
