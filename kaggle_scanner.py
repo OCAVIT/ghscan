@@ -529,7 +529,11 @@ def _all_queries() -> list[str]:
     coverage and adapt over time."""
     static = list(_QUERIES)
     try:
-        dynamic = db.kaggle_active_queries(limit=300)
+        # 800 ≈ 160 queries per worker × 5 workers — gives the never-used
+        # tail (premium/CN/general themer output) room to surface alongside
+        # the yield-ranked head. Old 300 was below dynamic-pool size and
+        # left ~1500 fresh queries permanently buried.
+        dynamic = db.kaggle_active_queries(limit=800)
     except Exception as e:
         log.debug("kaggle: dynamic query fetch failed: %s", e)
         dynamic = []

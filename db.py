@@ -1002,15 +1002,24 @@ def kaggle_register_queries(items: list[dict]) -> int:
 
 
 def kaggle_active_queries(limit: int = 200) -> list[str]:
-    """Return up to `limit` non-blacklisted Kaggle dynamic queries, sorted
-    by yield (valid+total) desc, then recency. Used by kaggle_scanner each
-    cycle alongside the static _QUERIES list."""
+    """Return up to `limit` non-blacklisted Kaggle dynamic queries.
+
+    Order:
+      1. Never-used queries first (times_used = 0) — guarantees freshly
+         themed queries reach scanner before yield-history sort buries them.
+         Without this premium/CN/general themer output sat in the tail
+         while top-N stayed pinned to old, exhausted high-yield queries.
+      2. Then yield-ranked: valid_keys_found, keys_found, generated_at.
+    """
     now = _now()
     with _conn() as c:
         rows = c.execute(
             """SELECT query_str FROM kaggle_dynamic_queries
                WHERE blacklisted_until IS NULL OR blacklisted_until < ?
-               ORDER BY valid_keys_found DESC, keys_found DESC, generated_at DESC
+               ORDER BY (times_used = 0) DESC,
+                        valid_keys_found DESC,
+                        keys_found DESC,
+                        generated_at DESC
                LIMIT ?""",
             (now, limit),
         ).fetchall()
