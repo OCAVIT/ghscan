@@ -34,7 +34,7 @@ from query_axes import PROVIDER_AXES
 
 log = logging.getLogger(__name__)
 
-TARGET_QUERIES_PER_BATCH = 30
+TARGET_QUERIES_PER_BATCH = 60
 _QUERY_LEN_CAP = 120  # Kaggle search box accepts longer but rarely useful
 
 
@@ -232,5 +232,99 @@ async def generate_kaggle_themed_batch(target_count: int = TARGET_QUERIES_PER_BA
 
     inserted = db.kaggle_register_queries(candidates)
     log.info("kaggle_themer: inserted %d/%d kaggle queries (raw=%d) — source=%s",
+             inserted, len(candidates), len(raw_items), source)
+    return inserted
+
+
+# ── CN-provider shard ─────────────────────────────────────────────────────────
+# Separate LLM call focused exclusively on Chinese AI providers (GLM, Ark,
+# Kling, Siliconflow, Kimi, DeepSeek, Qwen). These queries have a different
+# lexical profile from the general themer so they survive the 15-day dedup
+# independently — very few hash collisions with the main batch.
+
+_CN_SYSTEM_PROMPT = (
+    "You generate Kaggle notebook search queries to find leaked API keys for "
+    "Chinese AI providers. These are FREE-TEXT queries (NO operators). "
+    "Focus ONLY on: ZhipuAI/GLM, Moonshot/Kimi, Ark/Doubao/Seedance, "
+    "SiliconFlow/SiliconCloud, DeepSeek, Qwen/DashScope, Kling/Kuaishou. "
+    "Good queries combine: Chinese env-var names (ZHIPUAI_API_KEY, ARK_API_KEY, "
+    "MOONSHOT_API_KEY), model aliases (glm-4, doubao-pro, kimi-k2, deepseek-v4), "
+    "tutorial patterns ('zhipu tutorial', 'ark video api python'), and CN-specific "
+    "contexts (Chinese AI course, bilingual notebook, CN cloud tutorial). "
+    "Output JSON: {\"queries\": [{\"q\": \"...\", \"theme\": \"...\"}]}"
+)
+
+
+def _build_cn_prompt(target_count: int) -> str:
+    return f"""\
+Generate {target_count} Kaggle search queries targeting Chinese AI provider leaks.
+
+PROVIDERS:
+  ZhipuAI / GLM: ZHIPUAI_API_KEY, GLM_API_KEY, glm-4, glm-4-plus, glm-4.5, chatglm
+  Moonshot / Kimi: MOONSHOT_API_KEY, KIMI_API_KEY, kimi-k2, moonshot-v1-128k
+  Ark / ByteDance: ARK_API_KEY, DOUBAO_API_KEY, SEEDANCE_API_KEY, doubao-pro, doubao-seedance
+  SiliconFlow: SILICONFLOW_API_KEY, SILICONCLOUD_API_KEY, siliconflow embeddings
+  DeepSeek: DEEPSEEK_API_KEY, deepseek-v4, deepseek-v4-pro, deepseek-reasoner
+  Qwen/DashScope: DASHSCOPE_API_KEY, QWEN_API_KEY, qwen2.5, qwq-32b
+  Kling/Kuaishou: KLING_ACCESS_KEY, KLING_AK, kling text-to-video, kling-v2
+
+QUERY THEMES TO COVER:
+  1. Env-var literals: "ZHIPUAI_API_KEY notebook", "ARK_API_KEY tutorial"
+  2. Model name patterns: "glm-4 langchain", "kimi-k2 rag", "doubao-pro chat"
+  3. Tutorial titles: "zhipu ai chatbot tutorial", "deepseek v4 colab guide"
+  4. CN-context: "中文 AI API notebook", "bilingual llm tutorial python"
+  5. API integration: "moonshot api python tutorial", "siliconcloud embeddings"
+  6. Course/assignment: "deeplearning zhipu project", "baidu cloud ai assignment"
+
+Output exactly {target_count} queries, free-text only, each under {_QUERY_LEN_CAP} chars.
+JSON: {{"queries": [{{"q": "ZHIPUAI_API_KEY langchain notebook", "theme": "env_var"}}, ...]}}
+"""
+
+
+async def generate_kaggle_cn_batch(target_count: int = 30) -> int:
+    """CN-focused Kaggle queries via DeepSeek/GLM. Separate hash space from
+    main themer due to distinct lexical domain. Returns new rows inserted."""
+    forbidden = db.kaggle_get_recent_query_hashes(days=15)
+    log.info("kaggle_cn_themer: starting — %d hashes in 15-day window", len(forbidden))
+
+    messages = [
+        {"role": "system", "content": _CN_SYSTEM_PROMPT},
+        {"role": "user",   "content": _build_cn_prompt(target_count)},
+    ]
+
+    text, source = await call_creative(
+        messages,
+        response_format={"type": "json_object"},
+    )
+    if not text:
+        log.warning("kaggle_cn_themer: LLM returned no content (source=%s)", source)
+        return 0
+
+    raw_items = _parse_response(text)
+    if not raw_items:
+        log.warning("kaggle_cn_themer: failed to parse JSON: %s", text[:300])
+        return 0
+
+    candidates: list[dict] = []
+    seen_in_batch: set[str] = set()
+    for item in raw_items:
+        validated = _validate_query(item)
+        if not validated:
+            continue
+        from db import _query_hash
+        h = _query_hash(validated["query_str"])
+        if h in forbidden or h in seen_in_batch:
+            continue
+        seen_in_batch.add(h)
+        # Tag as CN shard so we can filter in /stats
+        validated["theme"] = f"kaggle_cn_themer:{validated['theme'].split(':', 1)[-1]}"
+        candidates.append(validated)
+
+    if not candidates:
+        log.warning("kaggle_cn_themer: 0 candidates survived dedup (raw=%d)", len(raw_items))
+        return 0
+
+    inserted = db.kaggle_register_queries(candidates)
+    log.info("kaggle_cn_themer: inserted %d/%d queries (raw=%d) — source=%s",
              inserted, len(candidates), len(raw_items), source)
     return inserted

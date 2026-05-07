@@ -57,7 +57,8 @@ from tg_bot import bot_loop
 from issues_scanner import issues_loop
 from query_generator import generate_batch as generate_combo_batch, auto_blacklist_dead
 from query_themer import generate_themed_batch
-from kaggle_themer import generate_kaggle_themed_batch
+from kaggle_themer import generate_kaggle_themed_batch, generate_kaggle_cn_batch
+from kaggle_mutator import generate_mutated_batch, generate_cartesian_batch
 from web_dork_scanner import web_dork_loop, run_web_dork_cycle
 # replit_scanner Phase 2 dropped 2026-05-06 — Replit blocks anonymous bot
 # access to /@user/repl pages (404/403), and Google/firecrawl don't index
@@ -223,7 +224,49 @@ async def _kaggle_themer_loop():
             log.info("kaggle_themer: +%d kaggle queries inserted", inserted)
         except Exception as e:
             log.error("kaggle_themer crashed: %s", e)
-        await asyncio.sleep(2 * 3600)   # 2h
+        await asyncio.sleep(30 * 60)    # 30min (was 2h — faster pool growth)
+
+
+async def _kaggle_cn_themer_loop():
+    """CN-provider focused Kaggle query generator — runs every 45 min.
+
+    Separate domain from main themer (GLM/Ark/Kling/Kimi/SiliconFlow) →
+    minimal hash collisions with the general batch. Boot offset 15 min so
+    it fires between main-themer runs, spreading LLM load.
+    """
+    await asyncio.sleep(15 * 60)   # 15 min boot offset
+    while True:
+        try:
+            inserted = await generate_kaggle_cn_batch()
+            log.info("kaggle_cn_themer: +%d queries inserted", inserted)
+        except Exception as e:
+            log.error("kaggle_cn_themer crashed: %s", e)
+        await asyncio.sleep(45 * 60)
+
+
+async def _kaggle_mutator_loop():
+    """Yield-mutation + cartesian generator — runs every 15 min, no LLM cost.
+
+    Generates query variants from top-yielders (deterministic transformations)
+    and a providers×styles×years cartesian product. Cartesian runs once per
+    hour (every 4th tick); mutation runs every tick.
+    """
+    await asyncio.sleep(10 * 60)   # 10 min boot offset
+    tick = 0
+    while True:
+        try:
+            m = await generate_mutated_batch()
+            log.info("kaggle_mutator: +%d mutation variants", m)
+        except Exception as e:
+            log.error("kaggle_mutator (mutation) crashed: %s", e)
+        tick += 1
+        if tick % 4 == 0:  # cartesian every ~1h (4 × 15 min)
+            try:
+                c = await generate_cartesian_batch()
+                log.info("kaggle_mutator: +%d cartesian queries", c)
+            except Exception as e:
+                log.error("kaggle_mutator (cartesian) crashed: %s", e)
+        await asyncio.sleep(15 * 60)
 
 
 async def _auto_jackpot_loop():
@@ -419,10 +462,11 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(author_walk_loop(),     name="author_walk"),
             asyncio.create_task(_query_rotation_loop(), name="query_rotation"),
             asyncio.create_task(_themer_loop(),         name="query_themer"),
-            asyncio.create_task(_kaggle_themer_loop(),  name="kaggle_themer"),
+            asyncio.create_task(_kaggle_themer_loop(),    name="kaggle_themer"),
+            asyncio.create_task(_kaggle_cn_themer_loop(), name="kaggle_cn_themer"),
+            asyncio.create_task(_kaggle_mutator_loop(),   name="kaggle_mutator"),
             # replit_loop dropped — see replit_scanner import-block comment.
-            # Generic web-dork scanner: dev.to / GitLab / StackOverflow / Pastebin
-            # via firecrawl /v1/search (serper rejects secret-hunting dorks).
+            # web-dork: gist/telegra.ph/rentry/pastebin via DDG HTML + direct fetch.
             asyncio.create_task(web_dork_loop(), name="web_dork_scanner"),
             asyncio.create_task(_vocab_expander_loop(), name="vocab_expander"),
             asyncio.create_task(_archetype_miner_loop(), name="archetype_miner"),
@@ -1233,11 +1277,27 @@ async def admin_probe_firecrawl_search(
 
 @app.post("/admin/run_kaggle_themer")
 async def admin_run_kaggle_themer(authorization: str | None = Header(default=None)):
-    """Manually trigger one kaggle_themer batch (for testing without
-    waiting 6h for next scheduled run). Returns count of new queries."""
+    """Manually trigger one kaggle_themer batch. Returns count of new queries."""
     _check_admin(authorization)
     n = await generate_kaggle_themed_batch()
     return {"ok": True, "inserted": n}
+
+
+@app.post("/admin/run_kaggle_cn_themer")
+async def admin_run_kaggle_cn_themer(authorization: str | None = Header(default=None)):
+    """Manually trigger CN-provider kaggle themer batch."""
+    _check_admin(authorization)
+    n = await generate_kaggle_cn_batch()
+    return {"ok": True, "inserted": n}
+
+
+@app.post("/admin/run_kaggle_mutator")
+async def admin_run_kaggle_mutator(authorization: str | None = Header(default=None)):
+    """Manually trigger kaggle mutation + cartesian batch."""
+    _check_admin(authorization)
+    m = await generate_mutated_batch()
+    c = await generate_cartesian_batch()
+    return {"ok": True, "mutated": m, "cartesian": c}
 
 
 @app.get("/admin/kaggle_breakdown")
