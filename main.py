@@ -523,7 +523,6 @@ _ROTATION_TOKEN: str = os.environ.get("ROTATION_API_TOKEN", "")
 # token, an attacker can't enumerate every provider in the DB this way.
 _ROTATION_ALLOWED_PROVIDERS = frozenset({
     "deepseek", "kimi", "glm", "firecrawl", "siliconflow",
-    "huggingface",
 })
 
 
