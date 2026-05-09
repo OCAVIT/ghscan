@@ -353,7 +353,8 @@ def save_key(provider: str, key: str, repo: str, file_path: str,
         # instead of bucketing all relayed finds under generic 'mirror'.
         try:
             from mirror_relay import enqueue_ai_find as _mirror_ai
-            _mirror_ai(provider, key, repo, file_path, file_url, file_type)
+            _mirror_ai(provider, key, repo, file_path, file_url, file_type,
+                       is_valid=bool(is_valid))
         except Exception:
             pass
         return True

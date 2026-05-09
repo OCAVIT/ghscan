@@ -40,6 +40,47 @@ _PROXY_URLS: list[str] = [
     if u.strip()
 ]
 
+if not _PROXY_URLS:
+    log.warning(
+        "EVOMI_PROXY env var is empty — validation requests will egress from "
+        "this host's IP directly. On master deployments this often produces "
+        "false-negative validation (provider soft-bans the datacenter IP and "
+        "returns 401/403 or 200+error-body), zeroing out the valid pool over "
+        "the 12h revalidation cycle. Set EVOMI_PROXY=http://user:pass@rp.evomi.com:1000 "
+        "to restore — or rely on the trust-mirror path in /admin/validate_keys."
+    )
+
+
+def proxy_configured() -> bool:
+    """Cheap public predicate so other modules (admin endpoints) can check
+    proxy state without importing the private _PROXY_URLS list."""
+    return bool(_PROXY_URLS)
+
+
+async def proxy_health_check(timeout: float = 8.0) -> dict:
+    """One-shot diagnostic — confirms whether validators currently egress via
+    a working proxy. Returns:
+      {"configured": False}                              when no proxy set
+      {"configured": True, "healthy": True, "exit_ip"}   when proxy reachable
+      {"configured": True, "healthy": False, "error"}    when proxy refused
+    Uses ipify which is cheap, anonymous, and not rate-limited per IP."""
+    if not _PROXY_URLS:
+        return {"configured": False, "healthy": None}
+    try:
+        async with _client() as c:
+            r = await c.get("https://api.ipify.org?format=json", timeout=timeout)
+        if r.status_code == 200:
+            try:
+                ip = r.json().get("ip")
+            except Exception:
+                ip = None
+            return {"configured": True, "healthy": True, "exit_ip": ip}
+        return {"configured": True, "healthy": False, "status": r.status_code,
+                "body": r.text[:200]}
+    except Exception as e:
+        return {"configured": True, "healthy": False,
+                "error": f"{type(e).__name__}: {e}"}
+
 
 def _client(**kwargs) -> httpx.AsyncClient:
     """Return an AsyncClient optionally routed through a random Evomi proxy."""

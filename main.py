@@ -1163,6 +1163,24 @@ async def admin_kaggle_dq_export(
     return {"count": len(items), "queries": items}
 
 
+@app.get("/admin/proxy_health")
+async def admin_proxy_health(authorization: str | None = Header(default=None)):
+    """Diagnostic for the validator egress path.
+
+    Validators in validators.py route through Evomi residential proxy when
+    EVOMI_PROXY is set. If the env var is empty or the proxy is rejecting
+    traffic, validations egress from the raw Railway IP — which providers
+    soft-ban, producing false-negative is_valid=0 for live keys (this is
+    the failure mode that wiped 200 keys at the 8 May revalidation tick).
+
+    Hits api.ipify.org through the configured proxy and returns the exit IP
+    so we can tell at a glance whether the proxy is up and which residential
+    IP we're currently presenting to provider APIs."""
+    _check_admin(authorization)
+    from validators import proxy_health_check
+    return await proxy_health_check()
+
+
 @app.get("/admin/mirror_stats")
 async def admin_mirror_stats(
     hours: int = 24, authorization: str | None = Header(default=None)
@@ -1835,13 +1853,27 @@ async def admin_validate_keys(
                         "is_valid": None, "saved": False, "error": "duplicate"})
             n_dupe += 1
             continue
-        try:
-            is_valid = await _validate(prov, key)
-        except Exception as e:
-            out.append({"provider": prov, "preview": key[:14] + "...",
-                        "is_valid": None, "saved": False,
-                        "error": f"validate_err:{type(e).__name__}"})
-            continue
+        # Trust-mirror path: when a mirror relays a find, it has already
+        # validated the key from its own egress IP (mirrors are not in the
+        # same provider blocklists as master). Re-validating from master's
+        # IP can flip True→False due to soft-bans/quotas at the IP level
+        # (200 OK + error body for HF, 401 for OpenAI, etc) and silently
+        # zero out our valid pool. If the mirror gave us its verdict and
+        # this batch came from source="mirror", honour it.
+        mirror_is_valid = entry.get("is_valid")
+        trust_mirror = (
+            src_lbl == "mirror" and isinstance(mirror_is_valid, bool)
+        )
+        if trust_mirror:
+            is_valid = mirror_is_valid
+        else:
+            try:
+                is_valid = await _validate(prov, key)
+            except Exception as e:
+                out.append({"provider": prov, "preview": key[:14] + "...",
+                            "is_valid": None, "saved": False,
+                            "error": f"validate_err:{type(e).__name__}"})
+                continue
         repo = (entry.get("repo")     or "manual")[:200]
         path = (entry.get("path")     or "")[:200]
         url  = (entry.get("file_url") or entry.get("url") or "")[:500]
