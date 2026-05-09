@@ -1848,11 +1848,6 @@ async def admin_validate_keys(
                         "error": "no_validator"})
             n_no_validator += 1
             continue
-        if db.key_exists(key):
-            out.append({"provider": prov, "preview": key[:14] + "...",
-                        "is_valid": None, "saved": False, "error": "duplicate"})
-            n_dupe += 1
-            continue
         # Trust-mirror path: when a mirror relays a find, it has already
         # validated the key from its own egress IP (mirrors are not in the
         # same provider blocklists as master). Re-validating from master's
@@ -1864,6 +1859,31 @@ async def admin_validate_keys(
         trust_mirror = (
             src_lbl == "mirror" and isinstance(mirror_is_valid, bool)
         )
+        if db.key_exists(key):
+            # Existing rows still need their is_valid kept in sync with the
+            # mirror's view — without this, every key flipped False during
+            # an outage stays False forever (master never re-checks unless
+            # revalidation_loop picks it from the is_valid=1 set, which a
+            # False row by definition is not in). On duplicate + trusted
+            # mirror payload, just upsert the validity flag.
+            if trust_mirror:
+                try:
+                    import hashlib as _hl
+                    h = _hl.sha256(key.encode()).hexdigest()
+                    db.update_key_validity(h, mirror_is_valid)
+                    out.append({"provider": prov, "preview": key[:14] + "...",
+                                "is_valid": mirror_is_valid, "saved": False,
+                                "updated": True, "error": "duplicate"})
+                except Exception as e:
+                    out.append({"provider": prov, "preview": key[:14] + "...",
+                                "is_valid": None, "saved": False,
+                                "error": f"duplicate_update_err:{type(e).__name__}"})
+            else:
+                out.append({"provider": prov, "preview": key[:14] + "...",
+                            "is_valid": None, "saved": False,
+                            "error": "duplicate"})
+            n_dupe += 1
+            continue
         if trust_mirror:
             is_valid = mirror_is_valid
         else:
