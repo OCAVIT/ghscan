@@ -1046,6 +1046,142 @@ def get_kaggle_dynamic_queries_for_export(max_age_days: int = 15) -> list[dict]:
         ).fetchall()]
 
 
+def kaggle_get_yield_stats() -> dict:
+    """Distribution of yield across kaggle_dynamic_queries on THIS service's
+    local DB. On mirror = real numbers (scanner runs here). On master =
+    numbers reflect what's been pulled via mirror_yield_sync (or zeros
+    if MIRROR_URLS is empty).
+
+    Buckets are designed to spot themer pathology at a glance:
+      - never_used: themer overshooting scan capacity (queries pile up)
+      - used_zero_kernels (>=3 uses): confirmed dead — Kaggle returns 0
+        results for these terms, themer should learn to avoid the pattern
+      - used_kernels_no_keys: kernels returned but extractor didn't catch
+        a key — usually means provider's keys aren't typically pasted in
+        public notebooks, or our regex misses the format
+      - keys_no_valid: keys found but all dead — provider rotates fast
+      - keys_valid: the goldmine — themer should mirror these patterns
+    """
+    with _conn() as c:
+        agg = c.execute("""
+            SELECT
+              COUNT(*)                                     AS total,
+              SUM(CASE WHEN times_used = 0 THEN 1 ELSE 0 END)        AS never_used,
+              SUM(CASE WHEN times_used >= 3 AND
+                            COALESCE(kernels_returned,0) = 0
+                       THEN 1 ELSE 0 END)                  AS dead,
+              SUM(CASE WHEN times_used > 0 AND
+                            COALESCE(kernels_returned,0) > 0 AND
+                            COALESCE(keys_found,0) = 0
+                       THEN 1 ELSE 0 END)                  AS no_keys,
+              SUM(CASE WHEN COALESCE(keys_found,0) > 0 AND
+                            COALESCE(valid_keys_found,0) = 0
+                       THEN 1 ELSE 0 END)                  AS keys_no_valid,
+              SUM(CASE WHEN COALESCE(valid_keys_found,0) > 0
+                       THEN 1 ELSE 0 END)                  AS keys_valid
+            FROM kaggle_dynamic_queries
+        """).fetchone()
+        top = c.execute("""
+            SELECT query_str, theme, times_used, kernels_returned,
+                   keys_found, valid_keys_found
+            FROM kaggle_dynamic_queries
+            WHERE COALESCE(valid_keys_found,0) > 0
+            ORDER BY valid_keys_found DESC, keys_found DESC
+            LIMIT 20
+        """).fetchall()
+        dead = c.execute("""
+            SELECT query_str, theme, times_used
+            FROM kaggle_dynamic_queries
+            WHERE times_used >= 3 AND COALESCE(kernels_returned,0) = 0
+            ORDER BY times_used DESC, generated_at DESC
+            LIMIT 20
+        """).fetchall()
+    return {
+        "total":              agg["total"] or 0,
+        "never_used":         agg["never_used"] or 0,
+        "dead_zero_kernels":  agg["dead"] or 0,
+        "kernels_no_keys":    agg["no_keys"] or 0,
+        "keys_no_valid":      agg["keys_no_valid"] or 0,
+        "keys_valid":         agg["keys_valid"] or 0,
+        "top_yielders":       [dict(r) for r in top],
+        "dead_examples":      [dict(r) for r in dead],
+    }
+
+
+def kaggle_get_dead_queries(min_uses: int = 3,
+                            max_kernels: int = 0,
+                            limit: int = 30) -> list[dict]:
+    """Queries that scanner has tried `min_uses` times and got at most
+    `max_kernels` kernels back. Themer reads this to construct negative
+    examples for its DS prompt."""
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT query_str, theme, times_used,
+                      COALESCE(kernels_returned,0) AS kernels_returned
+               FROM kaggle_dynamic_queries
+               WHERE times_used >= ?
+                 AND COALESCE(kernels_returned,0) <= ?
+               ORDER BY times_used DESC, generated_at DESC
+               LIMIT ?""",
+            (min_uses, max_kernels, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def kaggle_export_yield(min_used: int = 1) -> list[dict]:
+    """Mirror-side: dump rows with non-zero scan history so master can
+    merge yield numbers back into its copy of kaggle_dynamic_queries."""
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT query_hash, query_str,
+                      times_used,
+                      COALESCE(kernels_returned,0) AS kernels_returned,
+                      COALESCE(keys_found,0)       AS keys_found,
+                      COALESCE(valid_keys_found,0) AS valid_keys_found
+               FROM kaggle_dynamic_queries
+               WHERE times_used >= ?""",
+            (min_used,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def kaggle_merge_mirror_yield(rows: list[dict]) -> int:
+    """Master-side: merge a mirror's yield dump into local kaggle_dynamic_queries.
+
+    MAX semantics: each counter on the master row is updated to
+    max(existing, mirror_value). With two mirrors reporting independent
+    counts, master's row converges to the maximum either mirror has seen
+    — which is sufficient for themer's "is this query producing kernels"
+    question. SUM would double-count overlapping kernels between mirrors;
+    MAX under-counts but is monotonic and idempotent on repeated pulls.
+
+    Returns count of rows actually updated (i.e. the merge changed something
+    or the row existed)."""
+    if not rows:
+        return 0
+    n = 0
+    with _conn() as c:
+        for r in rows:
+            h = r.get("query_hash")
+            if not h:
+                continue
+            cur = c.execute(
+                """UPDATE kaggle_dynamic_queries SET
+                       times_used       = MAX(COALESCE(times_used,0), ?),
+                       kernels_returned = MAX(COALESCE(kernels_returned,0), ?),
+                       keys_found       = MAX(COALESCE(keys_found,0), ?),
+                       valid_keys_found = MAX(COALESCE(valid_keys_found,0), ?)
+                   WHERE query_hash = ?""",
+                (r.get("times_used", 0),
+                 r.get("kernels_returned", 0),
+                 r.get("keys_found", 0),
+                 r.get("valid_keys_found", 0),
+                 h),
+            )
+            n += cur.rowcount
+    return n
+
+
 def import_kaggle_dynamic_queries_from_master(items: list[dict]) -> tuple[int, int]:
     """Mirror-side bulk upsert of master's kaggle_dynamic_queries dump.
     Same semantics as import_dynamic_queries_from_master():

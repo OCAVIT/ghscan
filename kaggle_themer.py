@@ -175,7 +175,11 @@ def _validate_query(item: dict) -> dict | None:
 
 def _top_yielders(limit: int = 8) -> list[dict]:
     """Pull top-yielding kaggle queries (by valid_keys_found) for prompt
-    feedback. Returns rows from kaggle_dynamic_queries — empty on first run."""
+    feedback. Returns rows from kaggle_dynamic_queries — empty on first run.
+
+    On master DB this only has data when mirror_yield_sync is running
+    (MIRROR_URLS env set + master_api_token shared). Otherwise it falls
+    back to an empty list and the prompt skips the positive-examples block."""
     try:
         with db._conn() as c:
             rows = c.execute(
@@ -191,6 +195,38 @@ def _top_yielders(limit: int = 8) -> list[dict]:
         return []
 
 
+def _top_dead(limit: int = 15) -> list[dict]:
+    """Pull confirmed-dead queries (>=3 uses, 0 kernels) so DS gets explicit
+    negative examples in the prompt. Same caveat as _top_yielders: needs
+    mirror_yield_sync to be populating master's DB."""
+    try:
+        return db.kaggle_get_dead_queries(min_uses=3, max_kernels=0, limit=limit)
+    except Exception:
+        return []
+
+
+def _dead_queries_block(dead: list[dict]) -> str:
+    """Format dead queries as a negative-examples section for the user
+    prompt. Tells DS the patterns to avoid; without examples returns ""
+    so the prompt template doesn't show an empty section."""
+    if not dead:
+        return ""
+    bullets = "\n".join(
+        f'  • "{q["query_str"][:90]}" (tried {q["times_used"]}× → 0 kernels)'
+        for q in dead[:15]
+    )
+    return (
+        "\n\nDEAD QUERIES — DO NOT GENERATE ANYTHING STRUCTURALLY SIMILAR. "
+        "These queries were tried multiple times by scanner and returned ZERO "
+        "kernels from Kaggle (either too narrow, no longer indexed, or the "
+        "literal string never appears in notebook content):\n"
+        + bullets
+        + "\n\nLearn the PATTERN of what fails (e.g. very long compound queries, "
+        "obscure variable names that don't show up in tutorials, model aliases "
+        "that aren't actually used in code). Diversify away from these shapes."
+    )
+
+
 async def generate_kaggle_themed_batch(target_count: int = TARGET_QUERIES_PER_BATCH) -> int:
     """One batch of Kaggle creative queries via DeepSeek/GLM. Returns
     count of NEW rows inserted (15-day dedup enforced)."""
@@ -199,9 +235,11 @@ async def generate_kaggle_themed_batch(target_count: int = TARGET_QUERIES_PER_BA
              len(forbidden))
 
     yielders = _top_yielders()
+    dead = _top_dead()
+    user_prompt = _build_user_prompt(target_count, yielders) + _dead_queries_block(dead)
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user",   "content": _build_user_prompt(target_count, yielders)},
+        {"role": "user",   "content": user_prompt},
     ]
 
     text, source = await call_creative(
@@ -292,9 +330,10 @@ async def generate_kaggle_cn_batch(target_count: int = 30) -> int:
     forbidden = db.kaggle_get_recent_query_hashes(days=15)
     log.info("kaggle_cn_themer: starting — %d hashes in 15-day window", len(forbidden))
 
+    dead = _top_dead()
     messages = [
         {"role": "system", "content": _CN_SYSTEM_PROMPT},
-        {"role": "user",   "content": _build_cn_prompt(target_count)},
+        {"role": "user",   "content": _build_cn_prompt(target_count) + _dead_queries_block(dead)},
     ]
 
     text, source = await call_creative(
@@ -396,9 +435,10 @@ async def generate_kaggle_premium_batch(target_count: int = 30) -> int:
     forbidden = db.kaggle_get_recent_query_hashes(days=15)
     log.info("kaggle_premium_themer: starting — %d hashes in 15-day window", len(forbidden))
 
+    dead = _top_dead()
     messages = [
         {"role": "system", "content": _PREMIUM_SYSTEM_PROMPT},
-        {"role": "user",   "content": _build_premium_prompt(target_count)},
+        {"role": "user",   "content": _build_premium_prompt(target_count) + _dead_queries_block(dead)},
     ]
 
     text, source = await call_creative(

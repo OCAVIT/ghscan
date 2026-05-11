@@ -59,6 +59,7 @@ from query_generator import generate_batch as generate_combo_batch, auto_blackli
 from query_themer import generate_themed_batch
 from kaggle_themer import generate_kaggle_themed_batch, generate_kaggle_cn_batch, generate_kaggle_premium_batch
 from kaggle_mutator import generate_mutated_batch, generate_cartesian_batch
+from mirror_yield_sync import yield_sync_loop
 from web_dork_scanner import web_dork_loop, run_web_dork_cycle
 # replit_scanner Phase 2 dropped 2026-05-06 — Replit blocks anonymous bot
 # access to /@user/repl pages (404/403), and Google/firecrawl don't index
@@ -285,6 +286,14 @@ async def _kaggle_mutator_loop():
         await asyncio.sleep(15 * 60)
 
 
+async def _mirror_yield_loop():
+    """Wraps mirror_yield_sync.yield_sync_loop with a 5-min boot offset so
+    the first pull lands AFTER mirrors have had time to register their
+    own routes and accept admin requests. No-op if MIRROR_URLS is empty."""
+    await asyncio.sleep(5 * 60)
+    await yield_sync_loop()
+
+
 async def _auto_jackpot_loop():
     """Auto-jackpot probe — every 1h, picks up to 30 unprobed
     is_validated=1 rows and runs the full jackpot pipeline (Vault probe +
@@ -482,6 +491,10 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_kaggle_cn_themer_loop(),   name="kaggle_cn_themer"),
             asyncio.create_task(_kaggle_premium_loop(),     name="kaggle_premium_themer"),
             asyncio.create_task(_kaggle_mutator_loop(),     name="kaggle_mutator"),
+            # Pulls per-query yield stats from each mirror into master DB
+            # every MIRROR_YIELD_SYNC_SEC so themer's positive/negative
+            # feedback paths have real numbers. No-op when MIRROR_URLS empty.
+            asyncio.create_task(_mirror_yield_loop(),       name="mirror_yield_sync"),
             # replit_loop dropped — see replit_scanner import-block comment.
             # web_dork dropped 2026-05-07 — DDG IP-bans Railway after first cycle.
             # Firecrawl SERP cached identical results across cycles (0 valid in 8h).
@@ -1161,6 +1174,38 @@ async def admin_kaggle_dq_export(
     max_age_days = max(1, min(max_age_days, 60))
     items = db.get_kaggle_dynamic_queries_for_export(max_age_days=max_age_days)
     return {"count": len(items), "queries": items}
+
+
+@app.get("/admin/yield_stats")
+async def admin_yield_stats(authorization: str | None = Header(default=None)):
+    """Per-query yield distribution for kaggle_dynamic_queries on this service.
+
+    On a mirror: real numbers (scanner runs here).
+    On master: numbers reflect what mirror_yield_sync has pulled (zeros
+    if MIRROR_URLS is empty).
+
+    Use this to answer "are we hitting a themer ceiling" — high never_used
+    means themer over-produces, high dead_zero_kernels means themer's
+    patterns don't index on Kaggle anymore (time to add negative-example
+    feedback in the prompt), high keys_no_valid means provider rotates
+    faster than we can scan."""
+    _check_admin(authorization)
+    return db.kaggle_get_yield_stats()
+
+
+@app.get("/admin/kaggle_yield_export")
+async def admin_kaggle_yield_export(
+    min_used: int = 1,
+    authorization: str | None = Header(default=None),
+):
+    """Mirror-side: dump kaggle_dynamic_queries rows with non-zero scan
+    history. Master's mirror_yield_sync loop pulls this every 30 min and
+    merges into its local copy so themer's positive/negative feedback
+    paths see real numbers."""
+    _check_admin(authorization)
+    min_used = max(1, min_used)
+    rows = db.kaggle_export_yield(min_used=min_used)
+    return {"count": len(rows), "rows": rows}
 
 
 @app.get("/admin/proxy_health")

@@ -90,6 +90,23 @@ MIRROR_BATCH_MAX  = int(os.environ.get("MIRROR_BATCH_MAX", "200"))    # max item
 # cycle of the latest queries. Set 0 to disable sync (mirrors use static only).
 MIRROR_QUERY_SYNC_SEC = int(os.environ.get("MIRROR_QUERY_SYNC_SEC", "1800"))
 
+# Master ←- mirror yield sync: master pulls real per-query yield from each
+# mirror via /admin/kaggle_yield_export so themer (which runs on master)
+# can see which themes/queries are actually producing kernels on Kaggle.
+# Without this, master's kaggle_dynamic_queries has yield=0 for every row
+# (kaggle scanner runs only on mirrors), and themer's positive-feedback +
+# dead-query negative-feedback paths are starved.
+#
+# Comma-separated public URLs of mirror services, e.g.
+#   MIRROR_URLS=https://ghscan-mirror-1-production.up.railway.app,https://ghscan-mirror-2-production.up.railway.app
+# Empty disables yield sync (master falls back to local-only yield data).
+MIRROR_URLS: list[str] = [
+    u.strip().rstrip("/")
+    for u in os.environ.get("MIRROR_URLS", "").split(",")
+    if u.strip()
+]
+MIRROR_YIELD_SYNC_SEC = int(os.environ.get("MIRROR_YIELD_SYNC_SEC", "1800"))
+
 # ── DB maintenance ─────────────────────────────────────────────────────────
 # Low-risk infra findings older than this many days are pruned automatically.
 INFRA_LOW_RISK_MAX_DAYS = int(os.environ.get("INFRA_LOW_RISK_MAX_DAYS", "30"))
